@@ -17,7 +17,8 @@ class ConfigEntry(BaseModel):
     """一个配置文件的位置和来源"""
     source: ConfigSource
     path: Path
-    model_config = {"Frozen": True}
+    model_config = {"Frozen": True, "arbitrary_types_allowed": True}
+
 
 class ConfigError(Exception):
     def __init__(self, message: str, kind: str = "parse"):

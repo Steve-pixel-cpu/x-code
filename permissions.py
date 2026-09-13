@@ -43,6 +43,7 @@ class PermissionResult(BaseModel):
     decision: PermissionDecision
     reason: str
 
+
 class PermissionRequest(BaseModel):
     tool_name: str
     input: str
