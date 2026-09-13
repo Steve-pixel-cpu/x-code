@@ -1,4 +1,4 @@
-from typing import Callable
+from typing import Callable, Self
 from pydantic import BaseModel
 import subprocess
 import json
@@ -7,7 +7,7 @@ import json
 class ToolRegistry(BaseModel):
     _handlers: dict[str, Callable]
 
-    def register(self, name: str, handler: Callable) -> ToolRegistry:
+    def register(self, name: str, handler: Callable) -> Self:
         if name in self._handlers:
             raise ValueError(f"Tool already registered: {name}")
         self._handlers[name] = handler
