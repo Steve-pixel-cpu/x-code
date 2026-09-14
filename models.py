@@ -45,7 +45,7 @@ AnyContentBlock = Annotated[
 
 class Message(BaseModel):
     role: Literal['user', 'assistant', 'tool']
-    content: list[ContentBlock] = Field(default_factory=list)
+    content: list[AnyContentBlock] = Field(default_factory=list)
     model_config = {"frozen": True}
 
     @classmethod
@@ -62,7 +62,7 @@ class Message(BaseModel):
 
 
 class Session(BaseModel):
-    message: list[Message] = Field(default_factory=list)
+    messages: list[Message] = Field(default_factory=list)
 
 
 if __name__ == '__main__':

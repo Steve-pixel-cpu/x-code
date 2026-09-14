@@ -1,0 +1,4 @@
+{"uuid": "8945b347-5b08-46a2-9fda-70805af5391a", "parent_uuid": null, "message": {"role": "user", "content": [{"type": "text", "text": "你好"}]}, "timestamp": "2026-09-14T07:28:13.855761+00:00"}
+{"uuid": "cb68e9b2-9ade-49c3-b2de-0cb8e016c9e2", "parent_uuid": "8945b347-5b08-46a2-9fda-70805af5391a", "message": {"role": "user", "content": [{"type": "text", "text": "在吗"}]}, "timestamp": "2026-09-14T07:28:13.856736+00:00"}
+{"uuid": "221db10e-2fc0-4f2e-84a8-a64e375f7deb", "parent_uuid": "cb68e9b2-9ade-49c3-b2de-0cb8e016c9e2", "message": {"role": "user", "content": [{"type": "text", "text": "写数学题"}]}, "timestamp": "2026-09-14T07:28:13.857341+00:00"}
+{"uuid": "d0235dd6-3ad8-4419-8b3b-faefd2dcfdd5", "parent_uuid": "221db10e-2fc0-4f2e-84a8-a64e375f7deb", "message": {"role": "user", "content": [{"type": "text", "text": "答案是1"}]}, "timestamp": "2026-09-14T07:33:37.252976+00:00"}
