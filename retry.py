@@ -60,7 +60,6 @@ def send_with_retry(
     max_backoff_ms: int = DEFAULT_MAX_BACKOFF_MS,
 ) -> T:
     retry_count = 0
-    last_error : ApiError | None = None
     while True:
         retry_count += 1
 

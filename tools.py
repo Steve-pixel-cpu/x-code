@@ -20,7 +20,7 @@ class ToolRegistry(BaseModel):
         try:
             params = json.loads(tool_input_json) if tool_input_json else {}
         except json.JSONDecodeError:
-            return "Invalid JSON input: {tool_input_json}"
+            return f"Invalid JSON input: {tool_input_json}"
 
         try:
             result = self._handlers[name](params)
