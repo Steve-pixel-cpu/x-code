@@ -170,7 +170,7 @@ class ConversationRuntime:
     def usage(self)-> UsageTracker:
         return self._usage_tracker
 
-    def _process_tool_use(self, tool_block: ToolContentBlock, prompter: Optional[PermissionPrompter]=None)-> Message:
+    def _process_tool_use(self, tool_block: ToolContentBlock, prompter: Optional[PermissionPrompter]=None)-> Message | None:
 
         result = self._permission_policy.authorize(
             tool_name=tool_block.name,
@@ -200,8 +200,7 @@ class ConversationRuntime:
                     output = pre_output,
                     is_error = True,
                 )
-            output = ""
-            tool_output = ""
+
             is_tool_error = False
             try:
                 output = self._tool_executor.execute(
@@ -279,8 +278,9 @@ class ConversationRuntime:
 
             for block in tool_use_blocks:
                 tool_result_msg = self._process_tool_use(block,prompter)
-                curr_session.messages.append(tool_result_msg)
-                tool_results.append(tool_result_msg)
+                if tool_result_msg:
+                    curr_session.messages.append(tool_result_msg)
+                    tool_results.append(tool_result_msg)
 
         auto_compacted = self._maybe_auto_compact()
 
