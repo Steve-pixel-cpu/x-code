@@ -2,7 +2,6 @@ import json
 import os
 import subprocess
 from enum import Enum
-from sys import stderr
 from typing import Optional
 
 from pydantic import BaseModel, Field
@@ -31,11 +30,10 @@ class HookResult(BaseModel):
 
 
 class HookRunner:
-    pre_tool_use: list[str] = Field(default_factory=list)
-    post_tool_use: list[str] = Field(default_factory=list)
-    def __init__(self, pre_tool_use: list[str], post_tool_use: list[str]):
-        self.pre_tool_use = pre_tool_use
-        self.post_tool_use = post_tool_use
+
+    def __init__(self, pre_tool_use: Optional[list[str]] = None, post_tool_use: Optional[list[str]] = None):
+        self.pre_tool_use = pre_tool_use or []
+        self.post_tool_use = post_tool_use or []
 
     @classmethod
     def from_config(cls, config) -> "HookRunner":
@@ -101,6 +99,7 @@ class HookRunner:
                 env=env,
             )
             stdout = result.stdout.strip()
+            stderr = result.stderr.strip()
             exit_code = result.returncode
             if exit_code == 0:
                 # 退出码 0 → 允许
