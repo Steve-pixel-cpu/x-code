@@ -219,6 +219,15 @@ def print_status(runtime: "ConversationRuntime") -> None:
     print(f"  {'messages':<16}{messages:>10,}")
     print(line)
 
+def do_compact(runtime: ConversationRuntime):
+    try:
+        msg = runtime.compact()
+        print(msg)
+    except Exception as e:
+        print(f"Compact failed! Error: {str(e)}")
+
+
+
 # --- REPL ---
 def run_repl(runtime: ConversationRuntime,
              prompter: PermissionPrompter,
@@ -248,21 +257,21 @@ def run_repl(runtime: ConversationRuntime,
             elif cmd == SlashCommand.STATUS:
                 print_status(runtime)
             elif cmd == SlashCommand.COMPACT:
-                runtime.compact()
-
+                do_compact(runtime)
 
         else:
             print("--------------------------------------")
             try:
-                for msg in runtime.session().messages[idx_before+1:]:
-                    store.save_message(
+                runtime.run_turn(text, prompter)
+
+                for msg in runtime.session().messages[idx_before + 1:]:
+                    last_uuid = store.save_message(
                         session_id=session_id,
                         message=msg,
                         parent_uuid=last_uuid,
                     )
-                idx_before = len(runtime.session().messages[idx_before+1:]) -1
+                idx_before = len(runtime.session().messages) - 1
 
-                runtime.run_turn(text, prompter)
             except Exception as e:
                 print("Error: {}".format(e))
                 continue
@@ -317,10 +326,11 @@ def main():
     args = sys.argv[1:]
     if not args:
         start(session_store=session_store, session_id=session_id)
-    if args[1] == "--list":
+        return
+    elif args[0] == "--list":
         print(session_store.list_sessions())
-    elif args[1] == "--resume":
-        session_id = args[2]
+    elif args[0] == "--resume":
+        session_id = args[1]
         session_id_list = session_store.list_sessions()
         if session_id in session_id_list:
             start(session_store=session_store,session_id=session_id)

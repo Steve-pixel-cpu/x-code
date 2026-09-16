@@ -107,7 +107,7 @@ class ClaudeApiClient(ApiClient):
         kwargs = {
             "model": self.model,
             "messages": _convert_message(messages),
-            "system_prompt": _system_prompt,
+            "system": _system_prompt,
             "max_tokens": 8096,
 
         }
@@ -117,25 +117,48 @@ class ClaudeApiClient(ApiClient):
 
         import sys as _sys
         with self.client.messages.stream(**kwargs) as stream:
+            blocks = {}
             for event in stream:
-                if event.type == 'content_block_delta':
-                    if self.emit_output:
-                        if not streaming_text:
-                            _sys.stdout.write("\n")
-                            streaming_text = True
-                        _sys.stdout.write(event.delta.text)
-                        _sys.stdout.flush()
-                    events.append(TextDeltaEvent(text=event.delta.text))
+                if event.type == 'content_block_start':
+                    cb = event.content_block
+                    if cb.type == "tool_use":
+                        blocks[event.index] = {
+                            "type": "tool_use",
+                            "id": cb.id,
+                            "name": cb.name,
+                            "json": ""
+                        }
+                    else:
+                        blocks[event.index] = {
+                            "type": cb.type,
 
+                        }
+
+
+                elif event.type == 'content_block_delta':
+                    if event.delta.type == 'text_delta':
+                        if self.emit_output:
+                            if not streaming_text:
+                                _sys.stdout.write("\n")
+                                streaming_text = True
+                            _sys.stdout.write(event.delta.text)
+                            _sys.stdout.flush()
+                        events.append(TextDeltaEvent(text=event.delta.text))
+                    elif event.delta.type == 'input_json_delta':
+                        blocks.get(event.index,{"json":""})["json"] += event.delta.partial_json
+
+                    else:
+                        #暂不考虑思考块
+                        pass
                 elif event.type == 'content_block_stop':
-                    if event.content_block.type == 'tool_use':
+                    info = blocks.pop(event.index, None)
+                    if info and info["type"] == "tool_use":
                         if self.emit_output and streaming_text:
                             _sys.stdout.write("\n")
                             _sys.stdout.flush()
                             streaming_text = False
-                    events.append(ToolUseEvent(id=event.content_block.id,
-                                               name=event.content_block.name,
-                                               input=event.content_block.input))
+
+                        events.append(ToolUseEvent(id=info["id"], name=info["name"], input=info["json"] or "{}"))
 
                 elif event.type == 'message_stop':
                     if self.emit_output and streaming_text:

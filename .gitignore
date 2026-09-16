@@ -20,4 +20,4 @@ bin-release/
 .idea/
 __pycache__/
 __pycache__/models.cpython-314.pyc
-uv.lock
+.env
