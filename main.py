@@ -13,15 +13,19 @@ from dotenv import load_dotenv
 from api_client import ApiClient, ClaudeApiClient
 from config import RuntimeConfig, ConfigLoader
 from hooks import HookRunner
-from models import Session, Message
+from models import Session
+from permissions import (
+    DANGER_FULL_ACCESS_MODE,
+    ALLOW_MODE, MODE_TO_NAME, NAME_TO_MODE,
+)
 from permissions import PermissionRequest, PermissionResult, PermissionMode, PermissionPolicy, PermissionDecision, \
     PermissionPrompter
 from prompt import SystemPromptBuilder
 from runtime import ConversationRuntime
 from storage import SessionStore
-from tools import ToolRegistry, bash_tool, read_tool, write_tool
+from tools import ToolRegistry, bash_tool, read_tool, write_tool, powershell_tool
 
-DEFAULT_MODEL = "claude-opus-4-6"
+DEFAULT_MODEL = "claude-sonnet-5"
 bash_spec = {
     "name": "bash",
     "description": (
@@ -30,7 +34,10 @@ bash_spec = {
         "Use this for listing files, running scripts, git operations, "
         "installing dependencies, and other command-line tasks. "
         "Commands time out after 30 seconds, so avoid long-running or "
-        "interactive commands."
+        "interactive commands. "
+        "Note: on Windows this runs through PowerShell (there is no sh), "
+        "so use PowerShell-compatible syntax; bash-only constructs such as "
+        "'&&' chains, subshells, or GNU grep/sed flags may not work."
     ),
     "input_schema": {
         "type": "object",
@@ -39,7 +46,34 @@ bash_spec = {
                 "type": "string",
                 "description": (
                     "The shell command to execute, e.g. 'ls -la' or "
-                    "'python script.py'. Must be non-interactive."
+                    "'python script.py'. Must be non-interactive. "
+                    "On Windows, write PowerShell-compatible commands."
+                ),
+            },
+        },
+        "required": ["command"],
+    },
+}
+
+powershell_spec = {
+    "name": "powershell",
+    "description": (
+        "Execute a command in Windows PowerShell and return its output. "
+        "stdout is returned as-is; stderr is appended if present. "
+        "Use this for Windows-specific tasks: services, registry, scheduled "
+        "tasks, ACLs, WMI/CIM queries, Get-ChildItem -Recurse, and other "
+        "PowerShell cmdlets. Commands time out after 30 seconds, so avoid "
+        "long-running or interactive commands."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "command": {
+                "type": "string",
+                "description": (
+                    "The PowerShell command to execute, e.g. "
+                    "'Get-Process | Select-Object -First 5' or "
+                    "'Get-Service'. Must be non-interactive."
                 ),
             },
         },
@@ -98,12 +132,13 @@ write_file_spec = {
         "required": ["path", "content"],
     },
 }
-TOOLS = [bash_spec, read_file_spec, write_file_spec]
+TOOLS = [bash_spec, powershell_spec, read_file_spec, write_file_spec]
 
 class SlashCommand(Enum):
     HELP = "help"
     STATUS = "status"
     COMPACT = "compact"
+    MODE = "mode"
     EXIT = "exit"
     UNKNOWN = "unknown"
 
@@ -118,7 +153,10 @@ def parse_slash_command(input: str) -> Optional[SlashCommand]:
     command_map = {cmd.value: cmd for cmd in SlashCommand}
     if not input or not input.startswith("/"):
         return None
-    return command_map.get(input[1:].strip(), SlashCommand.UNKNOWN)
+    body = input[1:].strip()
+    # 命令后可带参数（如 /mode read-only）: 只取第一个 token 匹配命令名
+    name = body.split()[0] if body else ""
+    return command_map.get(name, SlashCommand.UNKNOWN)
 
 
 class CliPermissionPrompter:
@@ -161,9 +199,9 @@ class CliToolExecutor:
 def build_runtime(session: Session,
                   api_client: ApiClient,
                   registry: ToolRegistry,
-                  permission_mode: PermissionMode,
-                  system_prompt: list[str],
-                  hooks_config: RuntimeConfig) -> ConversationRuntime:
+                  permission_mode: PermissionMode = DANGER_FULL_ACCESS_MODE,
+                  system_prompt: list[str] = None,
+                  hooks_config: RuntimeConfig = None) -> ConversationRuntime:
     permission_policy = PermissionPolicy(
         active_mode = permission_mode,
     )
@@ -177,14 +215,33 @@ def build_runtime(session: Session,
         permission_policy=permission_policy,
         session=session,
     )
-    
+
     return running_time
+
+def resolve_permission_mode(runtime_config: RuntimeConfig) -> PermissionMode:
+    """决定启动时的权限模式。
+
+    默认 danger-full-access; 配置里设置了 permissionMode 就用配置值。
+
+    注意: 这里故意不认 "allow" — allow 会连将来注册为需要
+    prompt/allow 的工具也一并放行, 所以只允许在 REPL 里用
+    /mode allow 临时开启, 不允许从配置文件进入。
+    (config.py 的 mode_map 本就不接受 "allow", 这里再兜底一次,
+    防止将来改动配置解析时把洞重新引入。)
+    """
+    mode_name = runtime_config.permission_mode()
+    if mode_name:
+        mode = NAME_TO_MODE.get(mode_name)
+        if mode is not None and mode != ALLOW_MODE:
+            return mode
+        print(f"配置里的权限模式无效: {mode_name!r}, 回退到 danger-full-access")
+    return DANGER_FULL_ACCESS_MODE
 
 BANNER_ART = r"""
  __  __        ____ ___  ____  _____
  \ \/ /       / ___/ _ \|  _ \| ____|
   \  /  _____| |  | | | | | | |  _|
-  /  \ |_____| |__| |_| | |_| | |___
+  /  \ |_____| |__| |_| | |_| | |___|
  /_/\_\       \____\___/|____/|_____|
 """
 def print_banner(name: str = "X-CODE", width: int = 40) -> None:
@@ -193,6 +250,20 @@ def print_banner(name: str = "X-CODE", width: int = 40) -> None:
     print(name.center(width))
     print("/help 看命令".center(width))
     print("=" * width)
+
+def switch_mode(runtime: ConversationRuntime, mode_name: str) -> None:
+    """切换权限模式: /mode 不带参数 = 打印当前模式与可选值; /mode <name> = 切换。"""
+    if not mode_name:
+        print(f"当前权限模式: {runtime.permission_mode().as_str()}")
+        print(f"可选: {' | '.join(MODE_TO_NAME.values())}")
+        return
+    mode = NAME_TO_MODE.get(mode_name.strip().lower())
+    if mode is None:
+        print(f"未知模式: {mode_name}")
+        print(f"可选: {' | '.join(MODE_TO_NAME.values())}")
+        return
+    runtime.set_permission_mode(mode)
+    print(f"权限模式已切换: {mode.as_str()}")
 
 def print_status(runtime: "ConversationRuntime") -> None:
     """打印当前会话的用量收据。"""
@@ -235,6 +306,7 @@ def run_repl(runtime: ConversationRuntime,
              session_id: str,
              last_uuid: Optional[str]):
     print_banner()
+    print(f"权限模式: {runtime.permission_mode().as_str()} (切换: /mode <name>)")
     idx_before = -1
     while True:
         try:
@@ -258,6 +330,9 @@ def run_repl(runtime: ConversationRuntime,
                 print_status(runtime)
             elif cmd == SlashCommand.COMPACT:
                 do_compact(runtime)
+            elif cmd == SlashCommand.MODE:
+                mode_name = text[5:].strip()
+                switch_mode(runtime, mode_name)
 
         else:
             print("--------------------------------------")
@@ -289,7 +364,9 @@ def start(session_store:SessionStore,session_id:str):
     session_load = session_store.load_session(session_id)
     session_msgs = session_load[0]
     last_uuid = session_load[1]
-    registry.register(name="bash", handler=bash_tool).register(name="read_file", handler=read_tool).register(
+    registry.register(name="bash", handler=bash_tool).register(
+        name="powershell", handler=powershell_tool).register(
+        name="read_file", handler=read_tool).register(
         name="write_file", handler=write_tool)
 
     config_loader = ConfigLoader(
@@ -307,7 +384,7 @@ def start(session_store:SessionStore,session_id:str):
         api_client=api_client,
         system_prompt=system_prompt,
         registry=registry,
-        permission_mode=PermissionMode.WORKSPACE_WRITE,
+        permission_mode=resolve_permission_mode(runtime_config),
         hooks_config=runtime_config,
         session= Session(
             messages=session_msgs,
@@ -344,4 +421,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

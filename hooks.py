@@ -99,6 +99,8 @@ class HookRunner:
                 text=True,
                 timeout=30,
                 env=env,
+                encoding="utf-8",
+                errors="replace"
             )
             stdout = result.stdout.strip()
             stderr = result.stderr.strip()

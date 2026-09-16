@@ -59,7 +59,7 @@ def _read_git_status(cwd: Path) -> Optional[str]:
     try:
         result = subprocess.run(
             ["git", "--no-optional-locks", "status", "--short", "--branch"],
-            cwd=cwd, capture_output=True, text=True, timeout=10,
+            cwd=cwd, capture_output=True, text=True, timeout=10,encoding="utf-8", errors="replace"
         )
     except (FileNotFoundError, subprocess.TimeoutExpired):
         return None
@@ -87,7 +87,7 @@ def _read_git_output(cwd: Path, args: list[str]) -> Optional[str]:
     """源码: prompt.rs:265-275"""
     try:
         result = subprocess.run(
-            ["git"] + args, cwd=cwd, capture_output=True, text=True, timeout=10,
+            ["git"] + args, cwd=cwd, capture_output=True, text=True, timeout=10,encoding="utf-8", errors="replace"
         )
     except (FileNotFoundError, subprocess.TimeoutExpired):
         return None

@@ -35,6 +35,23 @@ class PermissionMode(IntEnum):
             self.ALLOW: "allow",
         }[self]
 
+# --- 模式名 <-> 枚举: /mode 命令的参数解析与显示用 ---
+READ_ONLY_MODE = PermissionMode.READ_ONLY
+WORKSPACE_WRITE_MODE = PermissionMode.WORKSPACE_WRITE
+DANGER_FULL_ACCESS_MODE = PermissionMode.DANGER_FULL_ACCESS
+PROMPT_MODE = PermissionMode.PROMPT
+ALLOW_MODE = PermissionMode.ALLOW
+
+MODE_TO_NAME = {
+    READ_ONLY_MODE: "read-only",
+    WORKSPACE_WRITE_MODE: "workspace-write",
+    DANGER_FULL_ACCESS_MODE: "danger-full-access",
+    PROMPT_MODE: "prompt",
+    ALLOW_MODE: "allow",
+}
+
+NAME_TO_MODE = {name: mode for mode, name in MODE_TO_NAME.items()}
+
 class PermissionDecision(Enum):
     ALLOW = "allow"
     DENY = "deny"
@@ -75,6 +92,11 @@ class PermissionPolicy:
     @property
     def active_mode(self) -> PermissionMode:
         return self._active_mode
+
+    def set_mode(self, mode: PermissionMode) -> Self:
+        """切换当前权限模式（运行时可随时调用，如 /mode 命令）。"""
+        self._active_mode = mode
+        return self
 
     def authorize(self, tool_name: str, input: str, prompter: Optional[PermissionPrompter] = None,) -> PermissionResult:
         current = self.active_mode

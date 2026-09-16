@@ -6,7 +6,7 @@ from api_client import AssistantEvent, TextDeltaEvent, ToolUseEvent, MessageStop
 from compact import compact_session, CompactionConfig
 from hooks import HookRunner
 from models import Message, TextContentBlock, AnyContentBlock, ToolContentBlock, Session
-from permissions import PermissionPolicy, PermissionPrompter, PermissionDecision
+from permissions import PermissionMode, PermissionPolicy, PermissionPrompter, PermissionDecision
 
 DEFAULT_MAX_ITERATIONS = 128
 DEFAULT_AUTO_COMPACT_THRESHOLD =  200_000
@@ -169,6 +169,12 @@ class ConversationRuntime:
 
     def usage(self)-> UsageTracker:
         return self._usage_tracker
+
+    def permission_mode(self) -> PermissionMode:
+        return self._permission_policy.active_mode
+
+    def set_permission_mode(self, mode: PermissionMode) -> None:
+        self._permission_policy.set_mode(mode)
 
     def _process_tool_use(self, tool_block: ToolContentBlock, prompter: Optional[PermissionPrompter]=None)-> Message | None:
 
