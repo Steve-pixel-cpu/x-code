@@ -3,9 +3,13 @@ from pydantic import BaseModel
 import subprocess
 import json
 
+from runtime import ToolError
 
-class ToolRegistry(BaseModel):
-    _handlers: dict[str, Callable]
+
+class ToolRegistry():
+    def __init__(self):
+        self._handlers = {}
+
 
     def register(self, name: str, handler: Callable) -> Self:
         if name in self._handlers:
@@ -15,22 +19,21 @@ class ToolRegistry(BaseModel):
 
     def execute(self, name: str, tool_input_json: str) -> str:
         if name not in self._handlers:
-            return f"Unknown tool: {name}"
+            raise ToolError(f"Unknown tool: {name}")
 
         try:
             params = json.loads(tool_input_json) if tool_input_json else {}
         except json.JSONDecodeError:
-            return f"Invalid JSON input: {tool_input_json}"
+            raise ToolError(f"Invalid JSON input: {tool_input_json}")
 
         try:
             result = self._handlers[name](params)
             return result
         except Exception as e:
-            return f"Tool execution error: {e}"
+            raise ToolError(f"Tool execution error: {e}")
 
-def bash_tool(input_json:str):
-    data = json.loads(input_json)
-    cmd = data['command']
+def bash_tool(params:dict):
+    cmd = params.get('command',"")
     try:
         result = subprocess.run(
             cmd,
@@ -46,9 +49,8 @@ def bash_tool(input_json:str):
     except subprocess.TimeoutExpired:
         return 'ERROR: timeout for 30s'
 
-def read_tool(input_json:str) -> str:
-    data = json.loads(input_json) if input_json else {}
-    path = data.get('path', '')
+def read_tool(params:dict) -> str:
+    path = params.get('path', '')
     try:
         with open(path, 'r') as f:
             content = f.read()
@@ -56,10 +58,9 @@ def read_tool(input_json:str) -> str:
         return f'ERROR: file not found {path}'
     return content
 
-def write_tool(input_json:str) -> str:
-    data = json.loads(input_json)
-    path = data.get('path', '')
-    content = data.get('content', '')
+def write_tool(params:dict) -> str:
+    path = params.get('path', '')
+    content = params.get('content', '')
     try:
         with open(path, 'w') as f:
             f.write(content)
