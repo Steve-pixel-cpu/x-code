@@ -469,7 +469,8 @@ def run_repl(runtime: ConversationRuntime,
                 continue
             texts = [b.text for b in msg.content if isinstance(b, TextContentBlock)]
             if texts:
-                print(c_dim(indent_block(truncate_line(one_line(" ".join(texts))))))
+                # 完整回放, 不截断: 恢复时就该看清上次聊到哪
+                print(c_dim(indent_block(" ".join(texts))))
                 break
     idx_before = len(existing) - 1
     ctrl_c_pending = False  # 连续两次 Ctrl+C 才退出, 第一次只提示
