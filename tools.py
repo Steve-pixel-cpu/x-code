@@ -43,6 +43,7 @@ def bash_tool(params:dict):
         result = subprocess.run(
             ["sh", "-lc", cmd],  # 用 shell 执行命令
             capture_output=True,
+            stdin=subprocess.DEVNULL,
             text=True,
             timeout=30,
             encoding="utf-8",
@@ -69,6 +70,7 @@ def powershell_tool(params: dict) -> str:
                 + cmd,
             ],
             capture_output=True,
+            stdin=subprocess.DEVNULL,
             text=True,
             timeout=30,
             encoding="utf-8",

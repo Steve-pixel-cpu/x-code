@@ -14,7 +14,7 @@ from dotenv import load_dotenv
 from api_client import ApiClient, ClaudeApiClient
 from config import RuntimeConfig, ConfigLoader
 from hooks import HookRunner
-from models import Session
+from models import Session, TextContentBlock
 from permissions import (
     DANGER_FULL_ACCESS_MODE,
     ALLOW_MODE, MODE_TO_NAME, NAME_TO_MODE,
@@ -440,7 +440,21 @@ def run_repl(runtime: ConversationRuntime,
     setup_console()  # 幂等兜底: 直接进 REPL 的路径也保证 UTF-8 + VT
     print_banner()
     print(f"权限模式: {runtime.permission_mode().as_str()} (切换: /mode <name>)")
-    idx_before = -1
+
+    # 恢复的会话: 提示已加载 + 回放最后一条 assistant 文本(上次聊到哪),
+    # 全量历史不刷屏——与真实 Claude Code 的恢复行为一致。
+    # idx_before 指向末尾而非 -1: 否则恢复后第一轮会把全部旧消息重复写盘。
+    existing = runtime.session().messages
+    if existing:
+        print(c_dim(f"✓ 已恢复会话 {session_id}（{len(existing)} 条消息）"))
+        for msg in reversed(existing):
+            if msg.role != "assistant":
+                continue
+            texts = [b.text for b in msg.content if isinstance(b, TextContentBlock)]
+            if texts:
+                print(c_dim(indent_block(truncate_line(one_line(" ".join(texts))))))
+                break
+    idx_before = len(existing) - 1
     while True:
         try:
             text = input("x-code> ").strip()
@@ -531,6 +545,17 @@ def start(session_store:SessionStore,session_id:str):
 
 
 # --- 入口 ---
+def usage() -> None:
+    """打印所有入口的用法。参数写错时也走这里。"""
+    print("用法: python main.py [选项]")
+    print()
+    print("选项:")
+    print("  (无参数)        新会话")
+    print("  -c, --continue  恢复最近一次会话")
+    print("  --resume <id>   恢复指定会话")
+    print("  --list          列出全部会话")
+
+
 def main():
     setup_console()
     session_store = SessionStore(
@@ -538,23 +563,43 @@ def main():
     )
     session_id = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
     args = sys.argv[1:]
+
+    # 分派原则: 先校验参数数量/取值, 再执行 — 任何分支都不可能越界取 args
     if not args:
+        # 设计决定: 默认无参 = 永远开新会话（与真实 Claude Code 行为一致）
         start(session_store=session_store, session_id=session_id)
         return
-    elif args[0] == "--list":
-        print(session_store.list_sessions())
-    elif args[0] == "--resume":
-        session_id = args[1]
-        session_id_list = session_store.list_sessions()
-        if session_id in session_id_list:
-            start(session_store=session_store,session_id=session_id)
-        else:
-            print(c_red("✗ 找不到会话!"))
-            print("可用列表:\n")
-            print("\n".join(session_id_list))
 
-    else:
-        start(session_store=session_store,session_id=session_id)
+    head = args[0]
+    if head == "--list":
+        print("\n".join(session_store.list_sessions()))
+        return
+
+    if head in ("--continue", "-c"):
+        sessions = session_store.list_sessions()
+        if not sessions:
+            print(c_red("✗ 没有历史会话"))
+            return
+        # 会话 id 是 %Y%m%d-%H%M%S 时间戳, 字典序即时间序, max() 即最近
+        start(session_store=session_store, session_id=max(sessions))
+        return
+
+    if head == "--resume":
+        if len(args) < 2 or not args[1].strip():
+            usage()
+            return
+        resume_id = args[1].strip()
+        if resume_id in session_store.list_sessions():
+            start(session_store=session_store, session_id=resume_id)
+        else:
+            print(c_red(f"✗ 找不到会话: {resume_id}"))
+            print("可用列表:")
+            for sid in session_store.list_sessions():
+                print(f"  {sid}")
+        return
+
+    usage()
+
 
 if __name__ == "__main__":
     main()
