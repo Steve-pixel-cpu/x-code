@@ -6,6 +6,8 @@ from typing import Optional
 
 from pydantic import BaseModel, Field
 
+from config import RuntimeConfig
+
 
 class HookEvent(Enum):
     PRE_TOOL_USE = "pre_tool_use"
@@ -36,7 +38,7 @@ class HookRunner:
         self.post_tool_use = post_tool_use or []
 
     @classmethod
-    def from_config(cls, config) -> "HookRunner":
+    def from_config(cls, config: RuntimeConfig) -> "HookRunner":
         """从 RuntimeConfig 加载。源码: hooks.rs:61-63"""
         return cls(
             pre_tool_use=config.hooks_pre(),
