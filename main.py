@@ -253,6 +253,7 @@ class SlashCommand(Enum):
     STATUS = "status"
     COMPACT = "compact"
     MODE = "mode"
+    RENAME = "rename"
     EXIT = "exit"
     UNKNOWN = "unknown"
 
@@ -431,6 +432,62 @@ def do_compact(runtime: ConversationRuntime):
 
 
 
+# --- 会话命名 (prompt_dev/session_title.md) ---
+TITLE_MAX_LEN = 50          # /rename 名字上限
+AUTO_TITLE_LEN = 30         # 自动命名截取长度
+UNTITLED = "(未命名)"
+
+
+def derive_title(text: str) -> str:
+    """自动命名: 去除换行后的前 30 字符; 全空白返回空串（跳过命名）。"""
+    collapsed = " ".join(text.split())
+    return collapsed[:AUTO_TITLE_LEN]
+
+
+def maybe_auto_title(runtime: "ConversationRuntime", store: SessionStore,
+                     session_id: str, titled: bool) -> bool:
+    """首轮对话成功后自动命名（一次会话只命名一次）。
+
+    返回新的 titled 状态。已命名 / 首条用户消息全空白 → 跳过。"""
+    if titled:
+        return True
+    messages = runtime.session().messages
+    if not messages or messages[0].role != "user":
+        return titled
+    first_text = "".join(
+        b.text for b in messages[0].content if isinstance(b, TextContentBlock)
+    )
+    title = derive_title(first_text)
+    if not title:
+        return titled  # 空名字防护: 全空白不命名
+    store.set_title(session_id, title)
+    print(c_dim(f"✓ 会话已命名: {title}"))
+    return True
+
+
+def rename_usage() -> None:
+    print(f"用法: /rename <新名字>（最长 {TITLE_MAX_LEN} 字符）")
+
+
+def do_rename(runtime: "ConversationRuntime", store: SessionStore,
+              session_id: str, arg: str) -> None:
+    """/rename: 覆盖式改名（追加新 title 记录, 展示永远取最新）。"""
+    name = arg.strip()
+    if not name:
+        rename_usage()
+        return
+    if len(name) > TITLE_MAX_LEN:
+        print(c_red(f"✗ 名字过长: {len(name)} 字符（上限 {TITLE_MAX_LEN}）"))
+        return
+    store.set_title(session_id, name)
+    print(f"会话已改名: {c_cyan(name)}")
+
+
+def display_title(store: SessionStore, session_id: str) -> str:
+    """展示层取名字: 没有命名记录的旧会话 → "(未命名)"。"""
+    return store.get_title(session_id) or UNTITLED
+
+
 def repair_interrupted_turn(session: Session) -> None:
     """中断后修补会话尾: 若 assistant 带着未答复的 tool_use, 补 error
     result——否则下一次请求(以及 resume)会因悬空 tool_use 被 API 拒绝。
@@ -457,6 +514,8 @@ def run_repl(runtime: ConversationRuntime,
     setup_console()  # 幂等兜底: 直接进 REPL 的路径也保证 UTF-8 + VT
     print_banner()
     print(f"权限模式: {runtime.permission_mode().as_str()} (切换: /mode <name>)")
+    print(f"会话: {session_id}  名字: {c_cyan(display_title(store, session_id))}")
+    titled = store.get_title(session_id) is not None  # 自动命名只做一次
 
     # 恢复的会话: 提示已加载 + 回放最后一条 assistant 文本(上次聊到哪),
     # 全量历史不刷屏——与真实 Claude Code 的恢复行为一致。
@@ -505,6 +564,9 @@ def run_repl(runtime: ConversationRuntime,
                 switch_cmd_len = len(SlashCommand.MODE.value) + 1
                 mode_name = text[switch_cmd_len:].strip()
                 switch_mode(runtime, mode_name)
+            elif cmd == SlashCommand.RENAME:
+                rename_cmd_len = len(SlashCommand.RENAME.value) + 1
+                do_rename(runtime, store, session_id, text[rename_cmd_len:])
 
         else:
             # 每轮对话开始: 细分隔线；块与块之间靠各视觉块自带的空行隔开
@@ -528,6 +590,7 @@ def run_repl(runtime: ConversationRuntime,
                     parent_uuid=last_uuid,
                 )
             idx_before = len(runtime.session().messages) - 1
+            titled = maybe_auto_title(runtime, store, session_id, titled)
 
 
 def start(session_store:SessionStore,session_id:str):
@@ -600,7 +663,11 @@ def main():
 
     head = args[0]
     if head == "--list":
-        print("\n".join(session_store.list_sessions()))
+        for sid in session_store.list_sessions():
+            title = display_title(session_store, sid)
+            n_msgs = session_store.count_messages(sid)
+            id_pad = max(len(sid), 16)  # 时间戳 id 16 位, 名字列从 18 列起
+            print(f"{sid:<{id_pad}}  {c_cyan(title)}  {c_dim(f'({n_msgs} 条消息)')}")
         return
 
     if head in ("--continue", "-c"):
