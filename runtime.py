@@ -227,7 +227,23 @@ class ConversationRuntime:
                 output = output,
                 is_error = is_tool_error or post_res.denied,
             )
+    def compact(self):
+        try:
+            if self.usage().cumulative_usage().input_tokens >= self._auto_compact_threshold:
+                curr_session = self._session
+                compact_reslut = compact_session(
+                    messages=curr_session.messages,
+                    config=CompactionConfig(
+                        max_estimated_tokens=0
+                    ),
+                )
+                if compact_reslut.removed_count == 0:
+                    print("Nothing to compact!")
+                curr_session.messages = compact_reslut.compacted_messages
 
+                print("compact susses!")
+        except Exception as e:
+            print(f"compact failed!,error{str(e)}")
 
     def _maybe_auto_compact(self)-> bool:
 
@@ -240,7 +256,7 @@ class ConversationRuntime:
                 ),
             )
             if compact_reslut.removed_count == 0:
-                return False
+                return True
             curr_session.messages = compact_reslut.compacted_messages
 
             return True
