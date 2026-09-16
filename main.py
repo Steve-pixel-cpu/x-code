@@ -1,5 +1,6 @@
 # --- Slash command 解析 ---
 
+import json
 import os
 import platform
 import sys
@@ -59,8 +60,8 @@ powershell_spec = {
     "name": "powershell",
     "description": (
         "Execute a command in Windows PowerShell and return its output. "
-        "stdout is returned as-is; stderr is appended if present. "
-        "Use this for Windows-specific tasks: services, registry, scheduled "
+        "stdout is returned as-is; stderr is appended if present. Use this "
+        "for Windows-specific tasks: services, registry, scheduled "
         "tasks, ACLs, WMI/CIM queries, Get-ChildItem -Recurse, and other "
         "PowerShell cmdlets. Commands time out after 30 seconds, so avoid "
         "long-running or interactive commands."
@@ -134,6 +135,119 @@ write_file_spec = {
 }
 TOOLS = [bash_spec, powershell_spec, read_file_spec, write_file_spec]
 
+
+# --- 终端视觉规范: 调色板 + 版式 ---
+# 规则: ANSI 码只允许出现在 _paint 一处，所有颜色经 c_xxx() 成对包裹/重置，
+# 任何异常路径都不可能把颜色泄漏到后续输出。
+
+_ANSI_RESET = "\033[0m"
+_ANSI_DIM = "\033[2m"
+_ANSI_RED = "\033[31m"
+_ANSI_YELLOW = "\033[33m"
+_ANSI_CYAN = "\033[36m"
+
+
+def _paint(code: str, text: str) -> str:
+    """成对包裹: code + text + reset。颜色只在这一处拼接。"""
+    return f"{code}{text}{_ANSI_RESET}"
+
+
+def c_dim(s: str) -> str:
+    """暗灰: 工具结果预览 / 分隔线。"""
+    return _paint(_ANSI_DIM, s)
+
+
+def c_red(s: str) -> str:
+    """红色: 错误信息（配 ✗ 前缀）。"""
+    return _paint(_ANSI_RED, s)
+
+
+def c_yellow(s: str) -> str:
+    """黄色: 权限询问。"""
+    return _paint(_ANSI_YELLOW, s)
+
+
+def c_cyan(s: str) -> str:
+    """青色: 工具调用提示（配 '⚙ 工具' 前缀）。"""
+    return _paint(_ANSI_CYAN, s)
+
+
+SEPARATOR = "─" * 40        # 每轮对话开始的细分隔线
+PREVIEW_MAX_LINES = 3       # 工具结果预览: 最多行数
+PREVIEW_MAX_CHARS = 160     # 工具结果预览: 最多字符数
+LINE_MAX_CHARS = 80         # 单行内容（权限面板/工具提示）截断宽度
+FIELD_LABEL_WIDTH = 9       # 对齐字段的标签列宽（按终端显示宽度计）
+
+
+def one_line(s: str) -> str:
+    """压成单行: 所有空白（含换行）折叠为单个空格。"""
+    return " ".join(s.split())
+
+
+def truncate_line(s: str, width: int = LINE_MAX_CHARS) -> str:
+    return s if len(s) <= width else s[: width - 1] + "…"
+
+
+def _display_width(s: str) -> int:
+    """终端显示宽度: CJK 全角按 2 列计。"""
+    return sum(2 if ord(ch) > 0x2E7F else 1 for ch in s)
+
+
+def field_line(label: str, value: str) -> str:
+    """对齐字段行: `  标签:    值`，值列按显示宽度对齐（权限面板与 /status 共用）。"""
+    pad = FIELD_LABEL_WIDTH - _display_width(label) - 1  # -1 给冒号
+    return f"  {label}:{' ' * max(pad, 1)}{value}"
+
+
+def indent_block(text: str, prefix: str = "  ") -> str:
+    return "\n".join(prefix + line for line in text.split("\n"))
+
+
+def format_preview(output: str) -> str:
+    """工具结果预览: 最多 3 行 / 160 字符，超出加 '...(已截断，共 N 行)'。"""
+    if not output.strip():
+        return "(无输出)"
+    text = output.replace("\r\n", "\n").rstrip("\n")
+    all_lines = text.split("\n")
+    total = len(all_lines)
+    preview = "\n".join(all_lines[:PREVIEW_MAX_LINES])
+    if len(preview) > PREVIEW_MAX_CHARS:
+        preview = preview[:PREVIEW_MAX_CHARS]
+    if total > PREVIEW_MAX_LINES or len(text) > len(preview):
+        preview += f"\n...(已截断，共 {total} 行)"
+    return preview
+
+
+_JSON_KEY_PRIORITY = ("command", "path", "file_path", "url", "content")
+
+
+def describe_tool_input(raw: str) -> str:
+    """权限面板/工具提示的『内容』: JSON 先解析取关键信息，解析失败才展示原文。"""
+    if not raw.strip():
+        return "(空)"
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        data = None
+    if isinstance(data, dict):
+        for key in _JSON_KEY_PRIORITY:
+            value = data.get(key)
+            if isinstance(value, str) and value.strip():
+                return truncate_line(one_line(value))
+        pairs = " ".join(f"{k}={one_line(str(v))}" for k, v in data.items())
+        return truncate_line(pairs)
+    return truncate_line(one_line(raw))
+
+
+def setup_console() -> None:
+    """启动兜底: UTF-8 输出 + 启用 VT，Windows GBK 控制台不因 emoji/颜色码崩溃。"""
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, ValueError, OSError):
+        pass
+    # Windows 控制台启用 ANSI(VT) 转义；跑一次空命令即触发，其他平台无害
+    os.system("")
+
 class SlashCommand(Enum):
     HELP = "help"
     STATUS = "status"
@@ -160,27 +274,36 @@ def parse_slash_command(input: str) -> Optional[SlashCommand]:
 
 
 class CliPermissionPrompter:
+    """多行权限面板（黄色），y/yes 放行，其余与 Ctrl+C 一律朝安全侧拒绝。"""
+
     def decide(self, request: PermissionRequest) -> PermissionResult:
-        tool_input = request.input if len(request.input)<200 else request.input[0:200]
+        deny_reason = f"User denied permission to run {request.tool_name}!"
+        print()
+        print(c_yellow("⚠ 需要授权"))
+        print(c_yellow(field_line("工具", request.tool_name)))
+        print(c_yellow(field_line(
+            "权限",
+            f"{request.required_mode.as_str()}（当前 {request.current_mode.as_str()}）",
+        )))
+        print(c_yellow(field_line("内容", describe_tool_input(request.input))))
         try:
-            user_input = input(f"工具{request.tool_name},需要执行:{tool_input},当前模式是{request.current_mode.as_str()},需要的模式是{request.required_mode.as_str()},y/N:")
+            user_input = input(c_yellow("批准? [y/N] "))
         except KeyboardInterrupt:
-            raw_output = f"User denied permission to run {request.tool_name}!"
-            print(raw_output[0:160] if len(raw_output) > 160 else raw_output)
+            print()
+            print(c_yellow("已拒绝。"))
             return PermissionResult(
                 decision=PermissionDecision.DENY,
-                reason= raw_output
+                reason=deny_reason
             )
         if user_input.strip().lower() in ["y", "yes"]:
             return PermissionResult(
                 decision=PermissionDecision.ALLOW,
                 reason= "user said yes!"
             )
-        raw_output = f"User denied permission to run {request.tool_name}!"
-        print(raw_output[0:160] if len(raw_output) > 160 else raw_output)
+        print(c_yellow("已拒绝。"))
         return PermissionResult(
             decision=PermissionDecision.DENY,
-            reason=raw_output
+            reason=deny_reason
         )
 
 
@@ -190,9 +313,19 @@ class CliToolExecutor:
         self.registry = registry
 
     def execute(self, tool_name: str, input: str) -> str:
-        print(f"正在执行工具: {tool_name}")
-        output = self.registry.execute(tool_name, input)
-        print(output[0:160] if len(output) > 160 else output)
+        desc = describe_tool_input(input)
+        print()
+        print(c_cyan(f"⚙ 工具 {tool_name}" + (f"  {desc}" if desc else "")))
+        print()
+        try:
+            output = self.registry.execute(tool_name, input)
+        except Exception as e:
+            # 终端看红 ✗；异常继续上抛，由 runtime 转 tool_result 给模型
+            print(c_red(f"✗ {tool_name} 失败: {truncate_line(one_line(str(e)))}"))
+            print()
+            raise
+        print(c_dim(indent_block(format_preview(output))))
+        print()
         return output
 
 # --- 组装 runtime ---
@@ -235,7 +368,7 @@ def resolve_permission_mode(runtime_config: RuntimeConfig) -> PermissionMode:
         mode = NAME_TO_MODE.get(mode_name)
         if mode is not None and mode != ALLOW_MODE:
             return mode
-        print(f"配置里的权限模式无效: {mode_name!r}, 回退到 danger-full-access")
+        print(c_red(f"✗ 配置里的权限模式无效: {mode_name!r}, 回退到 danger-full-access"))
     return DANGER_FULL_ACCESS_MODE
 
 BANNER_ART = r"""
@@ -260,14 +393,14 @@ def switch_mode(runtime: ConversationRuntime, mode_name: str) -> None:
         return
     mode = NAME_TO_MODE.get(mode_name.strip().lower())
     if mode is None:
-        print(f"未知模式: {mode_name}")
+        print(c_red(f"✗ 未知模式: {mode_name}"))
         print(f"可选: {' | '.join(MODE_TO_NAME.values())}")
         return
     runtime.set_permission_mode(mode)
     print(f"权限模式已切换: {mode.as_str()}")
 
 def print_status(runtime: "ConversationRuntime") -> None:
-    """打印当前会话的用量收据。"""
+    """打印当前会话的用量收据（与权限面板同一套对齐风格）。"""
     usage = runtime.usage().cumulative_usage()
 
     input_tokens  = usage.input_tokens
@@ -277,26 +410,24 @@ def print_status(runtime: "ConversationRuntime") -> None:
     turns = runtime.usage().turns()
     messages = len(runtime.session().messages)
 
-    width = 40
-    line = "-" * width
-
-    print(line)
-    print("会话状态".center(width))
-    print(line)
-    print(f"  {'input  tokens':<16}{input_tokens:>10,}")
-    print(f"  {'output tokens':<16}{output_tokens:>10,}")
-    print(f"  {'total  tokens':<16}{total_tokens:>10,}")
-    print(line)
-    print(f"  {'turns':<16}{turns:>10,}")
-    print(f"  {'messages':<16}{messages:>10,}")
-    print(line)
+    print(c_dim(SEPARATOR))
+    print("会话状态".center(40))
+    print(c_dim(SEPARATOR))
+    print(field_line("输入", f"{input_tokens:,} tokens"))
+    print(field_line("输出", f"{output_tokens:,} tokens"))
+    print(field_line("合计", f"{total_tokens:,} tokens"))
+    print(c_dim(SEPARATOR))
+    print(field_line("轮数", f"{turns:,}"))
+    print(field_line("消息数", f"{messages:,}"))
+    print(field_line("权限模式", runtime.permission_mode().as_str()))
+    print(c_dim(SEPARATOR))
 
 def do_compact(runtime: ConversationRuntime):
     try:
         msg = runtime.compact()
         print(msg)
     except Exception as e:
-        print(f"Compact failed! Error: {str(e)}")
+        print(c_red(f"✗ compact 失败: {e}"))
 
 
 
@@ -306,6 +437,7 @@ def run_repl(runtime: ConversationRuntime,
              store: SessionStore,
              session_id: str,
              last_uuid: Optional[str]):
+    setup_console()  # 幂等兜底: 直接进 REPL 的路径也保证 UTF-8 + VT
     print_banner()
     print(f"权限模式: {runtime.permission_mode().as_str()} (切换: /mode <name>)")
     idx_before = -1
@@ -333,12 +465,12 @@ def run_repl(runtime: ConversationRuntime,
                 do_compact(runtime)
             elif cmd == SlashCommand.MODE:
                 switch_cmd_len = len(SlashCommand.MODE.value) + 1
-                print(SlashCommand.MODE.value)
                 mode_name = text[switch_cmd_len:].strip()
                 switch_mode(runtime, mode_name)
 
         else:
-            print("--------------------------------------")
+            # 每轮对话开始: 细分隔线；块与块之间靠各视觉块自带的空行隔开
+            print(c_dim(SEPARATOR))
             try:
                 runtime.run_turn(text, prompter)
 
@@ -351,7 +483,8 @@ def run_repl(runtime: ConversationRuntime,
                 idx_before = len(runtime.session().messages) - 1
 
             except Exception as e:
-                print("Error: {}".format(e))
+                print()
+                print(c_red(f"✗ {e}"))
                 continue
 
 
@@ -359,7 +492,7 @@ def start(session_store:SessionStore,session_id:str):
     load_dotenv()
     api_key = os.getenv("API_KEY")
     if api_key is None:
-        print("API_KEY not set!")
+        print(c_red("✗ API_KEY not set!"))
         return
 
     registry = ToolRegistry()
@@ -399,6 +532,7 @@ def start(session_store:SessionStore,session_id:str):
 
 # --- 入口 ---
 def main():
+    setup_console()
     session_store = SessionStore(
         storage_dir=Path.home() / ".x-code" / "sessions",
     )
@@ -415,7 +549,7 @@ def main():
         if session_id in session_id_list:
             start(session_store=session_store,session_id=session_id)
         else:
-            print("找不到会话!")
+            print(c_red("✗ 找不到会话!"))
             print("可用列表:\n")
             print("\n".join(session_id_list))
 

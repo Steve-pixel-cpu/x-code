@@ -28,10 +28,30 @@ class MessageStopEvent(BaseModel):
 
 AssistantEvent = TextDeltaEvent | ToolUseEvent | MessageStopEvent
 
-# 思考内容的终端样式：暗灰色。只用于终端展示，绝不进入事件流/会话历史
+# 思考指示器的终端样式：暗灰色、单行原地刷新。只用于终端展示，
+# 绝不进入事件流/会话历史。
 ANSI_DIM = "\033[2m"
 ANSI_RESET = "\033[0m"
-THINKING_MARKER = "──── 思考中 ────"
+ANSI_CLEAR_LINE = "\033[K"   # 清除光标到行尾（配合 \r 原地更新）
+THINKING_MARKER = "✻ 思考中…"
+
+
+def _end_thinking_indicator(out, streaming_thinking: bool) -> bool:
+    """结束指示器行：换行收尾 + 样式复位。返回新的 streaming_thinking 状态。"""
+    if not streaming_thinking:
+        return False
+    out.write("\n" + ANSI_RESET)
+    out.flush()
+    return False
+
+
+def _stop_text_line(out, streaming_text: bool) -> bool:
+    """正文流结束一处换行，防止指示器/下一块与正文挤同行。"""
+    if not streaming_text:
+        return False
+    out.write("\n")
+    out.flush()
+    return False
 
 
 class ApiClient(ABC):
@@ -120,22 +140,22 @@ class ClaudeApiClient(ApiClient):
         if self.tools:
             kwargs["tools"] = self.tools
         streaming_text = False      # 正在流式输出正式回复文本
-        streaming_thinking = False  # 正在流式输出思考内容（仅终端，不进事件流）
+        streaming_thinking = False  # 思考指示器行正在原地刷新（仅终端，不进事件流）
+        thinking_chars = 0          # 当前思考块累计字符数
         # 部分Windows控制台默认关闭 ANSI（VT）转义支持；shell 跑一次空命令
         # 会经 cmd.exe 初始化控制台从而启用。旧式写法是 os.system("")（已软废弃）
         subprocess.run("", shell=True)
 
         import sys as _sys
+        out = _sys.stdout
         with self.client.messages.stream(**kwargs) as stream:
             blocks = {}
             for event in stream:
                 if event.type == 'content_block_start':
                     cb = event.content_block
-                    if self.emit_output and streaming_thinking:
-                        # 新块开始：先结束思考样式，防止灰色泄漏进新块
-                        _sys.stdout.write("\n" + ANSI_RESET)
-                        _sys.stdout.flush()
-                        streaming_thinking = False
+                    # 新块开始：先收掉上一块的指示器/正文行，防样式泄漏与挤行
+                    streaming_thinking = _end_thinking_indicator(out, streaming_thinking)
+                    streaming_text = _stop_text_line(out, streaming_text)
                     if cb.type == "tool_use":
                         blocks[event.index] = {
                             "type": "tool_use",
@@ -153,72 +173,60 @@ class ClaudeApiClient(ApiClient):
                 elif event.type == 'content_block_delta':
                     if event.delta.type == 'text_delta':
                         if self.emit_output:
-                            if streaming_thinking:
-                                # 思考结束转正式回复：换行并恢复正常颜色
-                                _sys.stdout.write(ANSI_RESET + "\n")
-                                _sys.stdout.flush()
-                                streaming_thinking = False
-                                streaming_text = True
+                            # 思考→正文衔接：指示器行已在 content_block_start 收尾，
+                            # 这里保证正文前光标在新行即可
+                            streaming_thinking = _end_thinking_indicator(out, streaming_thinking)
                             if not streaming_text:
-                                _sys.stdout.write("\n")
+                                out.write("\n")
                                 streaming_text = True
-                            _sys.stdout.write(event.delta.text)
-                            _sys.stdout.flush()
+                            out.write(event.delta.text)
+                            out.flush()
                         events.append(TextDeltaEvent(text=event.delta.text))
                     elif event.delta.type == 'input_json_delta':
                         blocks.get(event.index,{"json":""})["json"] += event.delta.partial_json
                     elif event.delta.type == 'thinking_delta':
-                        # 思考内容只进终端（暗灰色），绝不 append 进 events 列表：
-                        # 一旦进入就会被存入会话历史并重放，污染上下文
+                        # 思考内容只驱动指示器（暗灰、\r 原地刷新），绝不 append 进
+                        # events 列表：一旦进入就会被存入会话历史并重放，污染上下文
+                        thinking_chars += len(event.delta.thinking)
                         if self.emit_output:
-                            if streaming_text:
-                                _sys.stdout.write("\n")
-                                streaming_text = False
+                            streaming_text = _stop_text_line(out, streaming_text)
                             if not streaming_thinking:
-                                _sys.stdout.write(f"{ANSI_DIM}{THINKING_MARKER}\n")
+                                out.write(ANSI_DIM)
                                 streaming_thinking = True
-                            _sys.stdout.write(event.delta.thinking)
-                            _sys.stdout.flush()
+                            out.write(
+                                "\r" + ANSI_CLEAR_LINE
+                                + f"{THINKING_MARKER} 已思考 {thinking_chars} 字"
+                            )
+                            out.flush()
                     else:
                         # 其余 delta（如 signature_delta）暂不处理
                         pass
                 elif event.type == 'content_block_stop':
                     info = blocks.pop(event.index, None)
                     if info and info["type"] == "tool_use":
-                        if self.emit_output and streaming_text:
-                            _sys.stdout.write("\n")
-                            _sys.stdout.flush()
-                            streaming_text = False
-
+                        streaming_text = _stop_text_line(out, streaming_text)
                         events.append(ToolUseEvent(id=info["id"], name=info["name"], input=info["json"] or "{}"))
+                    else:
+                        # thinking 块结束：收指示器行
+                        streaming_thinking = _end_thinking_indicator(out, streaming_thinking)
+                        thinking_chars = 0
                 elif event.type == 'message_delta':
                     if self.emit_output:
-                        if streaming_thinking:
-                            _sys.stdout.write("\n" + ANSI_RESET)
-                            _sys.stdout.flush()
-                            streaming_thinking = False
-                        elif streaming_text:
-                            _sys.stdout.write("\n")
-                            _sys.stdout.flush()
-                            streaming_text = False
+                        streaming_thinking = _end_thinking_indicator(out, streaming_thinking)
+                        streaming_text = _stop_text_line(out, streaming_text)
                     if event.delta.stop_reason == "max_tokens":
-                        _sys.stdout.write("输出被 max_tokens 截断!")
+                        out.write("输出被 max_tokens 截断!")
 
 
 
                 elif event.type == 'message_stop':
-                    if self.emit_output and (streaming_text or streaming_thinking):
-                        _sys.stdout.write("\n")
-                        _sys.stdout.flush()
-                        streaming_text = False
-                        streaming_thinking = False
+                    streaming_thinking = _end_thinking_indicator(out, streaming_thinking)
+                    streaming_text = _stop_text_line(out, streaming_text)
                     if self.emit_output:
                         # 收尾无条件复位 ANSI 样式，防止灰色泄漏到正式输出
-                        _sys.stdout.write(ANSI_RESET)
-                        _sys.stdout.flush()
+                        out.write(ANSI_RESET)
+                        out.flush()
 
                     events.append(MessageStopEvent())
 
         return  events
-
-
