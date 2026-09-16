@@ -14,7 +14,7 @@ from dotenv import load_dotenv
 from api_client import ApiClient, ClaudeApiClient
 from config import RuntimeConfig, ConfigLoader
 from hooks import HookRunner
-from models import Session, TextContentBlock
+from models import Message, Session, TextContentBlock, ToolContentBlock
 from permissions import (
     DANGER_FULL_ACCESS_MODE,
     ALLOW_MODE, MODE_TO_NAME, NAME_TO_MODE,
@@ -431,6 +431,23 @@ def do_compact(runtime: ConversationRuntime):
 
 
 
+def repair_interrupted_turn(session: Session) -> None:
+    """中断后修补会话尾: 若 assistant 带着未答复的 tool_use, 补 error
+    result——否则下一次请求(以及 resume)会因悬空 tool_use 被 API 拒绝。
+    尾部是 user/tool 的序列本身合法, 不动。"""
+    messages = session.messages
+    if not messages or messages[-1].role != "assistant":
+        return
+    for block in messages[-1].content:
+        if isinstance(block, ToolContentBlock):
+            messages.append(Message.tool_result(
+                id=block.id,
+                name=block.name,
+                output="(用户中断了本轮对话)",
+                is_error=True,
+            ))
+
+
 # --- REPL ---
 def run_repl(runtime: ConversationRuntime,
              prompter: PermissionPrompter,
@@ -455,11 +472,17 @@ def run_repl(runtime: ConversationRuntime,
                 print(c_dim(indent_block(truncate_line(one_line(" ".join(texts))))))
                 break
     idx_before = len(existing) - 1
+    ctrl_c_pending = False  # 连续两次 Ctrl+C 才退出, 第一次只提示
     while True:
         try:
             text = input("x-code> ").strip()
+            ctrl_c_pending = False
         except KeyboardInterrupt:
-            print("\n")
+            if ctrl_c_pending:
+                print("bye!")
+                break
+            ctrl_c_pending = True
+            print("\n(再按一次 Ctrl+C 退出; 对话中按一次 = 中断本轮)")
             continue
         except EOFError:
             print("bye!")
@@ -487,19 +510,23 @@ def run_repl(runtime: ConversationRuntime,
             print(c_dim(SEPARATOR))
             try:
                 runtime.run_turn(text, prompter)
-
-                for msg in runtime.session().messages[idx_before + 1:]:
-                    last_uuid = store.save_message(
-                        session_id=session_id,
-                        message=msg,
-                        parent_uuid=last_uuid,
-                    )
-                idx_before = len(runtime.session().messages) - 1
-
+            except KeyboardInterrupt:
+                # Ctrl+C 只中断本轮, 不退出 REPL; 修补悬空 tool_use 后照常落盘
+                print()
+                print(c_yellow("⚠ 已中断本轮对话"))
+                repair_interrupted_turn(runtime.session())
             except Exception as e:
                 print()
                 print(c_red(f"✗ {e}"))
                 continue
+
+            for msg in runtime.session().messages[idx_before + 1:]:
+                last_uuid = store.save_message(
+                    session_id=session_id,
+                    message=msg,
+                    parent_uuid=last_uuid,
+                )
+            idx_before = len(runtime.session().messages) - 1
 
 
 def start(session_store:SessionStore,session_id:str):
