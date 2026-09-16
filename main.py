@@ -25,7 +25,7 @@ from runtime import ConversationRuntime
 from storage import SessionStore
 from tools import ToolRegistry, bash_tool, read_tool, write_tool, powershell_tool
 
-DEFAULT_MODEL = "glm-5.3-flash[1m]"
+DEFAULT_MODEL = "glm-5.3-flash"
 bash_spec = {
     "name": "bash",
     "description": (
@@ -248,8 +248,8 @@ BANNER_ART = r"""
 def print_banner(name: str = "X-CODE", width: int = 40) -> None:
     """Print an ASCII-art startup banner with the app name and help hint."""
     print(BANNER_ART)
-    print(name.center(width))
-    print("/help 看命令".center(width))
+    print(name)
+    print("/help 看命令")
     print("=" * width)
 
 def switch_mode(runtime: ConversationRuntime, mode_name: str) -> None:
