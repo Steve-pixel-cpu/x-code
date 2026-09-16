@@ -25,7 +25,7 @@ from runtime import ConversationRuntime
 from storage import SessionStore
 from tools import ToolRegistry, bash_tool, read_tool, write_tool, powershell_tool
 
-DEFAULT_MODEL = "claude-sonnet-5"
+DEFAULT_MODEL = "glm-5.3-flash[1m]"
 bash_spec = {
     "name": "bash",
     "description": (
@@ -199,9 +199,10 @@ class CliToolExecutor:
 def build_runtime(session: Session,
                   api_client: ApiClient,
                   registry: ToolRegistry,
+                  system_prompt: list[str],
+                  hooks_config: RuntimeConfig,
                   permission_mode: PermissionMode = DANGER_FULL_ACCESS_MODE,
-                  system_prompt: list[str] = None,
-                  hooks_config: RuntimeConfig = None) -> ConversationRuntime:
+                 ) -> ConversationRuntime:
     permission_policy = PermissionPolicy(
         active_mode = permission_mode,
     )
@@ -331,7 +332,9 @@ def run_repl(runtime: ConversationRuntime,
             elif cmd == SlashCommand.COMPACT:
                 do_compact(runtime)
             elif cmd == SlashCommand.MODE:
-                mode_name = text[5:].strip()
+                switch_cmd_len = len(SlashCommand.MODE.value) + 1
+                print(SlashCommand.MODE.value)
+                mode_name = text[switch_cmd_len:].strip()
                 switch_mode(runtime, mode_name)
 
         else:
