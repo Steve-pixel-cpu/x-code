@@ -111,24 +111,29 @@ class TurnDispatch:
     工作线程开跑一轮前 bind(emit)，结束后 unbind()。内核侧三个挂点
     （SSE 流代理 / 工具注册表 / 权限桥）在事件发生时用 current() 拿到
     本线程绑定的 emit——多个会话各开各的线程，互不串线。
-    同时绑定本轮的会话工作目录，工具执行时取 current_workdir()。
+    同时绑定本轮的会话工作目录，工具执行时取 current_workdir()；
+    绑定 should_stop 勾子，流式代理逐事件检查以支持即时打断。
     """
 
     def __init__(self):
         self._emit_by_thread: dict[int, Callable] = {}
         self._workdir_by_thread: dict[int, Optional[str]] = {}
+        self._stop_by_thread: dict[int, Callable[[], bool]] = {}
         self._lock = threading.Lock()
 
-    def bind(self, emit: Callable, workdir: Optional[str] = None) -> None:
+    def bind(self, emit: Callable, workdir: Optional[str] = None,
+             should_stop: Optional[Callable[[], bool]] = None) -> None:
         with self._lock:
             self._emit_by_thread[threading.get_ident()] = emit
             self._workdir_by_thread[threading.get_ident()] = workdir
+            self._stop_by_thread[threading.get_ident()] = should_stop
 
     def unbind(self) -> None:
         with self._lock:
             ident = threading.get_ident()
             self._emit_by_thread.pop(ident, None)
             self._workdir_by_thread.pop(ident, None)
+            self._stop_by_thread.pop(ident, None)
 
     def current(self) -> Optional[Callable]:
         with self._lock:
@@ -138,8 +143,16 @@ class TurnDispatch:
         with self._lock:
             return self._workdir_by_thread.get(threading.get_ident())
 
+    def current_should_stop(self) -> Optional[Callable[[], bool]]:
+        with self._lock:
+            return self._stop_by_thread.get(threading.get_ident())
+
 
 dispatch = TurnDispatch()
+
+
+class TurnInterrupted(Exception):
+    """用户主动打断: 流式代理在下一个 SSE 事件到达时抛出, 快速收束本轮。"""
 
 
 class _LiveStreamProxy:
@@ -149,11 +162,16 @@ class _LiveStreamProxy:
     - tool_use 在 content_block_stop 时拼装完整事件转发（与内核同样的拼装规则）
     - thinking 块只发起止信号（thinking_start / thinking_end + 耗时），
       思考内容本身（thinking_delta）仍不转发: UI 展示"思考 · 持续了X秒"行
+    - 每取一个事件前检查 should_stop: 用户点停止后, 下一个事件到达即刻
+      抛 TurnInterrupted 断流, 不必等模型说完（内核同步阻塞, 这是唯一
+      能从外部安全掐断的位置）
     """
 
-    def __init__(self, real, sink: Optional[Callable]):
+    def __init__(self, real, sink: Optional[Callable],
+                 should_stop: Optional[Callable[[], bool]] = None):
         self._real = real
         self._sink = sink
+        self._should_stop = should_stop
         self._tools: dict[int, dict] = {}
         self._thinking: dict[int, float] = {}
 
@@ -170,6 +188,8 @@ class _LiveStreamProxy:
         return self
 
     def __next__(self):
+        if self._should_stop is not None and self._should_stop():
+            raise TurnInterrupted()
         event = self._stream.__next__()
         if self._sink is not None:
             self._mirror(event)
@@ -217,7 +237,8 @@ class _LiveMessagesProxy:
         self._dispatch = dispatch_ref
 
     def stream(self, **kwargs):
-        return _LiveStreamProxy(self._real.stream(**kwargs), self._dispatch.current())
+        return _LiveStreamProxy(self._real.stream(**kwargs), self._dispatch.current(),
+                                self._dispatch.current_should_stop())
 
 
 class _LiveClientProxy:
@@ -388,6 +409,11 @@ class WebSession:
         # 会话级思考等级: 初值取全局默认; 切换只影响本会话（runtime 注入）
         self.thinking_level = runtime_config.thinking_level()
         self.prompter: Optional[WebPermissionPrompter] = None
+        # 排队区: 本轮进行中用户追加的后续消息（事件循环线程读写）,
+        # 当前轮结束后由 _start_pending_turn 接力开跑
+        self.pending: list[str] = []
+        self.emit: Optional[Callable] = None   # 所属 WS 连接的事件出口
+        self.loop = None                       # 事件循环（worker 用它调度接力）
 
 
 _sessions: dict[str, WebSession] = {}
@@ -534,9 +560,16 @@ def _spawn_turn_thread(web_session: WebSession, text: str,
     """真正起工作线程跑一轮。槽位已由调用方持有。"""
 
     def worker():
-        dispatch.bind(emitter, web_session.workdir)  # 必须在工作线程内绑定（按线程号路由）
+        # 必须在工作线程内绑定（按线程号路由）; should_stop 让流式代理逐事件检查打断
+        dispatch.bind(emitter, web_session.workdir, lambda: web_session.stop_requested)
         try:
             summary = web_session.runtime.run_turn(text, prompter)
+        except TurnInterrupted:
+            # 用户主动打断: 修补悬空 tool_use 后照常落盘（朝安全侧, 与 CLI Ctrl+C 同路径）
+            repair_interrupted_turn(web_session.runtime.session())
+            persist_turn(web_session)
+            emitter({"type": "turn_done", "interrupted": True, "iterations": 0,
+                     "budget_exhausted": False, "iterations_exhausted": False})
         except Exception as e:
             # 异常中断（网络断 / API 报错）: 修补悬空 tool_use 后照常落盘
             # （朝安全侧，与 CLI Ctrl+C 同路径）
@@ -569,6 +602,10 @@ def _spawn_turn_thread(web_session: WebSession, text: str,
             # 释放槽位并唤醒排队的会话（FIFO; 断连/停止的排队项被跳过）
             _turn_slots.release()
             _drain_queued_turns()
+            # 本会话还有排队的后续消息: 回事件循环线程接力开跑下一轮
+            if (web_session.pending and web_session.emit is not None
+                    and web_session.loop is not None):
+                web_session.loop.call_soon_threadsafe(_start_pending_turn, web_session)
 
     threading.Thread(target=worker, name=f"turn-{web_session.session_id}", daemon=True).start()
 
@@ -586,15 +623,37 @@ def _drain_queued_turns() -> None:
         _spawn_turn_thread(web_session, text, emitter, prompter)
 
 
+def _start_pending_turn(web_session: WebSession) -> None:
+    """事件循环线程: 取出该会话排队的下一条后续消息, 接力开跑新一轮。
+
+    由上一轮工作线程在 finally 里经 call_soon_threadsafe 调度——
+    此时槽位已释放, _start_turn 拿不到槽位会自行进入全局排队。
+    """
+    if not web_session.pending:
+        return
+    text = web_session.pending.pop(0)
+    if web_session.emit is None:
+        return
+    # 前端把"已排队"气泡转正, 并重新进入忙碌态
+    web_session.emit({"type": "turn_started", "text": text})
+    _start_turn(web_session, text, web_session.emit)
+
+
 def request_stop(web_session: WebSession) -> None:
     """stop / 断连: 朝安全侧叫停——解除权限等待，后续工具调用全部自动拒绝。
 
-    说明: 内核的流式调用是同步阻塞的，无法从外部安全掐死线程，
-    stop 对"正在路上的这一次 LLM 调用"不生效，在下一个决策点生效。
+    说明: 内核的流式调用是同步阻塞的, 打断由流式代理在下一个 SSE 事件
+    到达时抛 TurnInterrupted 实现——正文/思考流式期间通常毫秒级生效,
+    只有等首包或工具执行中的长命令仍要等它自然结束。
+    同时清空排队区: 用户叫停的意图是整轮停下, 排队的后续消息一并撤回。
     """
     if not web_session.busy:
         return
     web_session.stop_requested = True
+    if web_session.pending:
+        web_session.pending.clear()
+        if web_session.emit is not None:
+            web_session.emit({"type": "turn_queue_cleared"})
     if web_session.prompter is not None:
         web_session.prompter.cancel()
 
@@ -799,6 +858,10 @@ async def ws_endpoint(websocket: WebSocket, session_id: str):
         """工作线程调用: 事件路由到本连接的发送队列（线程安全、非阻塞）。"""
         loop.call_soon_threadsafe(out_queue.put_nowait, payload)
 
+    # 会话当前绑定本连接: 排队接力（_start_pending_turn）要用它把事件发回前端
+    web_session.emit = emit
+    web_session.loop = loop
+
     def emit_error(message: str) -> None:
         emit({"type": "error", "message": message})
 
@@ -818,7 +881,12 @@ async def ws_endpoint(websocket: WebSocket, session_id: str):
                 if not text:
                     continue
                 if web_session.busy:
-                    emit_error("本轮对话进行中，同一会话同一时刻只允许一轮")
+                    # 本轮还在跑: 追加进会话级排队区, 当前轮结束后自动接力
+                    if len(web_session.pending) >= 10:
+                        emit_error("排队消息过多（上限 10 条），请等当前轮次结束")
+                        continue
+                    web_session.pending.append(text)
+                    emit({"type": "turn_queued_user", "position": len(web_session.pending)})
                     continue
                 # 首条消息可携带工作目录（项目的意义）: 只在未设置时落一次
                 raw_wd = str(raw.get("workdir") or "").strip()

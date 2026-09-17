@@ -22,3 +22,7 @@ __pycache__/
 .env
 prompt_dev
 
+# Electron / Node
+node_modules/
+dist/
+
