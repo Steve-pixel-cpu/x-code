@@ -16,7 +16,9 @@ import pytest
 from fastapi.testclient import TestClient
 
 import server
+from models import Message
 from permissions import PermissionDecision, PermissionRequest, PermissionMode
+from storage import SessionStore
 
 
 # ------------------------------------------------------------
@@ -63,9 +65,11 @@ def test_settings_permission_mode_validation(client):
     assert r.json()["permission_mode"] == "read-only"
 
 
-def test_get_messages_404_for_unknown_session(client):
+def test_get_messages_returns_empty_for_unknown_session(client):
+    """未落盘的会话返回空历史（200），不是 404——前端新建会话靠它渲染空状态。"""
     r = client.get("/api/sessions/definitely-not-exist/messages")
-    assert r.status_code == 404
+    assert r.status_code == 200
+    assert r.json()["messages"] == []
 
 
 def test_create_session_returns_timestamp_id(client):
@@ -74,6 +78,45 @@ def test_create_session_returns_timestamp_id(client):
     sid = r.json()["id"]
     # 与 CLI 相同的 %Y%m%d-%H%M%S（14 位数字，可能带 w 后缀）
     assert len(sid) >= 15 and sid[:8].isdigit() and sid[9:15].isdigit() and sid[8] == "-"
+
+
+# ------------------------------------------------------------
+# 新建会话契约 — pending 会话在落盘前就对列表/历史接口可见
+# ------------------------------------------------------------
+
+def test_created_session_visible_before_first_message(client, isolated_store):
+    sid = client.post("/api/sessions").json()["id"]
+
+    # 侧栏列表: 未落盘也可见（未命名、0 条）
+    sessions = client.get("/api/sessions").json()["sessions"]
+    mine = [s for s in sessions if s["id"] == sid]
+    assert len(mine) == 1
+    assert mine[0]["title"] == "(未命名)"
+    assert mine[0]["message_count"] == 0
+
+    # 历史: 空列表（200），前端据此渲染空状态引导
+    r = client.get(f"/api/sessions/{sid}/messages")
+    assert r.status_code == 200
+    assert r.json()["messages"] == []
+
+
+def test_pending_session_becomes_normal_after_first_save(client, isolated_store):
+    sid = client.post("/api/sessions").json()["id"]
+    isolated_store.save_message(sid, Message.user_text("你好"), None)
+
+    sessions = client.get("/api/sessions").json()["sessions"]
+    mine = [s for s in sessions if s["id"] == sid]
+    assert len(mine) == 1                      # 落盘后不与 pending 重复
+    assert mine[0]["message_count"] == 1
+
+    data = client.get(f"/api/sessions/{sid}/messages").json()
+    assert len(data["messages"]) == 1
+
+
+def test_created_ids_do_not_collide_within_same_second(client, isolated_store):
+    a = client.post("/api/sessions").json()["id"]
+    b = client.post("/api/sessions").json()["id"]
+    assert a != b
 
 
 # ------------------------------------------------------------
@@ -107,12 +150,22 @@ def test_prompter_deny_path():
     assert result.decision == PermissionDecision.DENY
 
 
-def test_prompter_timeout_denies(monkeypatch):
-    monkeypatch.setattr(server, "PERMISSION_TIMEOUT", 0.05)
+def test_prompter_waits_indefinitely_without_approval():
+    """审批不设超时: 不 resolve 也不 cancel 时 decide 持续等待（弹窗可见就一直等）。
+
+    用短计时守护线程验证: decide 仍未返回（阻塞中），由 cancel 解除并 DENY。
+    （120s 自动拒绝已按需求移除——超时的朝安全侧 DENY 会拒绝掉用户还没看到的弹窗。）
+    """
     prompter = server.WebPermissionPrompter(emit=lambda p: None)
-    result = prompter.decide(_request())
-    assert result.decision == PermissionDecision.DENY
-    assert "超时" in result.reason
+    decided: list = []
+    worker = threading.Thread(
+        target=lambda: decided.append(prompter.decide(_request())), daemon=True)
+    worker.start()
+    time.sleep(0.15)                     # 远大于旧超时测试的 0.05s
+    assert not decided                   # 仍在等待, 没有超时拒绝
+    prompter.cancel()                    # stop/断连才会解除等待
+    worker.join(timeout=1)
+    assert decided and decided[0].decision == PermissionDecision.DENY
 
 
 def test_prompter_cancel_denies_immediately():
@@ -157,6 +210,7 @@ def isolated_store(tmp_path, monkeypatch):
     from storage import SessionStore
     fake = SessionStore(storage_dir=tmp_path)
     monkeypatch.setattr(server, "store", fake)
+    server._pending_sessions.clear()
     # api_get_messages 里 list_sessions() 取自替换后的 store
     return fake
 

@@ -7,25 +7,27 @@
 <title>x-code</title>
 <script src="https://cdn.jsdelivr.net/npm/marked@12.0.2/lib/marked.umd.js"></script>
 <style>
-  /* ============ 设计令牌 ============ */
+  /* ============ 设计令牌（参考图: 白色主区 + 浅灰侧栏 + 橙色点缀） ============ */
   :root {
-    --bg: #f7f6f3;
-    --panel: #ffffff;
-    --border: #e7e4de;
-    --border-strong: #d9d5cd;
-    --text: #2b2926;
-    --text-2: #6e6a63;
-    --text-3: #a29e96;
-    --accent: #c96442;
-    --accent-deep: #b5563a;
-    --accent-soft: #f8efe9;
-    --accent-border: #edd8cc;
+    --bg: #ffffff;
+    --side-bg: #f9f9f8;
+    --border: #ececeb;
+    --border-strong: #e2e2e0;
+    --text: #26262a;
+    --text-2: #6e6e74;
+    --text-3: #a5a5ab;
+    --hover: #f0f0ef;
+    --active: #ebebea;
+    --accent: #ee6d33;
+    --accent-deep: #dd5722;
+    --accent-soft: #fdf1e9;
+    --accent-border: #f5dcc9;
     --ok: #1f7a33;      --ok-soft: #e9f3eb;
-    --err: #b93828;     --err-soft: #fbecea;
+    --err: #c93a2b;     --err-soft: #fbecea;
     --warn: #9a6700;    --warn-soft: #fdf3df;
-    --code-bg: #f3f1ec;
-    --shadow-sm: 0 1px 2px rgba(40,33,25,.05);
-    --shadow-md: 0 2px 10px rgba(40,33,25,.08);
+    --code-bg: #f6f6f5;
+    --shadow-sm: 0 1px 2px rgba(30,28,25,.05);
+    --shadow-md: 0 2px 12px rgba(30,28,25,.06);
     --r-sm: 8px; --r-md: 12px; --r-lg: 16px;
   }
   * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -34,97 +36,183 @@
     font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei UI", sans-serif;
     font-size: 14px; color: var(--text);
     background: var(--bg);
-    display: flex; flex-direction: column; overflow: hidden;
+    display: flex; overflow: hidden;
   }
   button { font-family: inherit; cursor: pointer; }
   ::-webkit-scrollbar { width: 8px; height: 8px; }
-  ::-webkit-scrollbar-thumb { background: #d5d1c9; border-radius: 4px; }
-  ::-webkit-scrollbar-thumb:hover { background: #c3beb4; }
+  ::-webkit-scrollbar-thumb { background: #dcdcd9; border-radius: 4px; }
+  ::-webkit-scrollbar-thumb:hover { background: #c9c9c5; }
   ::-webkit-scrollbar-track { background: transparent; }
 
-  /* ============ 顶栏 ============ */
-  #topbar {
-    display: flex; align-items: center; gap: 10px;
-    height: 52px; padding: 0 18px; flex: none;
-    background: var(--panel); border-bottom: 1px solid var(--border);
-  }
-  .logo { display: flex; align-items: center; gap: 8px; font-weight: 700; font-size: 15px; }
-  .logo .mark {
-    width: 22px; height: 22px; border-radius: 7px;
-    background: var(--accent); color: #fff;
-    display: inline-flex; align-items: center; justify-content: center;
-    font-size: 13px;
-  }
-  #conn-state {
-    display: inline-flex; align-items: center; gap: 5px;
-    font-size: 12px; color: var(--text-3);
-  }
-  #conn-state .dot { width: 7px; height: 7px; border-radius: 50%; background: #c9c5bd; }
-  #conn-state.on .dot { background: #3d9a4e; }
-  #conn-state.err .dot { background: var(--err); }
-  #topbar .spacer { flex: 1; }
-  .top-ctl { display: flex; align-items: center; gap: 7px; }
-  .top-ctl label { font-size: 12px; color: var(--text-2); }
-  select {
-    appearance: none; -webkit-appearance: none;
-    background: var(--panel) url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%236e6a63' stroke-width='1.5' fill='none' stroke-linecap='round'/%3E%3C/svg%3E") no-repeat right 10px center;
-    border: 1px solid var(--border); border-radius: var(--r-sm);
-    padding: 6px 28px 6px 12px; font-size: 13px; color: var(--text);
-    transition: border-color .15s;
-  }
-  select:hover { border-color: var(--border-strong); }
-  select:focus { outline: none; border-color: var(--accent); }
-  #btn-stop {
-    display: none; align-items: center; gap: 6px;
-    padding: 6px 14px; border-radius: var(--r-sm);
-    border: 1px solid #ecc8c0; background: var(--err-soft); color: var(--err);
-    font-size: 13px;
-  }
-  #btn-stop:hover { background: #f6ded8; }
-
-  /* ============ 主体 ============ */
-  #main { display: flex; flex: 1; min-height: 0; }
-
-  /* ---- 侧栏 ---- */
+  /* ============ 左侧栏 ============ */
   #sidebar {
-    width: 256px; flex: none; display: flex; flex-direction: column;
-    background: var(--panel); border-right: 1px solid var(--border);
+    width: 264px; flex: none; display: flex; flex-direction: column;
+    background: var(--side-bg); border-right: 1px solid var(--border);
   }
-  #btn-new {
-    margin: 12px 12px 8px; padding: 9px;
-    border: 1px solid var(--accent-border); border-radius: var(--r-md);
-    background: var(--accent-soft); color: var(--accent-deep);
-    font-size: 13px; font-weight: 600;
-    transition: background .15s;
+  .side-logo {
+    display: flex; align-items: center; gap: 9px;
+    padding: 14px 16px 10px; font-weight: 700; font-size: 14.5px;
   }
-  #btn-new:hover { background: #f3e4da; }
-  #session-list { flex: 1; overflow-y: auto; padding: 2px 8px 12px; }
+  .side-logo .mark {
+    width: 26px; height: 26px; border-radius: 8px;
+    background: var(--accent); color: #fff; font-size: 15px;
+    display: inline-flex; align-items: center; justify-content: center;
+  }
+
+  .menu-item {
+    display: flex; align-items: center; gap: 10px;
+    width: calc(100% - 20px); margin: 1px 10px; padding: 0 10px;
+    height: 34px; border: none; background: none; border-radius: var(--r-sm);
+    font-size: 13px; color: #45454b; text-align: left; flex: none;
+  }
+  .menu-item:hover { background: var(--hover); }
+  .menu-item svg { color: #80808a; flex: none; }
+  .menu-item kbd {
+    margin-left: auto; font-family: inherit; font-size: 11px; color: #b8b8be;
+  }
+
+  /* 分组 / 项目 分段切换 */
+  #side-tabs-row {
+    display: flex; align-items: center; gap: 6px;
+    margin: 12px 14px 4px; flex: none;
+  }
+  .seg { flex: 1; display: flex; background: #f0f0ef; border-radius: var(--r-sm); padding: 2px; }
+  .seg button {
+    flex: 1; height: 26px; border: none; background: none; border-radius: 6px;
+    font-size: 12.5px; color: #7c7c83;
+  }
+  .seg button.on {
+    background: #fff; color: var(--text); font-weight: 600;
+    box-shadow: 0 1px 2px rgba(0,0,0,.07);
+  }
+  .seg-acts { display: flex; gap: 2px; }
+  .icon-btn {
+    width: 26px; height: 26px; border: none; background: none; border-radius: 6px;
+    color: #8f8f96; display: inline-flex; align-items: center; justify-content: center;
+    flex: none;
+  }
+  .icon-btn:hover { background: var(--hover); color: #45454b; }
+
+  #search-box { display: none; margin: 6px 14px 2px; flex: none; }
+  #search-box.open { display: block; }
+  #search-input {
+    width: 100%; height: 30px; border: 1px solid var(--border-strong);
+    border-radius: var(--r-sm); padding: 0 10px; font-size: 12.5px;
+    background: #fff; color: var(--text); font-family: inherit;
+  }
+  #search-input:focus { outline: none; border-color: var(--accent); }
+
+  #side-scroll { flex: 1; overflow-y: auto; padding-bottom: 10px; }
+  .list-label {
+    font-size: 11.5px; color: #9a9aa0; margin: 12px 18px 4px; flex: none;
+  }
+  .list-empty { font-size: 12.5px; color: #b8b8be; margin: 4px 18px; }
+
   .session-item {
-    position: relative; padding: 9px 10px 9px 14px; border-radius: var(--r-sm);
-    cursor: pointer; margin-bottom: 2px;
-    display: flex; align-items: baseline; gap: 8px;
-    transition: background .12s;
+    position: relative; display: flex; align-items: center; gap: 8px;
+    width: calc(100% - 16px); margin: 1px 8px; padding: 0 8px; height: 34px;
+    border-radius: var(--r-sm); cursor: pointer; transition: background .12s;
   }
-  .session-item:hover { background: var(--bg); }
-  .session-item.active { background: var(--accent-soft); }
-  .session-item.active::before {
-    content: ""; position: absolute; left: 0; top: 8px; bottom: 8px;
-    width: 3px; border-radius: 2px; background: var(--accent);
-  }
+  .session-item:hover { background: var(--hover); }
+  .session-item.active { background: var(--active); }
+  .session-item .s-ico { flex: none; color: #8f8f96; display: inline-flex; }
   .session-item .title {
-    flex: 1; font-size: 13px;
-    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    flex: 1; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   }
   .session-item.unnamed .title { color: var(--text-3); font-style: italic; }
-  .session-item .meta { flex: none; font-size: 11px; color: var(--text-3); }
+  .session-item .meta { flex: none; font-size: 11px; color: #b8b8be; }
+  .session-item .s-del, .session-item .s-ren {
+    display: none; flex: none;
+    width: 20px; height: 20px; padding: 0;
+    border: none; background: none; border-radius: 5px;
+    color: #b8b8be; align-items: center; justify-content: center;
+  }
+  .session-item:hover .s-del, .session-item:hover .s-ren { display: inline-flex; }
+  .session-item:hover .meta { display: none; }   /* 悬停时时间让位给操作钮 */
+  .session-item .s-del:hover { color: var(--err); background: #e2e2e0; }
+  .session-item .s-ren:hover { color: var(--accent-deep); background: #e2e2e0; }
+  .session-item.renaming .title, .session-item.renaming .meta,
+  .session-item.renaming .s-del, .session-item.renaming .s-ren { display: none; }
+  /* 并行运行态: 运行中脉冲点 / 排队/未读红点 */
+  .session-item .s-run {
+    display: none; flex: none; width: 14px; height: 14px;
+    align-items: center; justify-content: center;
+  }
+  .session-item.running .s-run { display: inline-flex; }
+  .session-item.running .meta { display: none; }      /* 运行中让位给脉冲点 */
+  .session-item.running .s-run::after {
+    content: ""; width: 7px; height: 7px; border-radius: 50%;
+    background: var(--accent); animation: pulse 1.2s infinite;
+  }
+  .session-item .s-unread {
+    display: none; flex: none; min-width: 16px; height: 16px; padding: 0 4px;
+    border-radius: 999px; background: var(--accent); color: #fff;
+    font-size: 10px; font-weight: 600; line-height: 16px; text-align: center;
+  }
+  .session-item.unread .s-unread { display: inline-block; }
+  .session-item.unread .meta { display: none; }
+  .session-item.running.unread .s-unread { display: none; }  /* 运行中优先显脉冲 */
+  .inline-rename {
+    flex: 1; min-width: 0; height: 24px;
+    font-family: inherit; font-size: 12.5px; color: var(--text);
+    background: #fff; border: 1px solid var(--accent); border-radius: 6px;
+    padding: 0 7px;
+  }
+  .inline-rename:focus { outline: none; }
 
-  /* ---- 聊天区 ---- */
-  #chat-pane { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+  /* 底栏: 连接状态 + 装饰入口 */
+  .side-bottom {
+    flex: none; border-top: 1px solid var(--border);
+    padding: 8px 12px; display: flex; align-items: center; gap: 8px;
+  }
+  .side-bottom .avatar {
+    width: 26px; height: 26px; border-radius: 50%; flex: none;
+    background: #ececeb; color: #6e6e74;
+    display: inline-flex; align-items: center; justify-content: center;
+  }
+  #conn-state {
+    display: inline-flex; align-items: center; gap: 6px; flex: 1; min-width: 0;
+    font-size: 12px; color: var(--text-2);
+  }
+  #conn-state .dot { width: 7px; height: 7px; border-radius: 50%; background: #c9c9cd; flex: none; }
+  #conn-state.on .dot { background: #3d9a4e; }
+  #conn-state.err .dot { background: var(--err); }
+
+  /* ============ 右侧主区 ============ */
+  #pane { flex: 1; display: flex; flex-direction: column; min-width: 0; background: var(--bg); }
+
+  /* 文档标题栏 */
+  #doc-header {
+    flex: none; display: flex; align-items: center; gap: 10px;
+    height: 54px; padding: 0 22px; border-bottom: 1px solid #f1f1ef;
+  }
+  #doc-title {
+    font-size: 15px; font-weight: 600; color: var(--text);
+    max-width: 46%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    cursor: text;
+  }
+  #doc-title:hover { color: var(--accent-deep); }
+  .doc-title-input {
+    width: 300px; max-width: 36vw;
+    font-family: inherit; font-size: 14px; font-weight: 600; color: var(--text);
+    background: #fff; border: 1px solid var(--accent); border-radius: 6px;
+    padding: 3px 8px;
+  }
+  .doc-title-input:focus { outline: none; }
+  .ws-tag {
+    display: inline-flex; align-items: center; gap: 5px; flex: none;
+    background: #f4f4f3; border-radius: 6px; padding: 3px 9px;
+    font-size: 12px; color: var(--text-2);
+  }
+  .ws-tag svg { color: #8f8f96; }
+  #doc-header .spacer { flex: 1; }
+
+  /* ============ 聊天区 ============ */
   #messages { flex: 1; overflow-y: auto; }
-  #msg-col { max-width: 860px; margin: 0 auto; padding: 26px 28px 12px; }
+  #msg-col { max-width: 880px; margin: 0 auto; padding: 28px 32px 10px; }
 
   /* 空状态 */
-  .empty-state { text-align: center; padding-top: 12vh; }
+  .empty-state { text-align: center; padding-top: 13vh; }
   .empty-state .mark {
     width: 44px; height: 44px; border-radius: 14px; margin: 0 auto 14px;
     background: var(--accent); color: #fff; font-size: 24px;
@@ -134,14 +222,14 @@
   .empty-state h2 { font-size: 18px; font-weight: 600; margin-bottom: 6px; }
   .empty-state p { color: var(--text-2); font-size: 13px; margin-bottom: 22px; }
   .sug-chip {
-    display: inline-block; margin: 0 5px 8px; padding: 8px 14px;
-    border: 1px solid var(--border); border-radius: 999px;
-    background: var(--panel); color: var(--text-2); font-size: 13px;
+    display: inline-block; margin: 0 5px 8px; padding: 8px 15px;
+    border: 1px solid var(--border-strong); border-radius: 999px;
+    background: #fff; color: var(--text-2); font-size: 13px;
     transition: all .15s;
   }
   .sug-chip:hover { border-color: var(--accent-border); color: var(--accent-deep); background: var(--accent-soft); }
 
-  /* 用户消息：右对齐气泡 */
+  /* 用户消息: 右对齐气泡 */
   .msg { display: flex; margin-bottom: 20px; }
   .msg.user { justify-content: flex-end; }
   .msg.user .bubble {
@@ -151,7 +239,7 @@
     font-size: 14px; line-height: 1.65; white-space: pre-wrap; word-break: break-word;
   }
 
-  /* assistant 消息：头像 + 无框正文 */
+  /* assistant 消息: 头像 + 无框正文（文档感） */
   .msg.assistant { gap: 11px; }
   .msg.assistant .avatar {
     flex: none; width: 26px; height: 26px; margin-top: 2px;
@@ -159,12 +247,12 @@
     display: flex; align-items: center; justify-content: center; font-size: 14px;
   }
   .msg.assistant .bubble {
-    flex: 1; min-width: 0; font-size: 14px; line-height: 1.7; word-break: break-word;
+    flex: 1; min-width: 0; font-size: 14px; line-height: 1.75; word-break: break-word;
   }
 
   /* assistant markdown */
   .bubble p { margin: 0 0 .65em; } .bubble p:last-child { margin-bottom: 0; }
-  .bubble h1, .bubble h2, .bubble h3, .bubble h4 { margin: .9em 0 .45em; line-height: 1.4; }
+  .bubble h1, .bubble h2, .bubble h3, .bubble h4 { margin: .95em 0 .45em; line-height: 1.4; }
   .bubble h1 { font-size: 1.3em; } .bubble h2 { font-size: 1.18em; } .bubble h3 { font-size: 1.06em; }
   .bubble ul, .bubble ol { margin: .4em 0 .7em 1.5em; }
   .bubble li { margin: .2em 0; }
@@ -178,7 +266,7 @@
     border-radius: var(--r-sm); padding: 11px 13px; overflow-x: auto; margin: .55em 0;
   }
   .bubble pre code { background: none; border: none; padding: 0; font-size: 12.5px; line-height: 1.55; }
-  .bubble a { color: #2f6fab; }
+  .bubble a { color: var(--accent-deep); }
   .bubble table { border-collapse: collapse; margin: .6em 0; font-size: 13px; }
   .bubble th, .bubble td { border: 1px solid var(--border-strong); padding: 6px 11px; }
   .bubble th { background: var(--code-bg); font-weight: 600; }
@@ -187,61 +275,52 @@
     padding: 2px 0 2px 12px; color: var(--text-2);
   }
 
-  /* 工具调用卡片 */
-  .tool-card {
-    border: 1px solid var(--border); border-radius: 10px;
-    background: var(--panel); box-shadow: var(--shadow-sm);
-    font-size: 13px; margin-bottom: 12px; overflow: hidden;
+  /* 工具调用行: 灰色一行式条目（参考图风格），纯展示 */
+  .tool-row {
+    display: flex; align-items: center; gap: 7px;
+    margin: 2px 0 10px 37px; padding: 4px 9px;
+    font-size: 13px; color: #a0a0a6;
   }
-  .tool-card.denied { border-color: #ecd9b8; }
-  .tool-card.error { border-color: #efc8c1; }
-  .tool-card summary {
-    padding: 8px 12px; cursor: pointer; user-select: none;
-    display: flex; align-items: center; gap: 9px; list-style: none;
-  }
-  .tool-card summary::-webkit-details-marker { display: none; }
-  .tool-card summary:hover { background: var(--bg); }
-  .tool-card summary .chevron {
-    flex: none; color: var(--text-3); font-size: 10px;
-    transition: transform .15s;
-  }
-  .tool-card[open] summary .chevron { transform: rotate(90deg); }
-  .tool-card summary .tname {
-    flex: none; font-family: Consolas, monospace; font-size: 12.5px;
-    color: var(--accent-deep); background: var(--accent-soft);
-    border: 1px solid var(--accent-border); border-radius: 5px; padding: 1px 7px;
-  }
-  .tool-card summary .tdesc {
-    flex: 1; color: var(--text-2); font-family: Consolas, monospace; font-size: 12px;
+  .tool-row .t-ico { flex: none; display: inline-flex; }
+  .tool-row .tname2 { flex: none; }
+  .tool-row .tdesc {
+    flex: 0 1 auto; min-width: 0;
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    font-family: Consolas, monospace; font-size: 12px;
   }
-  .tstate {
-    flex: none; display: inline-flex; align-items: center; gap: 5px;
-    font-size: 11.5px; border-radius: 999px; padding: 2px 9px;
-  }
-  .tstate::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
-  .tstate.run    { color: var(--warn); background: var(--warn-soft); }
-  .tstate.run::before { animation: pulse 1s infinite; }
-  .tstate.ok     { color: var(--ok); background: var(--ok-soft); }
-  .tstate.err    { color: var(--err); background: var(--err-soft); }
-  .tstate.denied { color: var(--warn); background: var(--warn-soft); }
-  @keyframes pulse { 0%,100% { opacity: .3; } 50% { opacity: 1; } }
-  .tool-card .tbody { border-top: 1px solid var(--border); padding: 9px 12px; }
-  .tool-card .tlabel { color: var(--text-3); font-size: 11px; margin: 5px 0 3px; }
-  .tool-card .tbody pre {
-    position: relative; background: var(--code-bg); border-radius: 6px;
-    padding: 8px 10px; overflow-x: auto;
-    font-family: Consolas, monospace; font-size: 12px; line-height: 1.5;
-    white-space: pre-wrap; word-break: break-all;
-  }
-  .btn-copy {
-    float: right; border: none; background: none; color: var(--text-3); font-size: 11px;
-    padding: 1px 4px; border-radius: 4px;
-  }
-  .btn-copy:hover { color: var(--text); background: var(--border); }
+  .tool-row .tstate { flex: none; }
+  .tstate::before { content: "· "; }
+  .tstate.run { animation: pulse 1.2s infinite; }
+  .tstate.err { color: var(--err); }
+  .tstate.denied { color: var(--warn); }
+  @keyframes pulse { 0%,100% { opacity: .35; } 50% { opacity: 1; } }
 
-  /* 思考指示 */
-  #thinking { display: none; margin: 2px 0 18px 37px; }
+  /* 思考行: 实时「思考中…」→ 收口为「思考 · 持续了X秒」 */
+  .think-row {
+    display: flex; align-items: center; gap: 7px;
+    margin: 2px 0 10px 37px; padding: 4px 9px;
+    font-size: 13px; color: #a0a0a6;
+  }
+  .think-row .t-ico { flex: none; display: inline-flex; }
+  .think-row .pulse-dots { display: inline-flex; gap: 3px; margin-left: 2px; }
+  .think-row .pulse-dots i {
+    width: 4px; height: 4px; border-radius: 50%; background: #b4b4ba;
+    animation: pulse 1s infinite;
+  }
+  .think-row .pulse-dots i:nth-child(2) { animation-delay: .18s; }
+  .think-row .pulse-dots i:nth-child(3) { animation-delay: .36s; }
+
+  /* 提示条（警告/错误） */
+  .note {
+    max-width: fit-content; margin: 0 0 16px; padding: 7px 13px;
+    border-radius: var(--r-sm); font-size: 13px;
+  }
+  .note.warn { color: var(--warn); background: var(--warn-soft); }
+  .note.err  { color: var(--err); background: var(--err-soft); }
+
+  /* ============ 底部输入卡片 ============ */
+  #composer { flex: none; padding: 6px 32px 18px; }
+  #thinking { display: none; max-width: 880px; margin: 0 auto 8px; padding-left: 4px; }
   #thinking .dots { display: inline-flex; gap: 4px; margin-right: 9px; }
   #thinking .dots i {
     width: 6px; height: 6px; border-radius: 50%; background: var(--accent);
@@ -252,58 +331,146 @@
   #thinking .t { color: var(--text-3); font-size: 13px; }
   @keyframes bounce { 0%,60%,100% { transform: translateY(0); opacity: .4; } 30% { transform: translateY(-4px); opacity: 1; } }
 
-  /* 提示条（警告/错误） */
-  .note {
-    max-width: fit-content; margin: 0 0 16px; padding: 7px 13px;
-    border-radius: var(--r-sm); font-size: 13px;
-  }
-  .note.warn { color: var(--warn); background: var(--warn-soft); }
-  .note.err  { color: var(--err); background: var(--err-soft); }
-
-  /* ---- 输入区 ---- */
-  #input-wrap { flex: none; padding: 10px 28px 18px; }
-  #input-bar {
-    max-width: 860px; margin: 0 auto;
-    display: flex; align-items: flex-end; gap: 10px;
-    background: var(--panel); border: 1px solid var(--border-strong);
-    border-radius: 14px; padding: 10px 10px 10px 16px;
-    box-shadow: var(--shadow-md);
+  #input-card {
+    max-width: 880px; margin: 0 auto;
+    border: 1px solid var(--border-strong); border-radius: var(--r-lg);
+    background: #fff; box-shadow: var(--shadow-md);
+    padding: 13px 14px 10px 17px;
     transition: border-color .15s;
   }
-  #input-bar:focus-within { border-color: var(--accent); }
+  #input-card:focus-within { border-color: #f0a582; }
   #input {
-    flex: 1; resize: none; border: none; background: none;
+    width: 100%; resize: none; border: none; background: none;
     color: var(--text); font-family: inherit; font-size: 14px;
-    line-height: 1.55; max-height: 180px; padding: 4px 0;
+    line-height: 1.55; max-height: 160px; padding: 2px 0 10px;
+    display: block;
   }
   #input:focus { outline: none; }
   #input::placeholder { color: var(--text-3); }
-  #input:disabled { background: none; }
+  .comp-row { display: flex; align-items: center; gap: 6px; }
+  .comp-row .spacer { flex: 1; }
+
+  .round-btn {
+    width: 28px; height: 28px; border: none; background: none; border-radius: 50%;
+    color: #7a7a80; display: inline-flex; align-items: center; justify-content: center;
+    flex: none;
+  }
+  .round-btn:hover { background: var(--hover); color: #45454b; }
+
+  .pill {
+    display: inline-flex; align-items: center; gap: 5px; height: 28px;
+    padding: 0 5px; border-radius: 8px; flex: none;
+  }
+  .pill:hover { background: #f5f5f4; }
+  .pill > svg { flex: none; }
+  .pill select {
+    appearance: none; -webkit-appearance: none;
+    border: none; background: transparent; height: 100%;
+    font-family: inherit; font-size: 12.5px; color: var(--text-2); cursor: pointer;
+    padding: 0 17px 0 1px; max-width: 180px;
+  }
+  .pill select:focus { outline: none; }
+  .pill select:disabled { cursor: default; opacity: 1; }
+  .pill.mode { color: var(--accent); }
+  .pill.mode > svg { margin-left: 3px; }
+  .pill.mode select {
+    color: var(--accent); font-weight: 600;
+    background: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='9' height='6' viewBox='0 0 9 6'%3E%3Cpath d='M1 1l3.5 3.5L8 1' stroke='%23ee6d33' stroke-width='1.5' fill='none' stroke-linecap='round'/%3E%3C/svg%3E") no-repeat right 2px center;
+  }
+  .pill.model select {
+    background: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='9' height='6' viewBox='0 0 9 6'%3E%3Cpath d='M1 1l3.5 3.5L8 1' stroke='%238f8f96' stroke-width='1.5' fill='none' stroke-linecap='round'/%3E%3C/svg%3E") no-repeat right 2px center;
+  }
+  .pill.effort .ring {
+    width: 12px; height: 12px; border: 1.7px solid #b4b4ba; border-radius: 50%;
+    flex: none; margin-left: 3px;
+  }
+  .pill.effort select {
+    background: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='9' height='6' viewBox='0 0 9 6'%3E%3Cpath d='M1 1l3.5 3.5L8 1' stroke='%238f8f96' stroke-width='1.5' fill='none' stroke-linecap='round'/%3E%3C/svg%3E") no-repeat right 2px center;
+  }
+
   #btn-send {
-    flex: none; padding: 9px 20px; border: none; border-radius: 10px;
-    background: var(--accent); color: #fff; font-size: 13.5px; font-weight: 600;
-    transition: background .15s;
+    width: 30px; height: 30px; border: none; border-radius: 50%;
+    background: var(--accent); color: #fff;
+    display: inline-flex; align-items: center; justify-content: center;
+    flex: none; margin-left: 3px; transition: background .15s;
   }
   #btn-send:hover { background: var(--accent-deep); }
-  #btn-send:disabled { background: #e0b8a9; cursor: not-allowed; }
-  #input-hint {
-    max-width: 860px; margin: 6px auto 0; text-align: center;
-    color: var(--text-3); font-size: 11.5px;
+  #btn-send:disabled { background: #f2bd9e; cursor: not-allowed; }
+  #btn-stop {
+    width: 30px; height: 30px; border-radius: 50%;
+    border: 1.5px solid #efc0b8; background: #fff; color: var(--err);
+    display: none; align-items: center; justify-content: center;
+    flex: none; margin-left: 3px;
   }
+  #btn-stop:hover { background: var(--err-soft); }
+
+  /* 工作目录 chip（草稿态选择项目目录） */
+  .wd-chip {
+    display: none; align-items: center; gap: 5px; height: 28px;
+    padding: 0 9px; border-radius: 8px; border: none; background: none;
+    color: var(--text-2); font-size: 12.5px; flex: none; max-width: 200px;
+  }
+  .wd-chip:hover { background: #f5f5f4; }
+  .wd-chip.show { display: inline-flex; }
+  .wd-chip #wd-chip-text {
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+
+  /* 目录选择弹层 */
+  #dir-pop {
+    display: none; position: fixed; z-index: 150;
+    width: 340px; background: #fff;
+    border: 1px solid var(--border-strong); border-radius: 12px;
+    box-shadow: 0 8px 32px rgba(30,28,25,.16);
+    padding: 12px; flex-direction: column; gap: 8px;
+  }
+  #dir-pop.open { display: flex; }
+  .dir-title { font-size: 12.5px; font-weight: 600; color: var(--text-2); }
+  .dir-path-row { display: flex; align-items: center; gap: 5px; }
+  #dir-path-input {
+    flex: 1; min-width: 0; height: 28px;
+    border: 1px solid var(--border-strong); border-radius: 7px;
+    padding: 0 9px; font-size: 12px; font-family: Consolas, monospace;
+    color: var(--text); background: #fff;
+  }
+  #dir-path-input:focus { outline: none; border-color: var(--accent); }
+  #dir-list {
+    max-height: 210px; overflow-y: auto;
+    border: 1px solid var(--border); border-radius: 8px;
+  }
+  .dir-item {
+    display: flex; align-items: center; gap: 7px;
+    padding: 6px 10px; font-size: 12.5px; color: var(--text);
+    cursor: pointer;
+  }
+  .dir-item:hover { background: var(--hover); }
+  .dir-item svg { color: #8f8f96; flex: none; }
+  .dir-empty { padding: 12px 10px; font-size: 12px; color: var(--text-3); }
+  .dir-err { font-size: 11.5px; color: var(--err); display: none; padding: 0 2px; }
+  .dir-err.show { display: block; }
+  .dir-actions { display: flex; justify-content: flex-end; }
+  #dir-pick {
+    padding: 6px 16px; border: none; border-radius: 8px;
+    background: var(--accent); color: #fff; font-size: 12.5px; font-weight: 600;
+  }
+  #dir-pick:hover { background: var(--accent-deep); }
 
   /* ============ 权限审批 ============ */
   #perm-overlay {
     display: none; position: fixed; inset: 0; z-index: 100;
-    background: rgba(43,41,38,.4); backdrop-filter: blur(2px);
+    background: rgba(30,28,25,.38); backdrop-filter: blur(2px);
     align-items: center; justify-content: center;
   }
   #perm-modal {
-    width: min(560px, 92vw); background: var(--panel);
-    border-radius: var(--r-md); box-shadow: 0 12px 40px rgba(40,33,25,.25);
+    width: min(560px, 92vw); background: #fff;
+    border-radius: var(--r-lg); box-shadow: 0 12px 40px rgba(30,28,25,.22);
     padding: 20px 22px; animation: rise .18s ease;
   }
   @keyframes rise { from { transform: translateY(8px); opacity: 0; } to { transform: none; opacity: 1; } }
-  #perm-modal h3 { font-size: 15px; margin-bottom: 14px; color: var(--warn); }
+  #perm-modal h3 {
+    font-size: 15px; margin-bottom: 14px; color: var(--accent-deep);
+    display: flex; align-items: center; gap: 7px;
+  }
   #perm-modal .field { margin-bottom: 10px; font-size: 13px; }
   #perm-modal .field .k {
     display: inline-block; min-width: 42px; color: var(--text-3); margin-right: 10px;
@@ -317,54 +484,143 @@
   #perm-modal .btns { display: flex; gap: 10px; justify-content: flex-end; margin-top: 16px; }
   #perm-modal .btns button {
     padding: 8px 24px; border-radius: var(--r-sm); font-size: 13.5px; font-weight: 600;
-    border: 1px solid var(--border-strong); background: var(--panel); color: var(--text);
+    border: 1px solid var(--border-strong); background: #fff; color: var(--text);
   }
-  #btn-allow { background: var(--ok) !important; border-color: var(--ok) !important; color: #fff !important; }
-  #btn-allow:hover { background: #186329 !important; }
+  #btn-allow { background: var(--accent) !important; border-color: var(--accent) !important; color: #fff !important; }
+  #btn-allow:hover { background: var(--accent-deep) !important; }
   #btn-deny { color: var(--err) !important; border-color: #e5b8b1 !important; }
   #btn-deny:hover { background: var(--err-soft) !important; }
+
+  /* 轻提示 */
+  #toast {
+    position: fixed; left: 50%; bottom: 96px; z-index: 200;
+    transform: translateX(-50%) translateY(6px);
+    background: rgba(40,40,45,.92); color: #fff;
+    font-size: 12.5px; padding: 7px 15px; border-radius: 999px;
+    opacity: 0; pointer-events: none; transition: all .18s;
+  }
+  #toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
 </style>
 </head>
 <body>
 
-<div id="topbar">
-  <span class="logo"><span class="mark">✻</span>x-code</span>
-  <span id="conn-state"><span class="dot"></span><span id="conn-text">连接中…</span></span>
-  <span class="spacer"></span>
-  <span class="top-ctl"><label>思考等级</label>
-    <select id="sel-thinking">
-      <option value="low">low</option>
-      <option value="medium">medium</option>
-      <option value="high">high</option>
-      <option value="max">max</option>
-    </select>
-  </span>
-  <span class="top-ctl"><label>权限模式</label>
-    <select id="sel-mode">
-      <option value="read-only">read-only</option>
-      <option value="workspace-write">workspace-write</option>
-      <option value="danger-full-access">danger-full-access</option>
-      <option value="prompt">prompt</option>
-    </select>
-  </span>
-  <button id="btn-stop">■ 停止</button>
-</div>
+<!-- ============ 左侧栏 ============ -->
+<aside id="sidebar">
+  <div class="side-logo"><span class="mark">✻</span>x-code</div>
 
-<div id="main">
-  <div id="sidebar">
-    <button id="btn-new">＋ 新建会话</button>
-    <div id="session-list"></div>
+  <button class="menu-item" id="btn-new" title="新建会话">
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M12 8.5v7M8.5 12h7"/></svg>
+    新建任务<kbd>Ctrl+N</kbd>
+  </button>
+  <button class="menu-item" id="btn-search" title="搜索会话">
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.2-3.2"/></svg>
+    搜索<kbd>Ctrl+K</kbd>
+  </button>
+  <button class="menu-item" data-stub title="敬请期待">
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"><path d="M13 2.5L4.5 14H11l-1.5 7.5L18 10h-6.5L13 2.5z"/></svg>
+    自动化
+  </button>
+  <button class="menu-item" data-stub title="敬请期待">
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="4" y="4" width="7" height="7" rx="1.5"/><rect x="13" y="4" width="7" height="7" rx="1.5"/><rect x="4" y="13" width="7" height="7" rx="1.5"/><rect x="13" y="13" width="7" height="7" rx="1.5"/></svg>
+    插件市场
+  </button>
+
+  <div id="side-tabs-row">
+    <div class="seg">
+      <button id="tab-group">分组</button>
+      <button id="tab-project" class="on">项目</button>
+    </div>
+    <div class="seg-acts">
+      <button class="icon-btn" id="btn-filter" title="搜索">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"><path d="M4 5h16l-6.2 7.2V18l-3.6 2v-7.8L4 5z"/></svg>
+      </button>
+      <button class="icon-btn" data-stub title="敬请期待">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M4 7h16M9.5 7V5h5v2M6.5 7l1 13h9l1-13"/></svg>
+      </button>
+    </div>
   </div>
 
-  <div id="chat-pane">
-    <div id="messages"><div id="msg-col"></div></div>
+  <div id="search-box"><input id="search-input" type="text" placeholder="搜索会话标题…"></div>
+
+  <div id="side-scroll">
+    <div id="session-list"></div>
+    <div class="list-label">任务</div>
+    <div class="list-empty">还没有任务</div>
+  </div>
+
+  <div class="side-bottom">
+    <span class="avatar">
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="8.5" r="3.5"/><path d="M5 20c1.2-3.4 4-5 7-5s5.8 1.6 7 5"/></svg>
+    </span>
+    <span id="conn-state"><span class="dot"></span><span id="conn-text">连接中…</span></span>
+    <button class="icon-btn" data-stub title="敬请期待">
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><rect x="7" y="3" width="10" height="18" rx="2.5"/><path d="M11 17.5h2"/></svg>
+    </button>
+    <button class="icon-btn" data-stub title="敬请期待">
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="12" r="3.2"/><path d="M12 2.8v3M12 18.2v3M2.8 12h3M18.2 12h3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M18.4 5.6l-2.1 2.1M7.7 16.3l-2.1 2.1"/></svg>
+    </button>
+  </div>
+</aside>
+
+<!-- ============ 右侧主区 ============ -->
+<div id="pane">
+  <header id="doc-header">
+    <span id="doc-title">未命名任务</span>
+    <span class="ws-tag" id="ws-tag" title="工作目录">
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"><path d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2V7z"/></svg>
+      <span id="ws-tag-text">workplace</span>
+    </span>
+    <button class="icon-btn" data-stub title="敬请期待">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="1.7"/><circle cx="12" cy="12" r="1.7"/><circle cx="19" cy="12" r="1.7"/></svg>
+    </button>
+    <span class="spacer"></span>
+  </header>
+
+  <div id="messages"><div id="msg-col"></div></div>
+
+  <div id="composer">
     <div id="thinking"><span class="dots"><i></i><i></i><i></i></span><span class="t">思考中…</span></div>
-    <div id="input-wrap">
-      <div id="input-bar">
-        <textarea id="input" rows="1" placeholder="输入消息，Enter 发送，Shift+Enter 换行"></textarea>
-        <button id="btn-send">发送</button>
+    <div id="input-card">
+      <textarea id="input" rows="1" placeholder="提出后续修改要求" title="Enter 发送 · Shift+Enter 换行 · 对话与 CLI 共享同一份历史"></textarea>
+      <div class="comp-row">
+        <button id="btn-plus" class="round-btn" data-stub title="添加附件（敬请期待）">
+          <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
+        </button>
+        <button id="wd-chip" class="wd-chip" title="会话工作目录">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"><path d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2V7z"/></svg>
+          <span id="wd-chip-text">选择工作目录</span>
+          <svg width="9" height="6" viewBox="0 0 9 6" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M1 1l3.5 3.5L8 1"/></svg>
+        </button>
+        <span class="pill mode" title="权限模式">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linejoin="round"><path d="M12 3l7 2.8v5.4c0 4.4-2.9 7.8-7 9.8-4.1-2-7-5.4-7-9.8V5.8L12 3z"/></svg>
+          <select id="sel-mode">
+            <option value="read-only">只读</option>
+            <option value="workspace-write">工作区写入</option>
+            <option value="danger-full-access">完全访问</option>
+            <option value="prompt">每次询问</option>
+            <option value="allow">全部允许</option>
+          </select>
+        </span>
+        <span class="spacer"></span>
+        <span class="pill model" title="当前模型">
+          <select id="sel-model" disabled><option>…</option></select>
+        </span>
+        <span class="pill effort" title="思考等级">
+          <span class="ring"></span>
+          <select id="sel-thinking">
+            <option value="low">低</option>
+            <option value="medium">中</option>
+            <option value="high">高</option>
+            <option value="max">最高</option>
+          </select>
+        </span>
+        <button id="btn-send" title="发送">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5.5 11.5L12 5l6.5 6.5"/></svg>
+        </button>
+        <button id="btn-stop" title="停止本轮">
+          <svg width="12" height="12" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2.5" fill="currentColor"/></svg>
+        </button>
       </div>
-      <div id="input-hint">Enter 发送 · Shift+Enter 换行 · 对话与 CLI 共享同一份历史</div>
     </div>
   </div>
 </div>
@@ -372,7 +628,10 @@
 <!-- 权限审批模态框 -->
 <div id="perm-overlay">
   <div id="perm-modal">
-    <h3>⚠ 需要授权</h3>
+    <h3>
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linejoin="round"><path d="M12 3l7 2.8v5.4c0 4.4-2.9 7.8-7 9.8-4.1-2-7-5.4-7-9.8V5.8L12 3z"/></svg>
+      <span id="perm-title">需要授权</span>
+    </h3>
     <div class="field"><span class="k">工具</span><span id="perm-tool"></span></div>
     <div class="field"><span class="k">权限</span><span id="perm-mode"></span></div>
     <div class="field"><span class="k">内容</span><pre id="perm-input"></pre></div>
@@ -383,6 +642,27 @@
   </div>
 </div>
 
+<div id="toast"></div>
+
+<!-- 工作目录选择器（草稿态） -->
+<div id="dir-pop">
+  <div class="dir-title">选择工作目录</div>
+  <div class="dir-path-row">
+    <button class="icon-btn" id="dir-up" title="上一级">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5.5 11.5L12 5l6.5 6.5"/></svg>
+    </button>
+    <input id="dir-path-input" spellcheck="false" placeholder="输入目录路径，回车跳转">
+    <button class="icon-btn" id="dir-go" title="转到">
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M13 6l6 6-6 6"/></svg>
+    </button>
+  </div>
+  <div id="dir-list"></div>
+  <div class="dir-err" id="dir-err"></div>
+  <div class="dir-actions">
+    <button id="dir-pick">使用此目录</button>
+  </div>
+</div>
+
 <script>
 "use strict";
 /* ============================================================
@@ -390,14 +670,39 @@
  * ============================================================ */
 const $ = id => document.getElementById(id);
 const state = {
-  sessionId: null,          // 当前会话 id
-  ws: null,                 // WebSocket
-  busy: false,              // 一轮对话进行中
-  pendingPerm: null,        // 待审批的 permission_request
-  activeToolCard: null,     // 当前流式中的工具卡片（配对 tool_result）
-  curBubble: null,          // 当前流式中的正文气泡
-  toolResultIndex: {},      // 历史回放: tool_use id → 卡片（等结果块配对）
+  sessionId: null,          // 当前"可见"的会话 id（null = 草稿/无）
+  sessions: [],             // 全量会话列表（loadSessions 填充）
+  sideTab: "project",       // 侧栏列表模式: project | group
+  draft: false,             // 草稿态: 已点"新建"但还没发首条消息（不建条目）
+  draftWorkdir: null,       // 草稿态选择的工作目录（项目的意义）
+  serverWorkspace: null,    // 服务进程工作区名（无会话目录时的兜底展示）
+  runs: {},                 // sessionId → 运行态（多会话并行: 各自 WS/流式指针/审批）
 };
+
+/* 一个会话的运行态。多会话并行的核心: 每个会话有自己的 WebSocket、
+   流式 DOM 指针、权限审批、未读数。切换会话只是换"可见"的 id,
+   后台会话的 WS 与轮次照常跑; 回到前台时按需重拉历史对齐。 */
+function runOf(id) {
+  if (!state.runs[id]) {
+    state.runs[id] = {
+      ws: null,               // 该会话的 WebSocket
+      busy: false,            // 一轮对话进行中（含排队等待槽位）
+      queued: false,          // 在全局并发队列中等待槽位
+      pendingPerm: null,      // 待审批的 permission_request
+      activeToolCard: null,   // 当前流式中的工具行（配对 tool_result）
+      curBubble: null,        // 当前流式中的正文气泡
+      curThinking: null,      // 当前流式中的思考行 { el, t0 }
+      toolResultIndex: {},    // 历史回放: tool_use id → 行（等结果块配对）
+      currentWorkdir: null,   // 该会话的工作目录（messages 接口返回）
+      pendingSends: [],       // WS 建立期间待发的消息（onopen 后冲刷）
+      unread: 0,              // 后台完成/待审批的未读计数
+      everHidden: false,      // 本轮有事件在后台到达过（回前台需重拉历史）
+      loaded: false,          // 历史是否已加载过（首次切入必拉）
+    };
+  }
+  return state.runs[id];
+}
+const curRun = () => (state.sessionId ? runOf(state.sessionId) : null);
 
 /* ============================================================
  * markdown 渲染: marked.js 优先，加载失败降级为转义纯文本
@@ -417,42 +722,243 @@ function renderMd(text) {
 }
 
 /* ============================================================
- * 侧栏会话列表
+ * 轻提示
  * ============================================================ */
+let toastTimer = null;
+function toast(text) {
+  const t = $("toast");
+  t.textContent = text;
+  t.classList.add("show");
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => t.classList.remove("show"), 1600);
+}
+
+/* ============================================================
+ * 侧栏会话列表（项目 / 分组 两种模式 + 搜索过滤）
+ * ============================================================ */
+function sessionDate(id) {
+  // 会话 id 是 %Y%m%d-%H%M%S 时间戳（可能有 "w" 后缀防撞）
+  const m = /^(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})(\d{2})/.exec(id);
+  return m ? new Date(+m[1], +m[2] - 1, +m[3]) : null;
+}
 function relativeTime(id) {
-  // 会话 id 是 %Y%m%d-%H%M%S 时间戳，直接解析出相对时间
-  const m = /^(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})(\d{2})$/.exec(id);
+  const m = /^(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})(\d{2})/.exec(id);
   if (!m) return "";
   const then = new Date(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6]);
   const diff = (Date.now() - then.getTime()) / 1000;
   if (diff < 90) return "刚刚";
-  if (diff < 3600) return Math.floor(diff / 60) + " 分钟前";
-  if (diff < 86400) return Math.floor(diff / 3600) + " 小时前";
-  if (diff < 172800) return "昨天";
+  if (diff < 3600) return Math.floor(diff / 60) + "分钟";
+  if (diff < 86400) return Math.floor(diff / 3600) + "小时";
+  if (diff < 172800) return "1天";
+  if (diff < 604800) return Math.floor(diff / 86400) + "天";
   return `${+m[2]}/${+m[3]}`;
+}
+function sessionBucket(id) {
+  const d = sessionDate(id);
+  if (!d) return 3;
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+  const days = Math.floor((today - d) / 86400000);
+  if (days <= 0) return 0;      // 今天
+  if (days === 1) return 1;     // 昨天
+  if (days < 7) return 2;       // 7 天内
+  return 3;                     // 更早
+}
+const BUCKET_LABELS = ["今天", "昨天", "7 天内", "更早"];
+const FOLDER_SVG = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"><path d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2V7z"/></svg>';
+const UNTITLED_TITLE = "未命名任务";
+
+function displayTitle(s) {
+  return (!s || s.title === "(未命名)") ? UNTITLED_TITLE : s.title;
 }
 
 async function loadSessions() {
   try {
     const r = await fetch("/api/sessions");
     const data = await r.json();
-    const list = $("session-list");
-    list.innerHTML = "";
-    for (const s of data.sessions) {
-      const item = document.createElement("div");
-      const unnamed = s.title === "(未命名)";
-      item.className = "session-item"
-        + (s.id === state.sessionId ? " active" : "")
-        + (unnamed ? " unnamed" : "");
-      item.dataset.id = s.id;
-      item.title = `${s.title} · ${s.message_count} 条消息`;
-      item.innerHTML = '<span class="title"></span><span class="meta"></span>';
-      item.querySelector(".title").textContent = s.title;
-      item.querySelector(".meta").textContent = relativeTime(s.id);
-      item.onclick = () => selectSession(s.id);
-      list.appendChild(item);
-    }
+    state.sessions = data.sessions;
+    renderSessionList();
   } catch (e) { console.error("加载会话列表失败", e); }
+}
+
+const TRASH_SMALL_SVG = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 7h16M9.5 7V5h5v2M6.5 7l1 13h9l1-13"/></svg>';
+const PENCIL_SMALL_SVG = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20l4.5-1L20 7.5 16.5 4 5 15.5 4 20z"/></svg>';
+
+async function renameSession(id, title) {
+  try {
+    const r = await fetch(`/api/sessions/${id}/rename`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ title }),
+    });
+    if (!r.ok) {
+      const err = await r.json().catch(() => ({}));
+      throw new Error(err.detail || r.status);
+    }
+    const s = state.sessions.find(x => x.id === id);
+    if (s) s.title = title;
+    renderSessionList();
+    if (id === state.sessionId) refreshDocTitle();
+  } catch (e) {
+    toast("重命名失败: " + e.message);
+  }
+}
+
+/* 通用行内编辑框: Enter/失焦提交，Esc 取消；onDone 无论提交与否都会回调 */
+function makeInlineEditor(initial, onCommit, onDone) {
+  const input = document.createElement("input");
+  input.className = "inline-rename";
+  input.maxLength = 60;
+  input.value = initial;
+  const finish = commit => {
+    if (input._done) return;
+    input._done = true;
+    const val = input.value.trim();
+    input.remove();
+    if (commit && val && val !== initial) onCommit(val);
+    if (onDone) onDone(commit);
+  };
+  input.onclick = ev => ev.stopPropagation();
+  input.onkeydown = ev => {
+    ev.stopPropagation();   // 别让按键冒泡成全局快捷键
+    if (ev.key === "Enter") finish(true);
+    else if (ev.key === "Escape") finish(false);
+  };
+  input.onblur = () => finish(true);
+  requestAnimationFrame(() => { input.focus(); input.select(); });
+  return input;
+}
+
+function makeSessionItem(s) {
+  const item = document.createElement("div");
+  const unnamed = s.title === "(未命名)";
+  item.className = "session-item"
+    + (s.id === state.sessionId ? " active" : "")
+    + (unnamed ? " unnamed" : "");
+  item.dataset.id = s.id;
+  item.title = `${s.title} · ${s.message_count} 条消息`;
+  item.innerHTML = '<span class="s-ico">' + FOLDER_SVG + '</span>'
+    + '<span class="s-run" title="运行中"></span><span class="s-unread"></span>'
+    + '<span class="title"></span><span class="meta"></span>'
+    + '<button class="s-ren" title="重命名">' + PENCIL_SMALL_SVG + '</button>'
+    + '<button class="s-del" title="删除会话">' + TRASH_SMALL_SVG + '</button>';
+  item.querySelector(".title").textContent = displayTitle(s);
+  item.querySelector(".meta").textContent = relativeTime(s.id);
+  const run = state.runs[s.id];
+  if (run && run.busy) item.classList.add("running");
+  if (run && run.unread > 0) {
+    item.classList.add("unread");
+    item.querySelector(".s-unread").textContent = run.unread > 99 ? "99+" : run.unread;
+  }
+  item.onclick = () => selectSession(s.id);
+  item.querySelector(".s-ren").onclick = ev => {
+    ev.stopPropagation();
+    if (item.classList.contains("renaming")) return;
+    item.classList.add("renaming");   // 编辑期间隐藏标题/时间/按钮
+    const input = makeInlineEditor(
+      displayTitle(s),
+      val => renameSession(s.id, val),
+      () => item.classList.remove("renaming"),
+    );
+    item.appendChild(input);
+  };
+  item.querySelector(".s-del").onclick = ev => {
+    ev.stopPropagation();
+    deleteSession(s.id);
+  };
+  return item;
+}
+
+async function deleteSession(id) {
+  const run = state.runs[id];
+  if (run && run.busy) {
+    toast("该会话本轮对话进行中，暂不能删除");
+    return;
+  }
+  const cur = state.sessions.find(s => s.id === id);
+  if (!confirm(`删除会话「${displayTitle(cur)}」？删除后不可恢复。`)) return;
+  try {
+    const r = await fetch(`/api/sessions/${id}`, { method: "DELETE" });
+    if (!r.ok) {
+      const err = await r.json().catch(() => ({}));
+      throw new Error(err.detail || r.status);
+    }
+    state.sessions = state.sessions.filter(s => s.id !== id);
+    closeWs(id);                 // 断掉该会话的 WS
+    delete state.runs[id];       // 运行态一并清理
+    renderSessionList();
+    if (id === state.sessionId) {
+      // 删的是当前会话: 自动切到最近的会话，没有则回草稿态
+      state.sessionId = null;
+      const next = state.sessions[0];
+      if (next) await selectSession(next.id);
+      else startDraft();
+    }
+    toast("会话已删除");
+  } catch (e) {
+    toast("删除失败: " + e.message);
+  }
+}
+
+function renderSessionList() {
+  const list = $("session-list");
+  list.innerHTML = "";
+  const q = ($("search-input").value || "").trim().toLowerCase();
+  const sessions = state.sessions.filter(
+    s => !q
+      || (s.title || "").toLowerCase().includes(q)
+      || (s.workdir || "").toLowerCase().includes(q));   // 项目路径/目录名也可搜
+  if (!sessions.length) {
+    list.innerHTML = '<div class="list-empty">' + (q ? "没有匹配的会话" : "还没有会话") + "</div>";
+    return;
+  }
+  const addLabel = text => {
+    const l = document.createElement("div");
+    l.className = "list-label";
+    l.textContent = text;
+    list.appendChild(l);
+  };
+  if (state.sideTab === "group") {
+    // 会话按时间倒序，分组标签自然按 今天→更早 顺序出现
+    let bucket = -1;
+    for (const s of sessions) {
+      const b = sessionBucket(s.id);
+      if (b !== bucket) { bucket = b; addLabel(BUCKET_LABELS[b]); }
+      list.appendChild(makeSessionItem(s));
+    }
+  } else {
+    // 按项目(工作目录)分组: 组标题是目录名, 悬停看完整路径;
+    // 没设置工作目录的会话归入「未设置项目」, 永远排在最后。
+    const groups = new Map();   // workdir → sessions(时间倒序, 列表本身已倒序)
+    for (const s of sessions) {
+      const key = s.workdir || "";
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(s);
+    }
+    const named = [...groups.entries()].filter(([k]) => k);
+    named.sort((a, b) => b[1][0].id.localeCompare(a[1][0].id));  // 组间按最新会话
+    for (const [wd, items] of named) {
+      const label = document.createElement("div");
+      label.className = "list-label";
+      label.textContent = projectDisplayName(wd);
+      label.title = wd;          // 悬停显示完整路径
+      label.style.maxWidth = "calc(100% - 36px)";
+      label.style.overflow = "hidden";
+      label.style.textOverflow = "ellipsis";
+      label.style.whiteSpace = "nowrap";
+      list.appendChild(label);
+      for (const s of items) list.appendChild(makeSessionItem(s));
+    }
+    const loose = groups.get("") || [];
+    if (loose.length) {
+      addLabel("未设置项目");
+      for (const s of loose) list.appendChild(makeSessionItem(s));
+    }
+  }
+}
+
+/* 项目分组的组标题: 与顶栏 ws-tag 一致取目录名(末段), 空路径兜底 */
+function projectDisplayName(wd) {
+  return dirName(wd) || "未设置项目";
 }
 
 function markActiveSession() {
@@ -461,33 +967,176 @@ function markActiveSession() {
   });
 }
 
+function refreshDocTitle() {
+  const cur = state.sessions.find(s => s.id === state.sessionId);
+  $("doc-title").textContent = cur ? displayTitle(cur) : UNTITLED_TITLE;
+  refreshWorkdirTag();
+}
+
+/* ============================================================
+ * 工作目录（项目）: 草稿态选择 + 顶栏标签展示
+ * ============================================================ */
+function dirName(p) { return p ? p.split(/[\\/]/).filter(Boolean).pop() : null; }
+
+function refreshWorkdirTag() {
+  // 顶栏标签: 草稿 → 选中的目录; 会话 → 其运行态里的工作目录; 兜底 → 服务进程工作区名
+  const run = curRun();
+  const wd = state.draft ? state.draftWorkdir : (run ? run.currentWorkdir : null);
+  $("ws-tag-text").textContent = dirName(wd) || state.serverWorkspace || "workplace";
+  $("ws-tag").title = "工作目录: " + (wd || "服务进程目录");
+}
+
+function setDraftWorkdir(path) {
+  state.draftWorkdir = path;
+  $("wd-chip-text").textContent = dirName(path) || "选择工作目录";
+  $("wd-chip").title = "会话工作目录: " + (path || "未设置（用服务进程目录）");
+  refreshWorkdirTag();
+}
+
+function updateWdChipVisibility() {
+  // 只有草稿态需要选目录; 会话创建后项目归属显示在顶栏标签
+  $("wd-chip").classList.toggle("show", state.draft);
+}
+
+const dirPop = $("dir-pop");
+let dirBrowsePath = null;
+
+async function browseDir(path) {
+  const err = $("dir-err");
+  err.classList.remove("show");
+  try {
+    const q = path ? "?path=" + encodeURIComponent(path) : "";
+    const r = await fetch("/api/dirs" + q);
+    if (!r.ok) {
+      const e = await r.json().catch(() => ({}));
+      throw new Error(e.detail || r.status);
+    }
+    const data = await r.json();
+    dirBrowsePath = data.path;
+    $("dir-path-input").value = data.path;
+    const list = $("dir-list");
+    list.innerHTML = "";
+    if (!data.dirs.length) {
+      list.innerHTML = '<div class="dir-empty">此目录下没有子目录</div>';
+      return;
+    }
+    for (const name of data.dirs) {
+      const it = document.createElement("div");
+      it.className = "dir-item";
+      it.innerHTML = FOLDER_SVG + '<span></span>';
+      it.querySelector("span").textContent = name;
+      it.onclick = () => browseDir(dirBrowsePath.replace(/[\\/]+$/, "") + "\\" + name);
+      list.appendChild(it);
+    }
+  } catch (e) {
+    err.textContent = "无法读取: " + e.message;
+    err.classList.add("show");
+  }
+}
+
+function openDirPop() {
+  const r = $("wd-chip").getBoundingClientRect();
+  dirPop.classList.add("open");
+  const left = Math.max(10, Math.min(r.left, window.innerWidth - 352));
+  dirPop.style.left = left + "px";
+  dirPop.style.top = "auto";
+  dirPop.style.bottom = (window.innerHeight - r.top + 8) + "px";
+  browseDir(state.draftWorkdir || "");
+}
+function closeDirPop() { dirPop.classList.remove("open"); }
+
+$("wd-chip").onclick = ev => {
+  ev.stopPropagation();
+  if (!state.draft) return;
+  dirPop.classList.contains("open") ? closeDirPop() : openDirPop();
+};
+$("dir-up").onclick = () => {
+  const parts = (dirBrowsePath || "").split(/[\\/]/).filter(Boolean);
+  if (!parts.length) return;
+  parts.pop();
+  if (!parts.length) return;
+  // 只剩盘符（如 "D:"）时补上根斜杠，避免 Path("D:") 落到盘符当前目录
+  browseDir(parts.length === 1 && /^[a-zA-Z]:$/.test(parts[0]) ? parts[0] + "\\" : parts.join("\\"));
+};
+function goDirInput() { browseDir($("dir-path-input").value.trim()); }
+$("dir-go").onclick = goDirInput;
+$("dir-path-input").addEventListener("keydown", ev => {
+  ev.stopPropagation();
+  if (ev.key === "Enter") goDirInput();
+});
+$("dir-pick").onclick = () => {
+  if (!dirBrowsePath) return;
+  setDraftWorkdir(dirBrowsePath);
+  closeDirPop();
+};
+document.addEventListener("click", ev => {
+  if (!dirPop.classList.contains("open")) return;
+  if (!dirPop.contains(ev.target) && !$("wd-chip").contains(ev.target)) closeDirPop();
+});
+
+/* 顶栏标题点击重命名（Notion 式） */
+$("doc-title").title = "点击重命名";
+$("doc-title").onclick = () => {
+  if (state.draft || !state.sessionId) return;   // 草稿态没有可命名的会话
+  if ($("doc-title").querySelector("input")) return;
+  const cur = state.sessions.find(s => s.id === state.sessionId);
+  if (!cur) return;
+  const input = makeInlineEditor(
+    displayTitle(cur),
+    val => renameSession(state.sessionId, val),
+    () => refreshDocTitle(),   // 取消/完成后恢复标题文本（提交后 rename 也会刷新）
+  );
+  $("doc-title").textContent = "";
+  $("doc-title").appendChild(input);
+};
+
 /* ============================================================
  * 会话切换 / 新建 / 历史回放
  * ============================================================ */
 async function selectSession(id) {
-  if (state.busy) { alert("本轮对话进行中，结束后再切换会话"); return; }
+  state.draft = false;
+  const prevId = state.sessionId;
   state.sessionId = id;
+  const run = runOf(id);
   markActiveSession();
-  closeWs();
-  $("messages").innerHTML = '<div id="msg-col"><div class="empty-state"><h2>加载中…</h2></div></div>';
-  state.toolResultIndex = {};
-  try {
-    const r = await fetch(`/api/sessions/${id}/messages`);
-    if (!r.ok) throw new Error(`HTTP ${r.status}`);
-    const data = await r.json();
-    $("messages").innerHTML = "";
-    if (!data.messages.length) {
-      showEmptyState();
-    } else {
+  refreshDocTitle();
+  renderSessionList();          // 未读标识切换
+  // 连接该会话的 WS（已有连接则复用）; 旧会话的 WS 原样保留, 后台继续跑
+  connectWs(id);
+  // 本轮事件曾在后台到达过: 流式 DOM 不可靠, 重拉历史对齐
+  if (run.everHidden || !run.loaded) {
+    $("messages").innerHTML = '<div id="msg-col"><div class="empty-state"><h2>加载中…</h2></div></div>';
+    run.toolResultIndex = {};
+    try {
+      const r = await fetch(`/api/sessions/${id}/messages`);
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      const data = await r.json();
+      run.currentWorkdir = data.workdir || null;
+      run.loaded = true;
+      run.everHidden = false;
+      run.unread = 0;           // 回到前台看完了, 未读清零
+      renderSessionList();
+      if (id === state.sessionId) {   // 等待期间用户可能又切走
+        refreshWorkdirTag();
+        $("messages").innerHTML = "";
+        if (!data.messages.length) {
+          showEmptyState();
+        } else {
+          $("messages").innerHTML = "<div id='msg-col'></div>";
+          for (const m of data.messages) renderHistoryMessage(m);
+        }
+        scrollToBottom();
+        // 有挂着的审批请求: 重新弹出
+        if (run.pendingPerm) onPermissionRequest(run.pendingPerm);
+      }
+    } catch (e) {
       $("messages").innerHTML = "<div id='msg-col'></div>";
-      for (const m of data.messages) renderHistoryMessage(m);
+      addErrorBubble("加载历史失败: " + e.message);
     }
-    scrollToBottom();
-  } catch (e) {
-    $("messages").innerHTML = "<div id='msg-col'></div>";
-    addErrorBubble("加载历史失败: " + e.message);
   }
-  connectWs();
+  setBusyUi(run.busy);
+  setSendEnabled(!run.busy);
+  setConn(run.ws && run.ws.readyState === 1 ? "on" : "", run.ws ? (run.ws.readyState === 1 ? "已连接" : "连接中…") : "未连接");
 }
 
 const SUGGESTIONS = [
@@ -499,7 +1148,7 @@ const SUGGESTIONS = [
 function showEmptyState() {
   $("messages").innerHTML =
     "<div id='msg-col'><div class='empty-state'>" +
-    "<div class='mark'>✻</div><h2>开始新会话</h2>" +
+    "<div class='mark'>✻</div><h2>开始新任务</h2>" +
     "<p>和 x-code 聊聊代码，它会用工具帮你完成任务</p>" +
     SUGGESTIONS.map(s => `<button class='sug-chip'>${escapeHtml(s)}</button>`).join("") +
     "</div></div>";
@@ -512,14 +1161,21 @@ function showEmptyState() {
   });
 }
 
-async function newSession() {
-  if (state.busy) { alert("本轮对话进行中，结束后再新建会话"); return; }
-  try {
-    const r = await fetch("/api/sessions", { method: "POST" });
-    const data = await r.json();
-    await loadSessions();
-    await selectSession(data.id);
-  } catch (e) { alert("新建会话失败: " + e.message); }
+function startDraft() {
+  /* "新建任务"只进入草稿态，不向服务端要 id——首条消息发出时才真正建会话，
+     避免侧栏堆一批没有内容的"未命名任务"条目。
+     其他会话在跑也允许新建——多会话并行是本来的意义。 */
+  state.draft = true;
+  state.sessionId = null;
+  markActiveSession();
+  refreshDocTitle();
+  updateWdChipVisibility();
+  setDraftWorkdir(state.draftWorkdir);   // 保留上次选择，方便连建同项目会话
+  showEmptyState();
+  setBusyUi(false);
+  setSendEnabled(true);
+  setConn("", "未连接");
+  $("input").focus();
 }
 
 /* 历史消息回放: role + blocks（text / tool_use / tool_result） */
@@ -541,7 +1197,7 @@ function renderHistoryMessage(m) {
       } else if (b.type === "tool_use") {
         flush();
         const card = addToolCard({ id: b.id, name: b.name, input: b.input });
-        state.toolResultIndex[b.id] = card;   // 等 tool 角色的结果块配对
+        curRun().toolResultIndex[b.id] = card;   // 等 tool 角色的结果块配对
       }
     }
     flush();
@@ -550,7 +1206,7 @@ function renderHistoryMessage(m) {
   if (m.role === "tool") {
     for (const b of m.blocks) {
       if (b.type !== "tool_result") continue;
-      const card = state.toolResultIndex[b.id];
+      const card = curRun().toolResultIndex[b.id];
       if (card) {
         completeToolCard(card, { output: b.output, is_error: b.is_error, denied: false });
       } else {
@@ -570,30 +1226,39 @@ function setConn(cls, text) {
   $("conn-text").textContent = text;
 }
 
-function connectWs() {
-  if (!state.sessionId) return;
-  closeWs();
+function connectWs(id) {
+  if (!id) return;
+  const run = runOf(id);
+  // 已连接或连接中就不动——切换会话不再断开后台会话的 WS
+  if (run.ws && (run.ws.readyState === 0 || run.ws.readyState === 1)) return;
   const proto = location.protocol === "https:" ? "wss" : "ws";
-  const ws = new WebSocket(`${proto}://${location.host}/ws/${state.sessionId}`);
-  state.ws = ws;
+  const ws = new WebSocket(`${proto}://${location.host}/ws/${id}`);
+  run.ws = ws;
 
-  ws.onopen = () => setConn("on", "已连接");
-  ws.onclose = () => {
-    setConn("", "已断开");
-    if (state.ws === ws) state.ws = null;
+  ws.onopen = () => {
+    if (id === state.sessionId) setConn("on", "已连接");
+    // 首条消息在 WS 建立期间入队，连接好了统一发出
+    const pending = run.pendingSends;
+    run.pendingSends = [];
+    for (const p of pending) ws.send(JSON.stringify(p));
   };
-  ws.onerror = () => setConn("err", "连接错误");
+  ws.onclose = () => {
+    if (id === state.sessionId) setConn("", "已断开");
+    if (run.ws === ws) run.ws = null;
+  };
+  ws.onerror = () => { if (id === state.sessionId) setConn("err", "连接错误"); };
   ws.onmessage = ev => {
     let msg;
     try { msg = JSON.parse(ev.data); } catch { return; }
-    handleServerMessage(msg);
+    handleServerMessage(msg, id);
   };
 }
 
-function closeWs() {
-  if (state.ws) {
-    const ws = state.ws;
-    state.ws = null;
+function closeWs(id) {
+  const run = id ? state.runs[id] : null;
+  if (run && run.ws) {
+    const ws = run.ws;
+    run.ws = null;
     ws.onclose = null;   // 防止触发断连提示
     ws.close();
   }
@@ -602,36 +1267,116 @@ function closeWs() {
 /* ============================================================
  * 服务端消息分派
  * ============================================================ */
-function handleServerMessage(msg) {
+function handleServerMessage(msg, sid) {
+  // 后台会话的事件: 不渲染（主区属于当前可见会话）, 只累计未读。
+  // 后台轮次的流式 DOM 无法可靠拼装, 标记 everHidden, 回前台重拉历史对齐。
+  if (sid !== state.sessionId) {
+    const run = runOf(sid);
+    run.everHidden = true;
+    if (msg.type === "permission_request") bumpUnread(sid);
+    else if (msg.type === "tool_result") bumpUnread(sid);
+    else if (msg.type === "turn_done" || msg.type === "error") bumpUnread(sid);
+    if (msg.type === "permission_request") {
+      run.pendingPerm = msg;           // 记下待审批, 点回去即见弹窗
+    } else if (msg.type === "turn_done" || msg.type === "error") {
+      run.busy = false;
+      run.queued = false;
+      run.pendingPerm = null;
+    }
+    return;
+  }
   switch (msg.type) {
     case "text_delta":         onTextDelta(msg); break;
     case "tool_use":           onToolUse(msg); break;
     case "tool_result":        onToolResult(msg); break;
+    case "thinking_start":     onThinkingStart(msg); break;
+    case "thinking_end":       onThinkingEnd(msg); break;
+    case "turn_queued":        onTurnQueued(msg); break;
     case "permission_request": onPermissionRequest(msg); break;
     case "turn_done":          onTurnDone(msg); break;
+    case "session_renamed":    onSessionRenamed(msg); break;
     case "error":              onError(msg); break;
     default: console.warn("未知消息类型", msg);
   }
 }
 
+function bumpUnread(sid) {
+  const run = runOf(sid);
+  run.unread += 1;
+  const s = state.sessions.find(x => x.id === sid);
+  if (s) s._unreadShown = run.unread;
+  renderSessionList();
+}
+
 /* ---------- 正文流式 ---------- */
 function onTextDelta(msg) {
+  const run = curRun();
   $("thinking").style.display = "none";
-  if (!state.curBubble) {
-    state.curBubble = addAssistantBubble("");
-    state.curBubble._raw = "";
+  if (!run.curBubble) {
+    run.curBubble = addAssistantBubble("");
+    run.curBubble._raw = "";
   }
-  state.curBubble._raw += msg.text;
-  state.curBubble.innerHTML = renderMd(state.curBubble._raw);
+  run.curBubble._raw += msg.text;
+  run.curBubble.innerHTML = renderMd(run.curBubble._raw);
   scrollToBottom();
 }
 
 /* 流式气泡收口: 有内容就固化，下一轮正文开新气泡 */
 function flushAssistantBubble() {
-  if (state.curBubble && !state.curBubble._raw) {
-    state.curBubble.closest(".msg").remove();   // 空气泡（模型直接调工具）: 移除
+  const run = curRun();
+  if (!run) return;
+  if (run.curBubble && !run.curBubble._raw) {
+    run.curBubble.closest(".msg").remove();   // 空气泡（模型直接调工具）: 移除
   }
-  state.curBubble = null;
+  run.curBubble = null;
+}
+
+/* ---------- 思考行 ---------- */
+const ICON_MIND = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18h6M10 21h4M12 3a6 6 0 00-4 10.5c.8.7 1.4 1.5 1.6 2.5h4.8c.2-1 .8-1.8 1.6-2.5A6 6 0 0012 3z"/></svg>';
+const ICON_TERM = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2.5"/><path d="M7 9l3.5 3L7 15M12.5 15H17"/></svg>';
+const ICON_FILE = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"><path d="M6 3h8l4 4v14H6V3z"/><path d="M14 3v4h4"/></svg>';
+const ICON_EDIT = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20l4.5-1L20 7.5 16.5 4 5 15.5 4 20z"/></svg>';
+const ICON_TOOL = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"><rect x="4" y="7" width="16" height="13" rx="2"/><path d="M9 7V5a2 2 0 012-2h2a2 2 0 012 2v2"/></svg>';
+const TOOL_META = {
+  bash:       { label: "终端",     icon: ICON_TERM },
+  powershell: { label: "终端",     icon: ICON_TERM },
+  read_file:  { label: "读取文件", icon: ICON_FILE },
+  write_file: { label: "写入文件", icon: ICON_EDIT },
+};
+
+function fmtDuration(ms) {
+  const s = ms / 1000;
+  if (s < 1) return "不到 1 秒";
+  if (s < 60) return Math.round(s) + " 秒";
+  const m = Math.floor(s / 60), r = Math.round(s % 60);
+  return r ? `${m} 分 ${r} 秒` : `${m} 分钟`;
+}
+
+function onThinkingStart() {
+  const run = curRun();
+  $("thinking").style.display = "none";
+  flushAssistantBubble();
+  if (run.curThinking) return;   // 已有实时思考行
+  const div = document.createElement("div");
+  div.className = "think-row";
+  div.innerHTML = '<span class="t-ico">' + ICON_MIND + '</span><span>思考中</span>' +
+    '<span class="pulse-dots"><i></i><i></i><i></i></span>';
+  msgCol().appendChild(div);
+  run.curThinking = { el: div, t0: Date.now() };
+  scrollToBottom();
+}
+
+function onThinkingEnd(msg) {
+  const run = curRun();
+  $("thinking").style.display = "none";
+  const cur = run.curThinking;
+  if (!cur) return;
+  // 服务端计时优先，缺失（轮次兜底收口）时用客户端起止时间
+  const ms = typeof msg.duration_ms === "number" ? msg.duration_ms : Date.now() - cur.t0;
+  cur.el.innerHTML = '<span class="t-ico">' + ICON_MIND + '</span>' +
+    '<span>思考 · 持续了 ' + fmtDuration(ms) + '</span>';
+  run.curThinking = null;
+  scrollToBottom();
 }
 
 /* ---------- 工具调用 ---------- */
@@ -653,78 +1398,68 @@ function describeInput(raw) {
 }
 
 function addToolCard({ id, name, input, result }) {
-  const wrap = document.createElement("details");
-  wrap.className = "tool-card";
-  wrap.innerHTML =
-    "<summary>" +
-    '<span class="chevron">▶</span>' +
-    '<span class="tname"></span><span class="tdesc"></span><span class="tstate"></span>' +
-    "</summary>" +
-    '<div class="tbody">' +
-    '<div class="tlabel">输入</div><pre class="tinput"></pre>' +
-    '<div class="tlabel">输出<span class="btn-copy" style="display:none">复制</span></div>' +
-    '<pre class="toutput" style="display:none"></pre>' +
-    "</div>";
-  wrap.querySelector(".tname").textContent = name;
-  wrap.querySelector(".tdesc").textContent = describeInput(input);
-  wrap.querySelector(".tinput").textContent = input;
-  wrap.querySelector(".btn-copy").onclick = ev => {
-    ev.preventDefault(); ev.stopPropagation();
-    navigator.clipboard.writeText(wrap.querySelector(".toutput").textContent).then(() => {
-      ev.target.textContent = "已复制";
-      setTimeout(() => { ev.target.textContent = "复制"; }, 1200);
-    });
-  };
+  const meta = TOOL_META[name] || { label: name, icon: ICON_TOOL };
+  const row = document.createElement("div");
+  row.className = "tool-row";
+  row.innerHTML =
+    '<span class="t-ico">' + meta.icon + '</span>' +
+    '<span class="tname2"></span><span class="tdesc"></span><span class="tstate"></span>';
+  row.querySelector(".tname2").textContent = meta.label;
+  row.querySelector(".tdesc").textContent = describeInput(input);
   if (result) {
-    completeToolCard(wrap, result);
+    completeToolCard(row, result);
   } else {
-    const st = wrap.querySelector(".tstate");
-    st.textContent = "运行中"; st.className = "tstate run";
+    setToolState(row, "run");
   }
-  msgCol().appendChild(wrap);
+  msgCol().appendChild(row);
   scrollToBottom();
-  return wrap;
+  return row;
 }
 
-function completeToolCard(card, { output, is_error, denied }) {
-  const out = card.querySelector(".toutput");
-  out.textContent = output || "";
-  out.style.display = "";
-  card.querySelector(".btn-copy").style.display = "";
-  const st = card.querySelector(".tstate");
+function setToolState(row, kind) {
+  const st = row.querySelector(".tstate");
+  st.className = "tstate " + kind;
+  st.textContent = { run: "运行中", ok: "已完成", err: "出错", denied: "已拒绝" }[kind];
+}
+
+function completeToolCard(row, { is_error, denied }) {
   if (denied) {
-    st.textContent = "已拒绝"; st.className = "tstate denied";
-    card.classList.add("denied");
+    setToolState(row, "denied");
   } else if (is_error) {
-    st.textContent = "出错"; st.className = "tstate err";
-    card.classList.add("error");
+    setToolState(row, "err");
   } else {
-    st.textContent = "完成"; st.className = "tstate ok";
+    setToolState(row, "ok");
   }
 }
 
 function onToolUse(msg) {
+  const run = curRun();
   $("thinking").style.display = "none";
   flushAssistantBubble();   // 工具前先收掉流式中的正文气泡
-  state.activeToolCard = addToolCard({ id: msg.id, name: msg.name, input: msg.input });
+  run.activeToolCard = addToolCard({ id: msg.id, name: msg.name, input: msg.input });
 }
 
 function onToolResult(msg) {
+  const run = curRun();
   flushAssistantBubble();
   // 优先配对流式卡片；配不上（历史遗留）就新开卡片兜底
-  const card = state.activeToolCard;
+  const card = run.activeToolCard;
   if (card) {
     completeToolCard(card, msg);
   } else {
     const fallback = addToolCard({ id: msg.id, name: msg.name, input: msg.input });
     completeToolCard(fallback, msg);
   }
-  state.activeToolCard = null;
+  run.activeToolCard = null;
 }
 
 /* ---------- 权限审批 ---------- */
 function onPermissionRequest(msg) {
-  state.pendingPerm = msg;
+  const run = curRun();
+  run.pendingPerm = msg;
+  const s = state.sessions.find(x => x.id === state.sessionId);
+  $("perm-title").textContent =
+    "需要授权" + (s ? ` — ${displayTitle(s)}` : "");
   $("perm-tool").textContent = msg.tool_name;
   $("perm-mode").textContent = `${msg.required_mode}（当前 ${msg.current_mode}）`;
   $("perm-input").textContent = msg.input;
@@ -733,13 +1468,14 @@ function onPermissionRequest(msg) {
 }
 
 function respondPermission(approved) {
-  if (!state.pendingPerm) return;
+  const run = curRun();
+  if (!run || !run.pendingPerm) return;
   sendWs({
     type: "permission_response",
-    request_id: state.pendingPerm.request_id,
+    request_id: run.pendingPerm.request_id,
     approved,
   });
-  state.pendingPerm = null;
+  run.pendingPerm = null;
   $("perm-overlay").style.display = "none";
 }
 
@@ -748,12 +1484,23 @@ $("btn-deny").onclick = () => respondPermission(false);
 
 /* ---------- 轮次结束 / 错误 ---------- */
 function endTurnUiReset() {
-  state.busy = false;
-  flushAssistantBubble();
-  state.activeToolCard = null;
+  const run = curRun();
+  if (run) {
+    run.busy = false;
+    run.queued = false;
+    run.unread = 0;             // 前台亲眼看完了, 未读清零
+    flushAssistantBubble();
+    run.activeToolCard = null;
+    if (run.curThinking) onThinkingEnd({});   // 思考行兜底收口（客户端计时）
+  }
   $("thinking").style.display = "none";
-  $("btn-stop").style.display = "none";
+  setBusyUi(false);
   setSendEnabled(true);
+  renderSessionList();          // 运行标识/未读刷新
+}
+
+function onTurnQueued(msg) {
+  addNoteBubble("warn", `并发已满（上限 ${msg.max_concurrent} 轮），本轮已排队，前面轮次结束后自动开始`);
 }
 
 function onTurnDone(msg) {
@@ -765,7 +1512,13 @@ function onTurnDone(msg) {
   } else if (msg.iterations_exhausted) {
     addNoteBubble("warn", `已达单轮最大迭代次数（${msg.iterations} 次调用），已提前收束本轮`);
   }
-  loadSessions();   // 刷新标题/消息数
+  // 刷新侧栏标题/消息数，标题可能被自动命名更新
+  (async () => { await loadSessions(); refreshDocTitle(); })();
+}
+
+function onSessionRenamed(msg) {
+  // AI 命名完成（在 turn_done 之后异步到达）: 刷新列表 + 顶栏标题
+  (async () => { await loadSessions(); refreshDocTitle(); })();
 }
 
 function onError(msg) {
@@ -827,33 +1580,73 @@ function setSendEnabled(on) {
   $("btn-send").disabled = !on;
   $("input").disabled = !on;
 }
+function setBusyUi(busy) {
+  // 忙碌（含排队）时发送圆钮切换为停止圆钮
+  $("btn-send").style.display = busy ? "none" : "inline-flex";
+  $("btn-stop").style.display = busy ? "inline-flex" : "none";
+}
 
-function sendCurrent() {
+async function sendCurrent() {
   const input = $("input");
   const text = input.value.trim();
-  if (!text || state.busy || !state.ws || state.ws.readyState !== 1) return;
-  // 空状态引导只出现一次: 发第一条消息前移除
+  const run = curRun();
+  if (!text || (run && run.busy)) return;
+  if (!state.draft && (!run || !run.ws || run.ws.readyState !== 1)) return;
+  // 草稿态: 此刻才向服务端要 id 建会话条目；失败则留在草稿态
+  let firstWorkdir = null;
+  if (state.draft) {
+    firstWorkdir = state.draftWorkdir;
+    try {
+      const r = await fetch("/api/sessions", { method: "POST" });
+      if (!r.ok) throw new Error("HTTP " + r.status);
+      state.sessionId = (await r.json()).id;
+    } catch (e) {
+      toast("创建会话失败: " + e.message);
+      return;
+    }
+  }
+  // 空状态引导只出现一次: 发第一条消息前清掉（节点要保留，后续气泡都挂在这）
   const empty = document.querySelector(".empty-state");
-  if (empty) empty.closest("#msg-col").remove();
+  if (empty) empty.closest("#msg-col").innerHTML = "";
   addUserBubble(text);
   input.value = "";
   autoGrow(input);
-  state.busy = true;
+  const myRun = runOf(state.sessionId);
+  myRun.busy = true;
   $("thinking").style.display = "";
-  $("btn-stop").style.display = "inline-flex";
+  setBusyUi(true);
   setSendEnabled(false);
-  sendWs({ type: "user", text });
+  if (state.draft) {
+    state.draft = false;
+    myRun.currentWorkdir = state.draftWorkdir;
+    // 列表此刻才出现新条目并选中；WS 建立期间消息会排队，onopen 后冲刷
+    await loadSessions();
+    // workdir 在首条消息落盘时才写入 JSONL, 此刻接口还查不到;
+    // 先补进本地条目, 项目分组立即正确(下次 loadSessions 会以接口为准)
+    const mine = state.sessions.find(s => s.id === state.sessionId);
+    if (mine && state.draftWorkdir) mine.workdir = state.draftWorkdir;
+    renderSessionList();
+    markActiveSession();
+    refreshDocTitle();
+    updateWdChipVisibility();
+    connectWs(state.sessionId);
+  }
+  sendWs({ type: "user", text, workdir: firstWorkdir || "" });
 }
 
 function sendWs(obj) {
-  if (state.ws && state.ws.readyState === 1) {
-    state.ws.send(JSON.stringify(obj));
+  const run = curRun();
+  if (!run) return;
+  if (run.ws && run.ws.readyState === 1) {
+    run.ws.send(JSON.stringify(obj));
+  } else if (run.ws && run.ws.readyState === 0) {
+    run.pendingSends.push(obj);   // 连接建立中: onopen 后冲刷
   }
 }
 
 $("btn-send").onclick = sendCurrent;
 $("btn-stop").onclick = () => sendWs({ type: "stop" });
-$("btn-new").onclick = newSession;
+$("btn-new").onclick = startDraft;
 
 $("input").addEventListener("keydown", ev => {
   if (ev.key === "Enter" && !ev.shiftKey) {
@@ -863,19 +1656,89 @@ $("input").addEventListener("keydown", ev => {
 });
 function autoGrow(el) {
   el.style.height = "auto";
-  el.style.height = Math.min(el.scrollHeight, 180) + "px";
+  el.style.height = Math.min(el.scrollHeight, 160) + "px";
 }
 $("input").addEventListener("input", () => autoGrow($("input")));
 
 /* ============================================================
- * 设置（顶栏下拉）
+ * 侧栏交互: 分组/项目切换 + 搜索 + 快捷键
  * ============================================================ */
+function setSideTab(tab) {
+  state.sideTab = tab;
+  $("tab-project").classList.toggle("on", tab === "project");
+  $("tab-group").classList.toggle("on", tab === "group");
+  renderSessionList();
+}
+$("tab-project").onclick = () => setSideTab("project");
+$("tab-group").onclick = () => setSideTab("group");
+
+function openSearch() {
+  $("search-box").classList.add("open");
+  $("search-input").focus();
+}
+function closeSearch() {
+  $("search-box").classList.remove("open");
+  $("search-input").value = "";
+  renderSessionList();
+}
+$("btn-search").onclick = openSearch;
+$("btn-filter").onclick = () => {
+  if ($("search-box").classList.contains("open")) closeSearch();
+  else openSearch();
+};
+$("search-input").addEventListener("input", renderSessionList);
+$("search-input").addEventListener("keydown", ev => {
+  if (ev.key === "Escape") closeSearch();
+});
+
+document.addEventListener("keydown", ev => {
+  const mod = ev.ctrlKey || ev.metaKey;
+  if (mod && ev.key.toLowerCase() === "n") {
+    ev.preventDefault();
+    startDraft();
+  } else if (mod && ev.key.toLowerCase() === "k") {
+    ev.preventDefault();
+    openSearch();
+  }
+});
+
+/* 装饰入口统一提示 */
+document.querySelectorAll("[data-stub]").forEach(b => {
+  b.onclick = () => toast("敬请期待");
+});
+
+/* ============================================================
+ * 设置（输入卡片内的下拉）
+ * ============================================================ */
+function prettyModel(name) {
+  // glm-5.3-flash → GLM 5.3 Flash（首段全大写，其余词首字母大写）
+  if (!name) return "模型";
+  return name.split("-").map((w, i) => {
+    if (/^\d/.test(w)) return w;
+    return i === 0 ? w.toUpperCase() : w.charAt(0).toUpperCase() + w.slice(1);
+  }).join(" ");
+}
+
 async function loadSettings() {
   try {
     const r = await fetch("/api/settings");
     const s = await r.json();
     $("sel-thinking").value = s.thinking_level;
     $("sel-mode").value = s.permission_mode;
+    if (s.model) {
+      const sel = $("sel-model");
+      sel.disabled = false;
+      sel.innerHTML = "";
+      const opt = document.createElement("option");
+      opt.value = s.model;
+      opt.textContent = prettyModel(s.model);
+      sel.appendChild(opt);
+      sel.title = s.model;
+      document.querySelector(".pill.model").title = "当前模型: " + s.model;
+    }
+    if (s.workspace) $("ws-tag-text").textContent = s.workspace;
+    state.serverWorkspace = s.workspace || null;
+    refreshWorkdirTag();
   } catch (e) { console.error("加载设置失败", e); }
 }
 
@@ -888,14 +1751,14 @@ async function saveSettings(patch) {
     });
     if (!r.ok) {
       const err = await r.json().catch(() => ({}));
-      alert("设置失败: " + (err.detail || r.status));
+      toast("设置失败: " + (err.detail || r.status));
       await loadSettings();   // 回显真实值
       return;
     }
     const s = await r.json();
     $("sel-thinking").value = s.thinking_level;
     $("sel-mode").value = s.permission_mode;
-  } catch (e) { alert("设置失败: " + e.message); }
+  } catch (e) { toast("设置失败: " + e.message); }
 }
 $("sel-thinking").onchange = () => saveSettings({ thinking_level: $("sel-thinking").value });
 $("sel-mode").onchange = () => saveSettings({ permission_mode: $("sel-mode").value });
@@ -907,8 +1770,8 @@ $("sel-mode").onchange = () => saveSettings({ permission_mode: $("sel-mode").val
   await loadSettings();
   await loadSessions();
   // 默认选最近的会话（列表已倒序，第一个即最新）
-  const first = $("session-list").firstChild;
-  if (first) await selectSession(first.dataset.id);
+  const first = state.sessions[0];
+  if (first) await selectSession(first.id);
   $("input").focus();
 })();
 </script>

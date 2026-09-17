@@ -110,7 +110,7 @@ def test_executor_delegates_and_returns_full_result(capsys):
 # ------------------------------------------------------------
 
 class FakeApiClient:
-    pass
+    thinking_level = "medium"   # runtime 构建时读取（会话级等级初值）
 
 
 def test_build_runtime_assembles_and_preserves_session():

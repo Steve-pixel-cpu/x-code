@@ -43,10 +43,12 @@ def test_boundary_not_truncated():
 
 # ------------------------------------------------------------
 # ToolRegistry — 截断做在 execute 唯一入口，所有工具统一生效
+# handler 签名是 (params, workdir)，与内置工具一致
 # ------------------------------------------------------------
 
 def test_registry_applies_truncation():
-    registry = ToolRegistry().register("big", lambda params: "y" * 100_000)
+    registry = ToolRegistry().register(
+        "big", lambda params, workdir: "y" * 100_000)
 
     result = registry.execute("big", "")
 
@@ -56,7 +58,9 @@ def test_registry_applies_truncation():
 
 def test_registry_error_passthrough_untouched():
     """ToolError 走异常通道，不被截断逻辑波及。"""
-    registry = ToolRegistry().register("boom", lambda params: (_ for _ in ()).throw(ValueError("炸了")))
+    registry = ToolRegistry().register(
+        "boom",
+        lambda params, workdir: (_ for _ in ()).throw(ValueError("炸了")))
 
     try:
         registry.execute("boom", "")

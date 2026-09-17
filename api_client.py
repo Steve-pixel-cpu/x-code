@@ -159,7 +159,11 @@ class ClaudeApiClient(ApiClient):
     def set_thinking_level(self, level: str) -> None:
         self.thinking_level = level
 
-    def stream(self, system_prompt: list[str], messages: list[Message]) -> List[AssistantEvent]:
+    def stream(self, system_prompt: list[str], messages: list[Message],
+               thinking_level: Optional[str] = None) -> List[AssistantEvent]:
+        """thinking_level 可选参数: 多会话共用 client 时, 每轮调用携带
+        自己会话的思考等级, 避免共享实例状态互相串。None = 用实例默认
+        （CLI 单会话语义不变）。"""
         events: List[AssistantEvent] = []
         _system_prompt = "\n".join(system_prompt)
         kwargs = {
@@ -171,7 +175,8 @@ class ClaudeApiClient(ApiClient):
         }
         if self.tools:
             kwargs["tools"] = self.tools
-        budget = THINKING_LEVEL_TO_BUDGET.get(self.thinking_level)
+        level = thinking_level if thinking_level is not None else self.thinking_level
+        budget = THINKING_LEVEL_TO_BUDGET.get(level)
         if budget is not None:
             kwargs["thinking"] = {"type": "enabled", "budget_tokens": budget}
         streaming_text = False      # 正在流式输出正式回复文本

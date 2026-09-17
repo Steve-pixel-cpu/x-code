@@ -1,5 +1,6 @@
 import platform
-from typing import Callable, Self
+from pathlib import Path
+from typing import Callable, Optional, Self
 from pydantic import BaseModel
 import subprocess
 import json
@@ -39,7 +40,8 @@ class ToolRegistry():
         self._handlers[name] = handler
         return self
 
-    def execute(self, name: str, tool_input_json: str) -> str:
+    def execute(self, name: str, tool_input_json: str,
+                workdir: Optional[str] = None) -> str:
         if name not in self._handlers:
             raise ToolError(f"Unknown tool: {name}")
 
@@ -49,17 +51,26 @@ class ToolRegistry():
             raise ToolError(f"Invalid JSON input: {tool_input_json}")
 
         try:
-            result = self._handlers[name](params)
+            result = self._handlers[name](params, workdir)
             return truncate_tool_output(result)
         except Exception as e:
             raise ToolError(f"Tool execution error: {e}")
 
-def bash_tool(params:dict):
-    cmd = params.get('command',"")
+def resolve_path(path: str, workdir: Optional[str]) -> Path:
+    """相对路径基于会话工作目录解析；绝对路径原样使用。无 workdir 时同旧行为。"""
+    p = Path(path)
+    if p.is_absolute() or not workdir:
+        return p
+    return Path(workdir) / p
+
+
+def bash_tool(params: dict, workdir: Optional[str] = None) -> str:
+    cmd = params.get('command', "")
+    cwd = str(Path(workdir)) if workdir else None
     # Windows 上没有 sh, 交给 PowerShell 执行,
     # 常用命令 (ls/cat/rm 等) 在 PowerShell 里有别名, 大多可用
     if platform.system() == "Windows":
-        return powershell_tool(params)
+        return powershell_tool(params, workdir)
     try:
         result = subprocess.run(
             ["sh", "-lc", cmd],  # 用 shell 执行命令
@@ -68,7 +79,8 @@ def bash_tool(params:dict):
             text=True,
             timeout=30,
             encoding="utf-8",
-            errors="replace"
+            errors="replace",
+            cwd=cwd,
         )
         output = result.stdout
         if result.stderr:
@@ -77,8 +89,9 @@ def bash_tool(params:dict):
     except subprocess.TimeoutExpired:
         return 'ERROR: timeout for 30s'
 
-def powershell_tool(params: dict) -> str:
+def powershell_tool(params: dict, workdir: Optional[str] = None) -> str:
     cmd = params.get('command', "")
+    cwd = str(Path(workdir)) if workdir else None
     try:
         result = subprocess.run(
             [
@@ -95,7 +108,8 @@ def powershell_tool(params: dict) -> str:
             text=True,
             timeout=30,
             encoding="utf-8",
-            errors="replace"
+            errors="replace",
+            cwd=cwd,
         )
         output = result.stdout
         if result.stderr:
@@ -104,8 +118,8 @@ def powershell_tool(params: dict) -> str:
     except subprocess.TimeoutExpired:
         return 'ERROR: timeout for 30s'
 
-def read_tool(params:dict) -> str:
-    path = params.get('path', '')
+def read_tool(params: dict, workdir: Optional[str] = None) -> str:
+    path = resolve_path(params.get('path', ''), workdir)
     try:
         with open(path, 'r', encoding="utf-8") as f:
             content = f.read()
@@ -113,8 +127,8 @@ def read_tool(params:dict) -> str:
         return f'ERROR: file not found {path}'
     return content
 
-def write_tool(params:dict) -> str:
-    path = params.get('path', '')
+def write_tool(params: dict, workdir: Optional[str] = None) -> str:
+    path = resolve_path(params.get('path', ''), workdir)
     content = params.get('content', '')
     try:
         with open(path, 'w', encoding="utf-8") as f:

@@ -168,6 +168,9 @@ class ConversationRuntime:
         self._hook_runner = hook_runner or HookRunner()
         self._session = session
         self._usage_tracker = UsageTracker()
+        # 会话级思考等级: 初值取自 api_client（=全局默认）, 之后只改自己。
+        # stream() 调用时带上, 多会话共用 client 也不会互相串设置。
+        self._thinking_level = api_client.thinking_level
 
     def with_max_iterations(self, n) -> "ConversationRuntime":
         self._max_iterations = n
@@ -194,10 +197,10 @@ class ConversationRuntime:
         self._permission_policy.set_mode(mode)
 
     def thinking_level(self) -> str:
-        return self._api_client.thinking_level
+        return self._thinking_level
 
     def set_thinking_level(self, level: str) -> None:
-        self._api_client.set_thinking_level(level)
+        self._thinking_level = level
 
     def _process_tool_use(self, tool_block: ToolContentBlock, prompter: Optional[PermissionPrompter]=None)-> Message | None:
 
@@ -314,7 +317,11 @@ class ConversationRuntime:
                 break
 
             iterations += 1
-            events = self._api_client.stream(system_prompt=self._system_prompt, messages=curr_session.messages)
+            events = self._api_client.stream(
+                system_prompt=self._system_prompt,
+                messages=curr_session.messages,
+                thinking_level=self._thinking_level,
+            )
             message,token_usage = build_assistant_message(events)
             assistant_messages.append(message)
             if token_usage:

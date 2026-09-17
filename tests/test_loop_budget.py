@@ -46,8 +46,9 @@ class ScriptedClient:
     def __init__(self, script: list):
         self.script = list(script)
         self.calls = 0
+        self.thinking_level = "medium"   # runtime 构建时读取（会话级等级初值）
 
-    def stream(self, system_prompt, messages) -> list:
+    def stream(self, system_prompt, messages, thinking_level=None) -> list:
         events = self.script[self.calls] if self.calls < len(self.script) else self.script[-1]
         self.calls += 1
         return events

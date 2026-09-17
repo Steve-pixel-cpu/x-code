@@ -74,6 +74,11 @@ if API_KEY is None:
 STORAGE_DIR = Path.home() / ".x-code" / "sessions"
 store = SessionStore(storage_dir=STORAGE_DIR)
 
+# 已创建但尚未落盘的会话 id: POST /api/sessions 只生成 id，首条消息落盘才建
+# 文件（与 CLI 一致）。列表/历史接口必须认得它们，否则"新建会话"在侧栏
+# 不出现、历史接口 404，前端渲染成空白。
+_pending_sessions: set[str] = set()
+
 runtime_config: RuntimeConfig = ConfigLoader(cwd=Path.cwd(), config_home=Path.home()).load()
 system_prompt = (
     SystemPromptBuilder()
@@ -91,7 +96,7 @@ api_client = ClaudeApiClient(
 app = FastAPI(title="x-code web")
 STATIC_DIR = Path(__file__).parent / "static"
 
-PERMISSION_TIMEOUT = 120  # 权限审批等待秒数，超时朝安全侧自动 DENY
+MAX_CONCURRENT_TURNS = 4  # 全局并发上限: 同时跑的轮次超过这个数就排队
 UNTITLED = "(未命名)"
 _CANCEL_SENTINEL = "__cancelled__"
 
@@ -106,23 +111,32 @@ class TurnDispatch:
     工作线程开跑一轮前 bind(emit)，结束后 unbind()。内核侧三个挂点
     （SSE 流代理 / 工具注册表 / 权限桥）在事件发生时用 current() 拿到
     本线程绑定的 emit——多个会话各开各的线程，互不串线。
+    同时绑定本轮的会话工作目录，工具执行时取 current_workdir()。
     """
 
     def __init__(self):
         self._emit_by_thread: dict[int, Callable] = {}
+        self._workdir_by_thread: dict[int, Optional[str]] = {}
         self._lock = threading.Lock()
 
-    def bind(self, emit: Callable) -> None:
+    def bind(self, emit: Callable, workdir: Optional[str] = None) -> None:
         with self._lock:
             self._emit_by_thread[threading.get_ident()] = emit
+            self._workdir_by_thread[threading.get_ident()] = workdir
 
     def unbind(self) -> None:
         with self._lock:
-            self._emit_by_thread.pop(threading.get_ident(), None)
+            ident = threading.get_ident()
+            self._emit_by_thread.pop(ident, None)
+            self._workdir_by_thread.pop(ident, None)
 
     def current(self) -> Optional[Callable]:
         with self._lock:
             return self._emit_by_thread.get(threading.get_ident())
+
+    def current_workdir(self) -> Optional[str]:
+        with self._lock:
+            return self._workdir_by_thread.get(threading.get_ident())
 
 
 dispatch = TurnDispatch()
@@ -133,13 +147,15 @@ class _LiveStreamProxy:
 
     - text_delta 逐段转发（真流式打字效果）
     - tool_use 在 content_block_stop 时拼装完整事件转发（与内核同样的拼装规则）
-    - thinking_delta 刻意不转发: UI 只显示"思考中"指示，不展示思考内容
+    - thinking 块只发起止信号（thinking_start / thinking_end + 耗时），
+      思考内容本身（thinking_delta）仍不转发: UI 展示"思考 · 持续了X秒"行
     """
 
     def __init__(self, real, sink: Optional[Callable]):
         self._real = real
         self._sink = sink
         self._tools: dict[int, dict] = {}
+        self._thinking: dict[int, float] = {}
 
     def __enter__(self):
         # 管理器的 __enter__ 才返回可迭代的流对象，必须存下来给 __next__ 用；
@@ -165,6 +181,9 @@ class _LiveStreamProxy:
             cb = event.content_block
             if cb.type == "tool_use":
                 self._tools[event.index] = {"id": cb.id, "name": cb.name, "json": ""}
+            elif cb.type == "thinking":
+                self._thinking[event.index] = time.monotonic()
+                self._sink({"type": "thinking_start"})
         elif etype == "content_block_delta":
             delta = event.delta
             if delta.type == "text_delta":
@@ -181,6 +200,12 @@ class _LiveStreamProxy:
                     "id": info["id"],
                     "name": info["name"],
                     "input": info["json"] or "{}",
+                })
+            t0 = self._thinking.pop(event.index, None)
+            if t0 is not None:
+                self._sink({
+                    "type": "thinking_end",
+                    "duration_ms": int((time.monotonic() - t0) * 1000),
                 })
 
 
@@ -206,6 +231,8 @@ class _LiveClientProxy:
         return getattr(self._real, name)
 
 
+# 原生 messages 入口先留一份: AI 命名走它，不经过镜像代理（避免标题请求的事件串进对话流）
+_real_messages = api_client.client.messages
 api_client.client = _LiveClientProxy(api_client.client)
 
 
@@ -213,6 +240,8 @@ class EmittingToolRegistry(ToolRegistry):
     """委托真实 registry 执行；由工作线程调用时顺带把 tool_result 推给浏览器。
 
     被权限拒绝的工具到不了这里（runtime 直接生成 error result），不会产生假结果。
+    执行时从 dispatch 取本轮绑定的会话工作目录注入工具（bash 的 cwd、
+    读写文件的相对路径解析基点）。
     """
 
     def __init__(self, inner: ToolRegistry):
@@ -222,7 +251,8 @@ class EmittingToolRegistry(ToolRegistry):
     def execute(self, name: str, tool_input_json: str) -> str:
         emit = dispatch.current()
         try:
-            result = self._inner.execute(name, tool_input_json)
+            result = self._inner.execute(
+                name, tool_input_json, workdir=dispatch.current_workdir())
         except Exception as e:
             if emit:
                 emit({"type": "tool_result", "name": name, "input": tool_input_json,
@@ -296,14 +326,11 @@ class WebPermissionPrompter:
             "current_mode": request.current_mode.as_str(),
             "required_mode": request.required_mode.as_str(),
         })
-        deadline = time.monotonic() + PERMISSION_TIMEOUT
+        # 不设超时地等待审批（用户明确要求取消 120s 自动拒绝）:
+        # 只被 resolve() / cancel()（stop、断连）解除, 弹窗可见就一直等。
         while True:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                return self._finish_deny(
-                    request, f"审批超时（{PERMISSION_TIMEOUT}s），自动拒绝 {request.tool_name}")
             try:
-                got_id, approved = self._responses.get(timeout=remaining)
+                got_id, approved = self._responses.get()
             except queue.Empty:
                 continue
             if got_id == _CANCEL_SENTINEL:
@@ -357,6 +384,9 @@ class WebSession:
         self.busy = False              # 并发守卫: 一轮对话进行中
         self.stop_requested = False
         self.titled = store.get_title(session_id) is not None  # 自动命名一次
+        self.workdir = store.get_workdir(session_id)  # 会话工作目录（项目）
+        # 会话级思考等级: 初值取全局默认; 切换只影响本会话（runtime 注入）
+        self.thinking_level = runtime_config.thinking_level()
         self.prompter: Optional[WebPermissionPrompter] = None
 
 
@@ -399,6 +429,7 @@ def load_runtime_for(web_session: WebSession) -> None:
         hooks_config=runtime_config,
         permission_mode=app_state.permission_mode,
     )
+    web_session.runtime.set_thinking_level(web_session.thinking_level)
     web_session.last_uuid = last_uuid
 
 
@@ -417,29 +448,67 @@ def persist_turn(web_session: WebSession) -> None:
     web_session.persisted_count = len(messages)
 
 
-def maybe_auto_title(web_session: WebSession) -> None:
-    """首轮对话成功后自动命名（与 main.derive_title 同规则: 前 30 字符）。"""
+def _ai_title(first_text: str) -> Optional[str]:
+    """让模型为对话起标题。失败/空结果返回 None，由调用方回退截断。"""
+    prompt = (
+        "请为下面这段用户与编程助手的对话拟一个简洁标题："
+        "不超过 16 个字，概括主题，只输出标题本身，"
+        "不要引号、句号或任何解释。\n\n用户消息：" + first_text[:500]
+    )
+    msg = _real_messages.create(
+        model=api_client.model,
+        max_tokens=512,
+        messages=[{"role": "user", "content": prompt}],
+    )
+    out = "".join(
+        b.text for b in msg.content if getattr(b, "type", "") == "text"
+    )
+    title = " ".join(out.split()).strip("　\"'“”「」『』。.!！?？，,；;：:")
+    return title[:30] or None
+
+
+def maybe_auto_title(web_session: WebSession) -> bool:
+    """首轮对话成功后自动命名: AI 总结标题，失败回退前 30 字符截断。
+
+    返回是否设置了标题（供工作线程决定是否广播 session_renamed）。
+    调用点在工作线程、turn_done 已发出之后——多花几秒不阻塞前端收尾。
+    """
     if web_session.titled:
-        return
+        return False
     messages = web_session.runtime.session().messages
     if not messages or messages[0].role != "user":
-        return
-    first_text = "".join(
+        return False
+    first_text = " ".join(
         b.text for b in messages[0].content if isinstance(b, TextContentBlock)
-    )
-    title = " ".join(first_text.split())[:30]
+    ).strip()
+    if not first_text:
+        return False
+    title = None
+    try:
+        title = _ai_title(first_text)
+    except Exception as e:
+        print(f"⚠ AI 命名失败，回退截断标题: {e}")
     if not title:
-        return  # 全空白不命名
+        title = first_text[:30]
     store.set_title(web_session.session_id, title)
     web_session.titled = True
+    return True
 
 
 # ============================================================================
 # 工作线程: 同步 run_turn + 事件桥接
 # ============================================================================
 
+_turn_slots = threading.BoundedSemaphore(MAX_CONCURRENT_TURNS)
+
+
 def _start_turn(web_session: WebSession, text: str, emit: Callable) -> None:
-    """开一轮对话: 占坑、准备事件出口、起工作线程。调用方已确认 !busy。"""
+    """开一轮对话: 占坑、准备事件出口、起工作线程。调用方已确认 !busy。
+
+    并发上限: 信号量在事件循环线程 try_acquire——拿不到就把本轮标记为
+    queued 后直接 return, 由一个专职协程等槽位再真正起线程。busy 在排队
+    期就置位（会话仍不允许并发第二轮）, 队列等价于"每个会话自己的等待室"。
+    """
     web_session.busy = True
     web_session.stop_requested = False
     web_session.persisted_count = len(web_session.runtime.session().messages)
@@ -447,8 +516,25 @@ def _start_turn(web_session: WebSession, text: str, emit: Callable) -> None:
     prompter = WebPermissionPrompter(emitter)
     web_session.prompter = prompter
 
+    if not _turn_slots.acquire(blocking=False):
+        # 全局槽位已满: 前端显示排队中, 等有轮结束释放槽位后再起线程
+        emit({"type": "turn_queued", "max_concurrent": MAX_CONCURRENT_TURNS})
+        _queued_turns.append((web_session, text, emitter, prompter))
+        return
+
+    _spawn_turn_thread(web_session, text, emitter, prompter)
+
+
+# (web_session, text, emitter, prompter) 三元组队列; 事件循环线程独占读写
+_queued_turns: list = []
+
+
+def _spawn_turn_thread(web_session: WebSession, text: str,
+                       emitter: TurnEmitter, prompter: WebPermissionPrompter) -> None:
+    """真正起工作线程跑一轮。槽位已由调用方持有。"""
+
     def worker():
-        dispatch.bind(emitter)  # 必须在工作线程内绑定（按线程号路由）
+        dispatch.bind(emitter, web_session.workdir)  # 必须在工作线程内绑定（按线程号路由）
         try:
             summary = web_session.runtime.run_turn(text, prompter)
         except Exception as e:
@@ -461,7 +547,7 @@ def _start_turn(web_session: WebSession, text: str, emit: Callable) -> None:
                      "budget_exhausted": False, "iterations_exhausted": False})
         else:
             persist_turn(web_session)
-            maybe_auto_title(web_session)
+            needs_title = not web_session.titled
             emitter({
                 "type": "turn_done",
                 "interrupted": web_session.stop_requested,
@@ -469,12 +555,35 @@ def _start_turn(web_session: WebSession, text: str, emit: Callable) -> None:
                 "budget_exhausted": summary.budget_exhausted,
                 "iterations_exhausted": summary.iterations_exhausted,
             })
+            # AI 命名放在 turn_done 之后: 前端先收尾，标题好了再单独广播
+            if needs_title and maybe_auto_title(web_session):
+                emitter({
+                    "type": "session_renamed",
+                    "session_id": web_session.session_id,
+                    "title": store.get_title(web_session.session_id),
+                })
         finally:
             dispatch.unbind()
             web_session.busy = False
             web_session.prompter = None
+            # 释放槽位并唤醒排队的会话（FIFO; 断连/停止的排队项被跳过）
+            _turn_slots.release()
+            _drain_queued_turns()
 
     threading.Thread(target=worker, name=f"turn-{web_session.session_id}", daemon=True).start()
+
+
+def _drain_queued_turns() -> None:
+    """槽位释放后按 FIFO 唤醒排队轮次。事件循环线程独占调用。
+
+    排队期间被叫停（request_stop）或已断连的会话直接跳过: prompter.cancel
+    已经把它的等待权限请求全部 DENY, 轮次起了也会立刻收束, 不如不起。
+    """
+    while _queued_turns and _turn_slots.acquire(blocking=False):
+        web_session, text, emitter, prompter = _queued_turns.pop(0)
+        if web_session.stop_requested or not web_session.busy:
+            continue
+        _spawn_turn_thread(web_session, text, emitter, prompter)
 
 
 def request_stop(web_session: WebSession) -> None:
@@ -520,14 +629,23 @@ async def index():
 
 @app.get("/api/sessions")
 async def api_list_sessions():
-    items = []
-    for sid in store.list_sessions():
-        items.append({
+    on_disk = set(store.list_sessions())
+    # 已落盘的会话由 store 覆盖，pending 里不再需要；未落盘的保持 pending
+    _pending_sessions.difference_update(on_disk)
+    items = [
+        {
             "id": sid,
             "title": store.get_title(sid) or UNTITLED,
             "message_count": store.count_messages(sid),
-        })
-    items.reverse()  # 会话 id 是时间戳，字典序即时间序 → 最新在前
+            # 项目归属: 会话的工作目录(WorkdirRecord, 取最新一条); 未设置时 None
+            "workdir": store.get_workdir(sid),
+        }
+        for sid in on_disk
+    ]
+    for sid in _pending_sessions:
+        items.append({"id": sid, "title": UNTITLED, "message_count": 0,
+                      "workdir": None})
+    items.sort(key=lambda item: item["id"], reverse=True)  # 时间戳字典序即时间序，最新在前
     return {"sessions": items}
 
 
@@ -535,21 +653,77 @@ async def api_list_sessions():
 async def api_create_session():
     """新建会话: 与 CLI 相同的 %Y%m%d-%H%M%S 时间戳 id（UTC）。
 
-    文件在首条消息落盘时才创建，与 CLI 行为一致。
+    文件在首条消息落盘时才创建，与 CLI 行为一致；id 记入 _pending_sessions，
+    让列表/历史接口在落盘前就能认出它。
     """
-    existing = set(store.list_sessions())
+    existing = set(store.list_sessions()) | _pending_sessions
     sid = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
     while sid in existing:  # 同秒重建撞 id → 追加后缀区分
         sid += "w"
+    _pending_sessions.add(sid)
     return {"id": sid}
+
+
+@app.delete("/api/sessions/{session_id}")
+async def api_delete_session(session_id: str):
+    """删除会话: 删磁盘 JSONL + 清内存态。对话进行中的会话拒删。"""
+    web_session = _sessions.get(session_id)
+    if web_session is not None and web_session.busy:
+        raise HTTPException(status_code=409, detail="会话正在对话中，暂不能删除")
+    _pending_sessions.discard(session_id)
+    _sessions.pop(session_id, None)
+    try:
+        store.delete_session(session_id)
+    except KeyError:
+        # 本就不存在（旧 pending 未落盘等）: 按幂等成功处理，内存态已清
+        pass
+    return {"ok": True}
+
+
+@app.post("/api/sessions/{session_id}/rename")
+async def api_rename_session(session_id: str, request: dict):
+    """手动重命名: 追加一条 title 记录（展示取最新）。未落盘的会话不可重命名。"""
+    title = str(request.get("title") or "").strip()
+    if not title:
+        raise HTTPException(status_code=400, detail="标题不能为空")
+    title = title[:60]
+    if session_id not in set(store.list_sessions()):
+        raise HTTPException(status_code=404, detail="会话不存在（还没有消息，无法命名）")
+    store.set_title(session_id, title)
+    # 手动命名优先: 标记已命名，首轮 AI 命名不再覆盖它
+    web_session = _sessions.get(session_id)
+    if web_session is not None:
+        web_session.titled = True
+    return {"ok": True, "title": title}
+
+
+@app.get("/api/dirs")
+async def api_list_dirs(path: str = ""):
+    """列出某目录下的子目录（前端工作目录选择器浏览用）。path 缺省为服务进程 cwd。"""
+    target = Path(path) if path.strip() else Path.cwd()
+    if not target.is_dir():
+        raise HTTPException(status_code=400, detail=f"目录不存在: {target}")
+    try:
+        target = target.resolve()
+        dirs = sorted(
+            (p.name for p in target.iterdir() if p.is_dir() and not p.name.startswith(".")),
+            key=str.lower,
+        )
+    except OSError as e:
+        raise HTTPException(status_code=400, detail=f"无法读取目录: {e}")
+    return {"path": str(target), "dirs": dirs}
 
 
 @app.get("/api/sessions/{session_id}/messages")
 async def api_get_messages(session_id: str):
     if session_id not in set(store.list_sessions()):
-        raise HTTPException(status_code=404, detail=f"会话不存在: {session_id}")
+        # 新建后尚未落盘的会话: 返回空历史而不是 404——否则前端"新建会话"
+        # 会走加载失败分支，渲染成空白
+        return {"session_id": session_id, "messages": [],
+                "workdir": store.get_workdir(session_id)}
     msgs, _ = store.load_session(session_id)
-    return {"session_id": session_id, "messages": [_message_to_dict(m) for m in msgs]}
+    return {"session_id": session_id, "messages": [_message_to_dict(m) for m in msgs],
+            "workdir": store.get_workdir(session_id)}
 
 
 # ============================================================================
@@ -559,8 +733,12 @@ async def api_get_messages(session_id: str):
 @app.get("/api/settings")
 async def api_get_settings():
     return {
+        # 思考等级已按会话隔离, 这里返回的是"新会话的默认值"
         "thinking_level": api_client.thinking_level,
         "permission_mode": MODE_TO_NAME[app_state.permission_mode],
+        # 前端展示用: 输入栏的模型名 + 顶栏面包屑的工作区名
+        "model": api_client.model,
+        "workspace": Path.cwd().name,
     }
 
 
@@ -574,7 +752,12 @@ async def api_post_settings(request: dict):
                 status_code=400,
                 detail=f"未知思考等级: {thinking}（可选: {' | '.join(THINKING_LEVELS)}）",
             )
-        api_client.set_thinking_level(level)  # 下一轮立即生效
+        api_client.set_thinking_level(level)  # 新会话的默认值
+        # 存活会话各自持有等级: runtime（本轮立即生效）+ WebSession（下轮注入）
+        for web_session in _sessions.values():
+            web_session.thinking_level = level
+            if web_session.runtime is not None:
+                web_session.runtime.set_thinking_level(level)
 
     mode_name = request.get("permission_mode")
     if mode_name is not None:
@@ -637,6 +820,15 @@ async def ws_endpoint(websocket: WebSocket, session_id: str):
                 if web_session.busy:
                     emit_error("本轮对话进行中，同一会话同一时刻只允许一轮")
                     continue
+                # 首条消息可携带工作目录（项目的意义）: 只在未设置时落一次
+                raw_wd = str(raw.get("workdir") or "").strip()
+                if web_session.workdir is None and raw_wd:
+                    wd = Path(raw_wd)
+                    if not wd.is_dir():
+                        emit_error(f"工作目录不存在: {raw_wd}")
+                        continue
+                    web_session.workdir = str(wd.resolve())
+                    store.set_workdir(web_session.session_id, web_session.workdir)
                 try:
                     load_runtime_for(web_session)
                 except Exception as e:

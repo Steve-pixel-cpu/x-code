@@ -25,6 +25,13 @@ class TitleRecord(BaseModel):
     timestamp: str
 
 
+class WorkdirRecord(BaseModel):
+    """工作目录记录: 会话所属"项目"。与 title 同一套追加式设计, 取最新一条。"""
+    type: Literal["workdir"] = "workdir"
+    workdir: str
+    timestamp: str
+
+
 class SessionStore:
 
     def __init__(self, storage_dir: Path):
@@ -75,6 +82,13 @@ class SessionStore:
             p.stem for p in self._storage_dir.glob("*.jsonl")
         )
 
+    def delete_session(self, session_id: str) -> None:
+        """删除会话（消息 + 命名记录同在一个 JSONL，删文件即可）。文件不存在抛 KeyError。"""
+        file_path = self._session_path(session_id)
+        if not file_path.exists():
+            raise KeyError(session_id)
+        file_path.unlink()
+
     # --- 会话命名 (prompt_dev/session_title.md) ---
     # 存储方案: 标题作为独立记录类型与消息条目共存于同一 JSONL 文件。
     # 改名 = 追加一条新 title 记录, 旧记录保留——追加式哲学不被破坏,
@@ -106,6 +120,23 @@ class SessionStore:
                 latest = entry.title
         return latest
 
+    def set_workdir(self, session_id: str, workdir: str) -> None:
+        """追加一条工作目录记录（会话的项目目录）。"""
+        record = WorkdirRecord(
+            workdir=workdir,
+            timestamp=datetime.now(timezone.utc).isoformat(),
+        )
+        self._append_entry(self._session_path(session_id), record)
+
+    def get_workdir(self, session_id: str) -> Optional[str]:
+        """返回会话工作目录; 没有记录返回 None（工具回退到服务进程 cwd）。"""
+        entries = self._read_entries(self._session_path(session_id))
+        latest: Optional[str] = None
+        for entry in entries:
+            if isinstance(entry, WorkdirRecord):
+                latest = entry.workdir
+        return latest
+
     def _session_path(self, session_id: str) -> Path:
         return self._storage_dir / f"{session_id}.jsonl"
 
@@ -121,9 +152,11 @@ class SessionStore:
                 try:
 
                     data = json.loads(line)
-                    # title 记录与消息条目共存一个文件, 按类型分流
+                    # title/workdir 记录与消息条目共存一个文件, 按类型分流
                     if data.get("type") == "title":
                         result.append(TitleRecord.model_validate(data))
+                    elif data.get("type") == "workdir":
+                        result.append(WorkdirRecord.model_validate(data))
                     else:
                         result.append(StorageEntry.model_validate(data))
                 except json.JSONDecodeError as e:
