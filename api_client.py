@@ -146,15 +146,45 @@ class ClaudeApiClient(ApiClient):
                  model: str,
                  tools: list[dict] | None = None,
                  emit_output: bool = True,
-                 thinking_level: str = "medium"):
+                 thinking_level: str = "medium",
+                 base_url: str | None = None):
 
         self.model = model
         self.tools = tools or []
         self.emit_output = emit_output
         self.thinking_level = thinking_level
+        # 供应商配置: base_url/api_key 可在运行期经 configure() 切换
+        self._api_key = api_key
+        self._base_url = base_url
         # 流式读超时: 两条流式事件之间最大间隔 300s。没有它，一条 stalled 的
         # 连接会让 run_turn 永久挂死（CLI 卡死 / Web 端 busy 永远不解锁）
-        self.client = anthropic.Anthropic(api_key=api_key, timeout=300.0)
+        self.raw_client = anthropic.Anthropic(api_key=api_key, base_url=base_url, timeout=300.0)
+        self.client = self.raw_client
+
+    def configure(self,
+                  base_url: str | None = None,
+                  api_key: str | None = None,
+                  model: str | None = None) -> None:
+        """运行期切换供应商/模型。base_url/api_key 有实质变化才重建底层客户端;
+        None = 保持不变。注意: server 端在调用后需重新挂自己的镜像代理。"""
+        if model:
+            self.model = model
+        new_key = api_key if api_key is not None else self._api_key
+        new_url = base_url if base_url is not None else self._base_url
+        if new_key != self._api_key or new_url != self._base_url:
+            self._api_key = new_key
+            self._base_url = new_url
+            self.raw_client = anthropic.Anthropic(
+                api_key=new_key, base_url=new_url or None, timeout=300.0)
+            self.client = self.raw_client
+
+    def reset_to(self, api_key: str, model: str, base_url: str | None = None) -> None:
+        """无条件重置为给定配置（回退 .env 默认时用, 会清掉自定义 base_url）。"""
+        self._api_key = api_key
+        self._base_url = base_url
+        self.model = model
+        self.raw_client = anthropic.Anthropic(api_key=api_key, base_url=base_url, timeout=300.0)
+        self.client = self.raw_client
 
     def set_thinking_level(self, level: str) -> None:
         self.thinking_level = level

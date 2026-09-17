@@ -27,10 +27,12 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import Body, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 
 from api_client import ClaudeApiClient, THINKING_LEVELS
+import anthropic
 from config import ConfigLoader, RuntimeConfig
 from main import (
     DEFAULT_MODEL,
@@ -95,6 +97,18 @@ api_client = ClaudeApiClient(
 
 app = FastAPI(title="x-code web")
 STATIC_DIR = Path(__file__).parent / "static"
+# 静态资源 (app.css / app.js): index.html 拆分后由这里托管
+app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+
+
+@app.middleware("http")
+async def no_cache_shell(request: Request, call_next):
+    """页面壳与静态资源禁缓存: 前端迭代频繁, 保证刷新即最新（ETag 未变时仍 304）。"""
+    response = await call_next(request)
+    p = request.url.path
+    if p == "/" or p.startswith("/static"):
+        response.headers["Cache-Control"] = "no-cache"
+    return response
 
 MAX_CONCURRENT_TURNS = 4  # 全局并发上限: 同时跑的轮次超过这个数就排队
 UNTITLED = "(未命名)"
@@ -255,6 +269,68 @@ class _LiveClientProxy:
 # 原生 messages 入口先留一份: AI 命名走它，不经过镜像代理（避免标题请求的事件串进对话流）
 _real_messages = api_client.client.messages
 api_client.client = _LiveClientProxy(api_client.client)
+
+
+# ============================================================================
+# 模型供应商配置: ~/.x-code/providers.json, 设置页"模型"分区读写
+# ============================================================================
+
+PROVIDERS_FILE = Path.home() / ".x-code" / "providers.json"
+
+
+def load_provider_config() -> dict:
+    """读取供应商配置; 无文件/损坏时返回基于 .env 的默认配置（不写盘,
+    避免测试导入等意外场景污染真实配置; 用户在设置页保存时才落盘）。"""
+    if PROVIDERS_FILE.exists():
+        try:
+            cfg = json.loads(PROVIDERS_FILE.read_text(encoding="utf-8"))
+            if isinstance(cfg, dict) and isinstance(cfg.get("providers"), list):
+                return cfg
+        except Exception:
+            pass
+    cfg = {
+        "active": {"provider": "default", "model": api_client.model},
+        "providers": [{
+            "id": "default",
+            "name": "智谱 BigModel",
+            "base_url": os.getenv("ANTHROPIC_BASE_URL") or "https://open.bigmodel.cn/api/anthropic",
+            "api_key": API_KEY or "",
+            "enabled": True,
+            "models": [{"id": api_client.model, "name": api_client.model, "tags": []}],
+        }],
+    }
+    return cfg
+
+
+def save_provider_config(cfg: dict) -> None:
+    PROVIDERS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    PROVIDERS_FILE.write_text(
+        json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _apply_provider_config(cfg: dict) -> None:
+    """把 active 指向的启用供应商应用到 api_client, 并重挂镜像代理与 _real_messages。
+    active 缺失/指向不存在或被禁用的供应商时: 回退 .env 默认配置。"""
+    global _real_messages
+    active = cfg.get("active") or {}
+    prov = next((p for p in cfg.get("providers", [])
+                 if p.get("id") == active.get("provider")), None)
+    if prov and prov.get("enabled") and active.get("model") and prov.get("api_key"):
+        api_client.configure(
+            base_url=prov.get("base_url") or None,
+            api_key=prov.get("api_key"),
+            model=active["model"],
+        )
+    else:
+        # 回退 .env 默认配置
+        api_client.reset_to(api_key=API_KEY or "", model=DEFAULT_MODEL,
+                            base_url=os.getenv("ANTHROPIC_BASE_URL"))
+    api_client.client = _LiveClientProxy(api_client.raw_client)
+    _real_messages = api_client.raw_client.messages
+
+
+_provider_cfg = load_provider_config()
+_apply_provider_config(_provider_cfg)
 
 
 class EmittingToolRegistry(ToolRegistry):
@@ -726,18 +802,27 @@ async def api_list_sessions():
 
 
 @app.post("/api/sessions")
-async def api_create_session():
+async def api_create_session(payload: Optional[dict] = Body(None)):
     """新建会话: 与 CLI 相同的 %Y%m%d-%H%M%S 时间戳 id（UTC）。
 
     文件在首条消息落盘时才创建，与 CLI 行为一致；id 记入 _pending_sessions，
-    让列表/历史接口在落盘前就能认出它。
+    让列表/历史接口在落盘前就能认出它。可选携带 workdir: 侧栏项目行"新建任务"
+    进入时预选的目录，创建即绑定，列表立刻归组（WS 首条消息的绑定仍是兜底）。
     """
     existing = set(store.list_sessions()) | _pending_sessions
     sid = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
     while sid in existing:  # 同秒重建撞 id → 追加后缀区分
         sid += "w"
+    workdir = None
+    raw_wd = str((payload or {}).get("workdir") or "").strip()
+    if raw_wd:
+        wd = Path(raw_wd)
+        if not wd.is_dir():
+            raise HTTPException(status_code=400, detail=f"工作目录不存在: {raw_wd}")
+        workdir = str(wd.resolve())
+        store.set_workdir(sid, workdir)
     _pending_sessions.add(sid)
-    return {"id": sid}
+    return {"id": sid, "workdir": workdir}
 
 
 @app.delete("/api/sessions/{session_id}")
@@ -803,17 +888,20 @@ async def api_get_messages(session_id: str):
 
 
 # ============================================================================
-# REST: 设置（思考等级 + 权限模式）
+# REST: 设置（思考等级 + 权限模式 + 激活模型）
 # ============================================================================
 
 @app.get("/api/settings")
 async def api_get_settings():
+    active = _provider_cfg.get("active") or {}
     return {
         # 思考等级已按会话隔离, 这里返回的是"新会话的默认值"
         "thinking_level": api_client.thinking_level,
         "permission_mode": MODE_TO_NAME[app_state.permission_mode],
         # 前端展示用: 输入栏的模型名 + 顶栏面包屑的工作区名
         "model": api_client.model,
+        "provider_id": active.get("provider"),
+        "model_id": active.get("model"),
         "workspace": Path.cwd().name,
     }
 
@@ -849,7 +937,69 @@ async def api_post_settings(request: dict):
             if web_session.runtime is not None:
                 web_session.runtime.set_permission_mode(mode)
 
+    # 切换激活模型（来自输入框模型下拉）
+    provider_id = request.get("provider_id")
+    model_id = request.get("model_id")
+    if provider_id is not None and model_id is not None:
+        _provider_cfg["active"] = {"provider": str(provider_id), "model": str(model_id)}
+        save_provider_config(_provider_cfg)
+        _apply_provider_config(_provider_cfg)
+
     return await api_get_settings()
+
+
+# ============================================================================
+# REST: 模型供应商配置（设置页"模型"分区）
+# ============================================================================
+
+@app.get("/api/providers")
+async def api_get_providers():
+    return _provider_cfg
+
+
+@app.post("/api/providers")
+async def api_save_providers(request: dict):
+    providers = request.get("providers")
+    active = request.get("active")
+    if not isinstance(providers, list):
+        raise HTTPException(status_code=400, detail="providers 必须是数组")
+    ids = [p.get("id") for p in providers]
+    if len(ids) != len(set(ids)):
+        raise HTTPException(status_code=400, detail="供应商 id 重复")
+    for p in providers:
+        if not p.get("id") or not p.get("name"):
+            raise HTTPException(status_code=400, detail="供应商缺少 id 或名称")
+        if not isinstance(p.get("models"), list):
+            raise HTTPException(status_code=400, detail=f"供应商 {p.get('name')} 缺少模型列表")
+    cfg = {"active": active if isinstance(active, dict) else _provider_cfg.get("active"),
+           "providers": providers}
+    if not isinstance(cfg["active"], dict):
+        cfg["active"] = {}
+    _provider_cfg.clear()
+    _provider_cfg.update(cfg)
+    save_provider_config(_provider_cfg)
+    _apply_provider_config(_provider_cfg)
+    return _provider_cfg
+
+
+@app.post("/api/providers/test")
+async def api_test_provider(request: dict):
+    """用给定配置发一次最小请求, 验证供应商连通性。"""
+    base_url = request.get("base_url") or None
+    api_key = request.get("api_key") or ""
+    model = request.get("model") or ""
+    if not api_key or not model:
+        raise HTTPException(status_code=400, detail="缺少 api_key 或 model")
+    try:
+        probe = anthropic.Anthropic(api_key=api_key, base_url=base_url, timeout=30.0)
+        resp = probe.messages.create(
+            model=model, max_tokens=16,
+            messages=[{"role": "user", "content": "hi"}],
+        )
+        text = "".join(b.text for b in resp.content if getattr(b, "type", "") == "text")
+        return {"ok": True, "detail": text.strip()[:50] or "(空回复)"}
+    except Exception as e:
+        return {"ok": False, "detail": str(e)[:200]}
 
 
 # ============================================================================

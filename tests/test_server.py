@@ -232,16 +232,17 @@ def test_ws_permission_response_without_pending(client, isolated_store):
         assert "待审批" in reply["message"]
 
 
-def test_ws_rejects_second_turn_while_busy(client, isolated_store, monkeypatch):
-    """并发守卫: busy 会话上的第二条 user 消息收到 error，不触发第二轮。"""
+def test_ws_queues_second_turn_while_busy(client, isolated_store, monkeypatch):
+    """并发守卫: busy 会话上的第二条 user 消息进入排队区（回执 turn_queued_user），不触发第二轮。"""
     web_session = server.get_or_create_web_session("s-busy")
     web_session.busy = True
     try:
         with client.websocket_connect("/ws/s-busy") as ws:
             ws.send_json({"type": "user", "text": "第二条"})
             reply = json.loads(ws.receive_text())
-            assert reply["type"] == "error"
-            assert "一轮" in reply["message"]
+            assert reply["type"] == "turn_queued_user"
+            assert reply["position"] == 1
+            assert web_session.pending == ["第二条"]
     finally:
         web_session.busy = False
 
