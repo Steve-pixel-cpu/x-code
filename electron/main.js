@@ -2,7 +2,7 @@
 //   - 端口 8000 上已有 x-code 服务在跑 → 直接复用, 不拉进程、退出时不杀
 //   - 否则拉起 .venv 里的 python server.py 作为子进程, 退出时整树杀掉
 //   - 窗口只加载本地服务; 外部链接一律转交系统浏览器, 防止窗口被带跑
-const { app, BrowserWindow, shell, dialog } = require("electron");
+const { app, BrowserWindow, shell, dialog, Menu, ipcMain } = require("electron");
 const { spawn } = require("child_process");
 const path = require("path");
 const fs = require("fs");
@@ -99,10 +99,21 @@ async function createWindow() {
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
+      preload: path.join(__dirname, "preload.js"),
     },
   });
   win.once("ready-to-show", () => win.show());
   win.loadURL(BASE_URL);
+
+  // 右键菜单: Electron 默认没有, 手动提供（选中即可复制; 输入框里可全选）
+  win.webContents.on("context-menu", (ev, params) => {
+    const menu = Menu.buildFromTemplate([
+      { label: "复制", role: "copy", enabled: params.editFlags.canCopy },
+      { type: "separator" },
+      { label: "全选", role: "selectAll" },
+    ]);
+    menu.popup({ window: win });
+  });
 
   // 外部链接（markdown 链接等）交给系统浏览器打开
   win.webContents.setWindowOpenHandler(({ url }) => {
@@ -124,6 +135,13 @@ const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) {
   app.quit();
 } else {
+  // 系统原生"选择文件夹"对话框（渲染层经 preload 桥调用）
+  ipcMain.handle("pick-folder", async () => {
+    const opts = { title: "选择文件夹", properties: ["openDirectory"] };
+    const res = win ? await dialog.showOpenDialog(win, opts)
+                    : await dialog.showOpenDialog(opts);
+    return res.canceled ? null : res.filePaths[0];
+  });
   app.on("second-instance", () => {
     if (win) {
       if (win.isMinimized()) win.restore();

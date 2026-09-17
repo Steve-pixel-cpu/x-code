@@ -5,9 +5,11 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <meta name="color-scheme" content="dark light">
 <title>x-code</title>
-<script>/* 主题在绘制前应用，避免闪白 */ document.documentElement.dataset.theme = localStorage.getItem("xc-theme") || "dark";</script>
+<script>/* 主题与强调色在绘制前应用，避免闪白 (dark | light | system) */ (function(){var p=localStorage.getItem("xc-theme")||"system";var d=p==="dark"||(p==="system"&&window.matchMedia("(prefers-color-scheme: dark)").matches);document.documentElement.dataset.theme=d?"dark":"light";var a=localStorage.getItem("xc-accent");if(a&&a!=="gray")document.documentElement.dataset.accent=a;})();</script>
 <script src="https://cdn.jsdelivr.net/npm/marked@12.0.2/lib/marked.umd.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@highlightjs/cdn-assets@11.9.0/highlight.min.js"></script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+<script src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
 <style>
   /* ============ 设计令牌: 深色为默认，浅色经 [data-theme=light] 覆盖 ============ */
   :root {
@@ -24,10 +26,10 @@
     --text-3: #6c6d78;
     --hover: #1d1d24;
     --active: #23232c;
-    --accent: #f97316;
-    --accent-deep: #ea6f0e;
-    --accent-soft: rgba(249, 115, 22, .13);
-    --accent-border: rgba(249, 115, 22, .38);
+    --accent: #b9bec7;
+    --accent-deep: #8f95a0;
+    --accent-soft: rgba(203, 208, 217, .10);
+    --accent-border: rgba(203, 208, 217, .26);
     --ok: #4ade80;      --ok-soft: rgba(74, 222, 128, .12);
     --err: #f87171;     --err-soft: rgba(248, 113, 113, .12);
     --warn: #fbbf24;    --warn-soft: rgba(251, 191, 36, .12);
@@ -36,6 +38,7 @@
     --overlay: rgba(6, 6, 10, .6);
     --shadow-md: 0 2px 12px rgba(0, 0, 0, .28);
     --shadow-lg: 0 12px 40px rgba(0, 0, 0, .42);
+    --content-w: min(1500px, calc(100% - 64px));
     --r-sm: 8px; --r-md: 12px; --r-lg: 16px; --r-xl: 20px;
     /* 代码高亮（hljs 类名，深色） */
     --hl-comment: #6b6d76; --hl-keyword: #f27a5c; --hl-string: #9ecb74;
@@ -56,10 +59,10 @@
     --text-3: #9a9ba3;
     --hover: #f3f3f5;
     --active: #ececef;
-    --accent: #e5622a;
-    --accent-deep: #d4531c;
-    --accent-soft: #fdefe6;
-    --accent-border: #f3cdb2;
+    --accent: #757b85;
+    --accent-deep: #5d626b;
+    --accent-soft: #f1f2f4;
+    --accent-border: #d7d9dd;
     --ok: #17803b;      --ok-soft: #e7f4eb;
     --err: #cf3a2c;     --err-soft: #fbecea;
     --warn: #946200;    --warn-soft: #fbf2dc;
@@ -68,9 +71,57 @@
     --overlay: rgba(24, 24, 30, .38);
     --shadow-md: 0 2px 12px rgba(28, 26, 24, .07);
     --shadow-lg: 0 12px 40px rgba(28, 26, 24, .16);
+    --content-w: min(1500px, calc(100% - 64px));
     --hl-comment: #9a9ba3; --hl-keyword: #c9422a; --hl-string: #2e7d32;
     --hl-number: #a56211;  --hl-title: #1f6fbf;  --hl-attr: #7c3aad;
     --hl-type: #0e7c8c;    --hl-meta: #5f6068;   --hl-builtin: #0e7c8c;
+  }
+
+  /* ============ 强调色主题: data-accent 覆盖默认浅灰 ============ */
+  :root[data-accent="blue"] {
+    --accent: #6aa6ff; --accent-deep: #4a86ec;
+    --accent-soft: rgba(106, 166, 255, .13);
+    --accent-border: rgba(106, 166, 255, .36);
+  }
+  :root[data-theme="light"][data-accent="blue"] {
+    --accent: #2f6fd6; --accent-deep: #245cb8;
+    --accent-soft: #e9f1fd; --accent-border: #c3d8f6;
+  }
+  :root[data-accent="violet"] {
+    --accent: #8b80f9; --accent-deep: #6e61ea;
+    --accent-soft: rgba(139, 128, 249, .13);
+    --accent-border: rgba(139, 128, 249, .36);
+  }
+  :root[data-theme="light"][data-accent="violet"] {
+    --accent: #6a5be0; --accent-deep: #5747cf;
+    --accent-soft: #eeecfc; --accent-border: #cfc9f6;
+  }
+  :root[data-accent="green"] {
+    --accent: #4ade80; --accent-deep: #2eb35f;
+    --accent-soft: rgba(74, 222, 128, .12);
+    --accent-border: rgba(74, 222, 128, .34);
+  }
+  :root[data-theme="light"][data-accent="green"] {
+    --accent: #17803b; --accent-deep: #106530;
+    --accent-soft: #e7f4eb; --accent-border: #bfe3cb;
+  }
+  :root[data-accent="orange"] {
+    --accent: #f97316; --accent-deep: #ea6f0e;
+    --accent-soft: rgba(249, 115, 22, .13);
+    --accent-border: rgba(249, 115, 22, .38);
+  }
+  :root[data-theme="light"][data-accent="orange"] {
+    --accent: #e5622a; --accent-deep: #d4531c;
+    --accent-soft: #fdefe6; --accent-border: #f3cdb2;
+  }
+  :root[data-accent="rose"] {
+    --accent: #fb7185; --accent-deep: #ec4a62;
+    --accent-soft: rgba(251, 113, 133, .12);
+    --accent-border: rgba(251, 113, 133, .36);
+  }
+  :root[data-theme="light"][data-accent="rose"] {
+    --accent: #cf3a5c; --accent-deep: #b02a4a;
+    --accent-soft: #fdeef1; --accent-border: #f5c6d1;
   }
 
   * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -84,7 +135,10 @@
     -webkit-font-smoothing: antialiased;
   }
   button { font-family: inherit; cursor: pointer; color: inherit; }
-  ::selection { background: var(--accent-soft); }
+  /* 选区高亮: 跟随强调色, 50% 保证明显可见 */
+  ::selection { background: rgba(136, 140, 152, .45); }
+  ::selection { background: color-mix(in srgb, var(--accent) 50%, transparent); }
+  ::-moz-selection { background: color-mix(in srgb, var(--accent) 50%, transparent); }
   ::-webkit-scrollbar { width: 9px; height: 9px; }
   ::-webkit-scrollbar-thumb {
     background: var(--border-strong); border-radius: 5px;
@@ -165,6 +219,31 @@
   }
   .list-empty { font-size: 12.5px; color: var(--text-3); margin: 4px 18px; }
 
+  /* 项目视图: 可折叠项目 + 添加项目按钮行 */
+  .list-label-row {
+    display: flex; align-items: center; justify-content: space-between;
+    margin: 14px 18px 5px;
+  }
+  .list-label-row .list-label { margin: 0; }
+  .project-item {
+    display: flex; align-items: center; gap: 8px;
+    width: calc(100% - 16px); margin: 1px 8px; padding: 0 8px; height: 32px;
+    border-radius: var(--r-sm); cursor: pointer; transition: background .12s;
+  }
+  .project-item:hover { background: var(--hover); }
+  .project-item > svg { flex: none; color: var(--text-3); }
+  .project-item .p-name {
+    flex: 1; min-width: 0; font-size: 13px; color: var(--text);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .project-item .p-count { flex: none; font-size: 11px; color: var(--text-3); }
+  .project-item .p-chev {
+    flex: none; display: inline-flex; color: var(--text-3);
+    transition: transform .15s;
+  }
+  .project-item.collapsed .p-chev { transform: rotate(-90deg); }
+  .session-item.in-project { margin-left: 26px; width: calc(100% - 42px); }
+
   .session-item {
     position: relative; display: flex; align-items: center; gap: 8px;
     width: calc(100% - 16px); margin: 1px 8px; padding: 0 8px 0 12px; height: 34px;
@@ -179,6 +258,9 @@
   .session-item.active { background: var(--active); }
   .session-item.active::before { opacity: 1; }
   .session-item .s-ico { flex: none; color: var(--text-3); display: inline-flex; }
+  .s-ico .s-spin { animation: spin .8s linear infinite; }
+  .session-item.running .s-ico { color: var(--accent); }
+  @keyframes spin { to { transform: rotate(360deg); } }
   .session-item .title {
     flex: 1; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   }
@@ -292,7 +374,7 @@
   #messages { flex: 1; overflow-y: auto; scroll-behavior: auto; }
   /* 每个会话一个常驻消息列, 切换只是显隐: 后台会话的流式输出继续写进
      自己的隐藏列, 切回时原样恢复——流式中的回复不丢字、不冻结 */
-  .msg-col { max-width: 860px; margin: 0 auto; padding: 28px 32px 12px; display: none; }
+  .msg-col { width: var(--content-w); margin: 0 auto; padding: 28px 32px 12px; display: none; }
   .msg-col.on { display: block; }
 
   /* 空状态 */
@@ -349,6 +431,13 @@
   }
   .msg.assistant .bubble {
     flex: 1; min-width: 0; font-size: 14px; line-height: 1.75; word-break: break-word;
+  }
+
+  /* 消息内容可自由选中: 支持右键菜单复制 / Ctrl+C */
+  .bubble, .tool-row, .think-row { user-select: text; -webkit-user-select: text; }
+  /* 装饰性字形不进选区（拖选正文时不会带上 ✻ 等符号） */
+  .avatar, .empty-state .mark, .side-logo .mark {
+    user-select: none; -webkit-user-select: none;
   }
 
   /* assistant markdown */
@@ -414,6 +503,12 @@
   .hljs-type, .hljs-built_in, .hljs-class .hljs-title { color: var(--hl-type); }
   .hljs-meta, .hljs-meta .hljs-keyword, .hljs-tag { color: var(--hl-meta); }
   .hljs-emphasis { font-style: italic; } .hljs-strong { font-weight: 600; }
+
+  /* KaTeX 公式: 块级居中可横滚, 行内与正文基线对齐 */
+  .bubble .katex-display {
+    margin: .7em 0; overflow-x: auto; overflow-y: hidden; padding: 2px 0;
+  }
+  .bubble .katex { font-size: 1.12em; }
 
   /* 思考行: 实时「思考中…」→ 收口为「思考 · 持续了X秒」 */
   .think-row {
@@ -485,7 +580,7 @@
   /* ============ 底部输入卡片 ============ */
   #composer { flex: none; padding: 6px 32px 18px; }
   #thinking {
-    display: none; max-width: 860px; margin: 0 auto 8px; padding-left: 6px;
+    display: none; width: var(--content-w); margin: 0 auto 8px; padding-left: 6px;
     align-items: center; gap: 9px;
   }
   #thinking .dots { display: inline-flex; gap: 4px; }
@@ -499,7 +594,7 @@
   @keyframes bounce { 0%, 60%, 100% { transform: translateY(0); opacity: .4; } 30% { transform: translateY(-4px); opacity: 1; } }
 
   #input-card {
-    max-width: 860px; margin: 0 auto;
+    width: var(--content-w); margin: 0 auto;
     border: 1px solid var(--border-strong); border-radius: var(--r-xl);
     background: var(--surface); box-shadow: var(--shadow-lg);
     padding: 13px 14px 11px 17px;
@@ -520,12 +615,64 @@
   .comp-row { display: flex; align-items: center; gap: 6px; }
   .comp-row .spacer { flex: 1; }
 
-  .round-btn {
-    width: 28px; height: 28px; border: none; background: none; border-radius: 50%;
-    color: var(--text-3); display: inline-flex; align-items: center; justify-content: center;
-    flex: none; transition: all .12s;
+  /* ============ 设置页（独立视图, 便于后续扩展） ============ */
+  #pane[data-view="settings"] > #doc-header,
+  #pane[data-view="settings"] > #messages,
+  #pane[data-view="settings"] > #scroll-btn,
+  #pane[data-view="settings"] > #composer { display: none; }
+  #settings-page {
+    display: none; flex: 1; flex-direction: column;
+    min-width: 0; min-height: 0; background: var(--bg);
+    position: relative; z-index: 1;
   }
-  .round-btn:hover { background: var(--hover); color: var(--text); }
+  #pane[data-view="settings"] > #settings-page { display: flex; }
+  .sp-header {
+    flex: none; display: flex; align-items: center; gap: 10px;
+    height: 56px; padding: 0 22px; border-bottom: 1px solid var(--border);
+  }
+  .sp-title { font-size: 15px; font-weight: 600; }
+  .sp-body { flex: 1; overflow-y: auto; padding: 24px 22px; }
+  .sp-inner {
+    max-width: 720px; margin: 0 auto;
+    display: flex; flex-direction: column; gap: 12px;
+  }
+  .sp-section {
+    font-size: 12px; color: var(--text-3); font-weight: 600;
+    letter-spacing: .04em; margin: 6px 2px 0;
+  }
+  .sp-section-body { display: flex; flex-direction: column; gap: 12px; }
+  .set-row {
+    display: flex; align-items: center; gap: 12px;
+    padding: 12px 14px; border: 1px solid var(--border); border-radius: var(--r-md);
+    background: var(--surface-2);
+  }
+  .set-info { flex: 1; min-width: 0; }
+  .set-name { font-size: 13.5px; color: var(--text); }
+  .set-desc { font-size: 12px; color: var(--text-3); margin-top: 2px; }
+  .set-dd { flex: none; }
+
+  /* 强调颜色: 16 进制输入框 */
+  .hex-input {
+    flex: none; width: 116px; height: 30px;
+    border: 1px solid var(--border-strong); border-radius: 7px;
+    background: var(--bg); color: var(--text);
+    font-family: "Cascadia Code", Consolas, monospace; font-size: 12.5px;
+    padding: 0 9px; text-align: right; transition: border-color .15s;
+  }
+  .hex-input:focus { outline: none; border-color: var(--accent-border); }
+  .hex-input.invalid { border-color: var(--err); }
+
+  /* 设置页时侧栏切换为设置导航 */
+  #sidebar.settings-view #side-chat { display: none; }
+  /* 会话侧栏撑满剩余高度, 让底部连接状态栏始终贴底 */
+  #side-chat { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+  #side-settings {
+    display: none; flex: 1; min-height: 0; flex-direction: column;
+    overflow-y: auto; padding-bottom: 10px;
+  }
+  #sidebar.settings-view #side-settings { display: flex; }
+  .menu-item.on { background: var(--active); color: var(--text); }
+  .menu-item.on svg { color: var(--accent); }
 
   .pill {
     display: inline-flex; align-items: center; gap: 5px; height: 28px;
@@ -559,6 +706,7 @@
     border-radius: var(--r-md); box-shadow: var(--shadow-lg);
     animation: rise .14s ease;
   }
+  .dd-pop.rich { min-width: 250px; }
   .dd-opt {
     display: flex; align-items: center; gap: 6px;
     border: none; background: none; text-align: left;
@@ -570,6 +718,15 @@
   .dd-opt.on { color: var(--accent); font-weight: 600; }
   .dd-opt .dd-check { flex: none; visibility: hidden; display: inline-flex; }
   .dd-opt.on .dd-check { visibility: visible; }
+  /* 富选项: 图标 + 名称/描述两行（权限模式菜单） */
+  .dd-opt.rich { padding: 8px 10px; }
+  .dd-ico { flex: none; display: inline-flex; color: var(--text-3); }
+  .dd-opt:hover .dd-ico { color: var(--text-2); }
+  .dd-opt.on .dd-ico { color: var(--accent); }
+  .dd-col { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+  .dd-col .dd-txt { font-weight: 600; color: var(--text); }
+  .dd-opt.on .dd-col .dd-txt { color: var(--accent); }
+  .dd-col .dd-desc { font-size: 11px; color: var(--text-3); font-weight: 400; }
 
   #btn-send {
     width: 32px; height: 32px; border: none; border-radius: 50%;
@@ -585,23 +742,15 @@
     background: var(--surface-3); color: var(--text-3);
     cursor: not-allowed; box-shadow: none;
   }
-  #btn-stop {
-    width: 32px; height: 32px; border-radius: 50%;
-    border: 1.5px solid var(--err); background: transparent; color: var(--err);
-    display: none; align-items: center; justify-content: center;
-    flex: none; margin-left: 3px; transition: all .15s;
+  /* 同一个按钮的第二形态: 输入框为空且本轮进行中 = 中断 */
+  #btn-send[data-mode="stop"] {
+    background: transparent; color: var(--err);
+    border: 1.5px solid var(--err); box-shadow: none;
   }
-  #btn-stop:hover { background: var(--err-soft); transform: scale(1.06); }
-
-  /* 工作目录 chip（草稿态选择项目目录） */
-  .wd-chip {
-    display: none; align-items: center; gap: 5px; height: 28px;
-    padding: 0 9px; border-radius: 8px; border: none; background: none;
-    color: var(--text-2); font-size: 12.5px; flex: none; max-width: 200px;
-  }
-  .wd-chip:hover { background: var(--hover); }
-  .wd-chip.show { display: inline-flex; }
-  .wd-chip #wd-chip-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #btn-send[data-mode="stop"]:hover:not(:disabled) { background: var(--err-soft); }
+  #btn-send .ic-stop { display: none; }
+  #btn-send[data-mode="stop"] .ic-stop { display: block; }
+  #btn-send[data-mode="stop"] .ic-send { display: none; }
 
   /* 目录选择弹层 */
   #dir-pop {
@@ -699,6 +848,37 @@
     opacity: 0; pointer-events: none; transition: all .18s;
   }
   #toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+
+  /* 划词工具条: 选中聊天文本后浮出 */
+  .sel-bar {
+    position: fixed; z-index: 250; display: none; gap: 2px;
+    background: var(--surface); border: 1px solid var(--border-strong);
+    border-radius: 10px; box-shadow: var(--shadow-lg); padding: 4px;
+    animation: rise .14s ease;
+  }
+  .sel-bar button {
+    border: none; background: none; border-radius: 7px;
+    padding: 6px 11px; font-family: inherit; font-size: 12.5px;
+    color: var(--text-2); white-space: nowrap;
+    transition: background .1s, color .1s;
+  }
+  .sel-bar button:hover { background: var(--hover); color: var(--text); }
+
+  /* 右键菜单兜底（Electron 内走原生菜单, 这里只服务普通浏览器/内嵌预览） */
+  .ctx-menu {
+    position: fixed; z-index: 260; display: none; min-width: 130px;
+    background: var(--surface); border: 1px solid var(--border-strong);
+    border-radius: 10px; box-shadow: var(--shadow-lg); padding: 4px;
+    animation: rise .12s ease;
+  }
+  .ctx-menu button {
+    display: block; width: 100%; text-align: left;
+    border: none; background: none; border-radius: 7px;
+    padding: 7px 12px; font-family: inherit; font-size: 12.5px;
+    color: var(--text-2);
+    transition: background .1s, color .1s;
+  }
+  .ctx-menu button:hover { background: var(--hover); color: var(--text); }
 </style>
 </head>
 <body>
@@ -707,6 +887,8 @@
 <aside id="sidebar">
   <div class="side-logo"><span class="mark">✻</span>x-code</div>
 
+  <!-- 会话侧栏（进入设置页时整块切换为设置导航） -->
+  <div id="side-chat">
   <button class="menu-item" id="btn-new" title="新建会话">
     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M12 8.5v7M8.5 12h7"/></svg>
     新建任务<kbd>Ctrl+N</kbd>
@@ -715,13 +897,9 @@
     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.2-3.2"/></svg>
     搜索<kbd>Ctrl+K</kbd>
   </button>
-  <button class="menu-item" data-stub title="敬请期待">
-    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"><path d="M13 2.5L4.5 14H11l-1.5 7.5L18 10h-6.5L13 2.5z"/></svg>
-    自动化
-  </button>
-  <button class="menu-item" data-stub title="敬请期待">
-    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="4" y="4" width="7" height="7" rx="1.5"/><rect x="13" y="4" width="7" height="7" rx="1.5"/><rect x="4" y="13" width="7" height="7" rx="1.5"/><rect x="13" y="13" width="7" height="7" rx="1.5"/></svg>
-    插件市场
+  <button class="menu-item js-open-settings" id="btn-open-settings" title="设置">
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3.2"/><path d="M19.4 15a1.7 1.7 0 00.34 1.87l.06.06a2 2 0 11-2.83 2.83l-.06-.06a1.7 1.7 0 00-1.87-.34 1.7 1.7 0 00-1.03 1.56V21a2 2 0 11-4 0v-.09a1.7 1.7 0 00-1.11-1.56 1.7 1.7 0 00-1.87.34l-.06.06a2 2 0 11-2.83-2.83l.06-.06a1.7 1.7 0 00.34-1.87 1.7 1.7 0 00-1.56-1.03H3a2 2 0 110-4h.09a1.7 1.7 0 001.56-1.11 1.7 1.7 0 00-.34-1.87l-.06-.06a2 2 0 112.83-2.83l.06.06a1.7 1.7 0 001.87.34h.08a1.7 1.7 0 001.03-1.56V3a2 2 0 114 0v.09a1.7 1.7 0 001.03 1.56 1.7 1.7 0 001.87-.34l.06-.06a2 2 0 112.83 2.83l-.06.06a1.7 1.7 0 00-.34 1.87v.08a1.7 1.7 0 001.56 1.03H21a2 2 0 110 4h-.09a1.7 1.7 0 00-1.51 1.03z"/></svg>
+    设置
   </button>
 
   <div id="side-tabs-row">
@@ -729,22 +907,28 @@
       <button id="tab-group">分组</button>
       <button id="tab-project" class="on">项目</button>
     </div>
-    <div class="seg-acts">
-      <button class="icon-btn" id="btn-filter" title="搜索">
-        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"><path d="M4 5h16l-6.2 7.2V18l-3.6 2v-7.8L4 5z"/></svg>
-      </button>
-      <button class="icon-btn" data-stub title="敬请期待">
-        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M4 7h16M9.5 7V5h5v2M6.5 7l1 13h9l1-13"/></svg>
-      </button>
-    </div>
+    <div class="seg-acts"></div>
   </div>
 
   <div id="search-box"><input id="search-input" type="text" placeholder="搜索会话标题…"></div>
 
   <div id="side-scroll">
     <div id="session-list"></div>
-    <div class="list-label">任务</div>
-    <div class="list-empty">还没有任务</div>
+  </div>
+
+  </div>
+
+  <!-- 设置导航（进入设置页时替换会话列表, 新设置项往这里加） -->
+  <div id="side-settings">
+    <button class="menu-item" id="btn-settings-back" title="返回会话">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M19 12H5M12 19l-7-7 7-7"/></svg>
+      返回会话
+    </button>
+    <div class="list-label">设置</div>
+    <button class="menu-item nav-item on" data-section="appearance" title="外观">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3a9 9 0 100 18c1.1 0 2-.9 2-2 0-.5-.2-1-.5-1.3-.3-.4-.5-.8-.5-1.2 0-1.1.9-2 2-2h2.4A4.9 4.9 0 0021 11c-.5-4.5-4.3-8-9-8z"/><circle cx="7.5" cy="11" r="1.2"/><circle cx="10.5" cy="7.5" r="1.2"/><circle cx="15" cy="7.5" r="1.2"/></svg>
+      外观
+    </button>
   </div>
 
   <div class="side-bottom">
@@ -752,9 +936,8 @@
       <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="8.5" r="3.5"/><path d="M5 20c1.2-3.4 4-5 7-5s5.8 1.6 7 5"/></svg>
     </span>
     <span id="conn-state"><span class="dot"></span><span id="conn-text">连接中…</span></span>
-    <button class="icon-btn" id="btn-theme" title="切换主题">
-      <svg id="icon-sun" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="12" r="4"/><path d="M12 2.5v2.3M12 19.2v2.3M2.5 12h2.3M19.2 12h2.3M5.3 5.3l1.6 1.6M17.1 17.1l1.6 1.6M18.7 5.3l-1.6 1.6M6.9 17.1l-1.6 1.6"/></svg>
-      <svg id="icon-moon" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" style="display:none"><path d="M20.5 13.2A8.5 8.5 0 1110.8 3.5a7 7 0 009.7 9.7z"/></svg>
+    <button class="icon-btn js-open-settings" id="btn-settings" title="设置">
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3.2"/><path d="M19.4 15a1.7 1.7 0 00.34 1.87l.06.06a2 2 0 11-2.83 2.83l-.06-.06a1.7 1.7 0 00-1.87-.34 1.7 1.7 0 00-1.03 1.56V21a2 2 0 11-4 0v-.09a1.7 1.7 0 00-1.11-1.56 1.7 1.7 0 00-1.87.34l-.06.06a2 2 0 11-2.83-2.83l.06-.06a1.7 1.7 0 00.34-1.87 1.7 1.7 0 00-1.56-1.03H3a2 2 0 110-4h.09a1.7 1.7 0 001.56-1.11 1.7 1.7 0 00-.34-1.87l-.06-.06a2 2 0 112.83-2.83l.06.06a1.7 1.7 0 001.87.34h.08a1.7 1.7 0 001.03-1.56V3a2 2 0 114 0v.09a1.7 1.7 0 001.03 1.56 1.7 1.7 0 001.87-.34l.06-.06a2 2 0 112.83 2.83l-.06.06a1.7 1.7 0 00-.34 1.87v.08a1.7 1.7 0 001.56 1.03H21a2 2 0 110 4h-.09a1.7 1.7 0 00-1.51 1.03z"/></svg>
     </button>
   </div>
 </aside>
@@ -767,9 +950,6 @@
       <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"><path d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2V7z"/></svg>
       <span id="ws-tag-text">workplace</span>
     </span>
-    <button class="icon-btn" data-stub title="敬请期待">
-      <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="1.7"/><circle cx="12" cy="12" r="1.7"/><circle cx="19" cy="12" r="1.7"/></svg>
-    </button>
     <span class="spacer"></span>
   </header>
 
@@ -784,14 +964,7 @@
     <div id="input-card">
       <textarea id="input" rows="1" placeholder="提出后续修改要求" title="Enter 发送 · Shift+Enter 换行 · 对话与 CLI 共享同一份历史"></textarea>
       <div class="comp-row">
-        <button id="btn-plus" class="round-btn" data-stub title="添加附件（敬请期待）">
-          <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
-        </button>
-        <button id="wd-chip" class="wd-chip" title="会话工作目录">
-          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"><path d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2V7z"/></svg>
-          <span id="wd-chip-text">选择工作目录</span>
-          <svg width="9" height="6" viewBox="0 0 9 6" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M1 1l3.5 3.5L8 1"/></svg>
-        </button>
+
         <span class="pill mode" title="权限模式">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linejoin="round"><path d="M12 3l7 2.8v5.4c0 4.4-2.9 7.8-7 9.8-4.1-2-7-5.4-7-9.8V5.8L12 3z"/></svg>
           <button type="button" class="dd" id="sel-mode">
@@ -810,15 +983,44 @@
             <span class="dd-chev"><svg width="9" height="6" viewBox="0 0 9 6" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M1 1l3.5 3.5L8 1"/></svg></span>
           </button>
         </span>
-        <button id="btn-send" title="发送">
-          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5.5 11.5L12 5l6.5 6.5"/></svg>
-        </button>
-        <button id="btn-stop" title="停止本轮">
-          <svg width="12" height="12" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2.5" fill="currentColor"/></svg>
+        <button id="btn-send" title="发送" data-mode="send">
+          <svg class="ic-send" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5.5 11.5L12 5l6.5 6.5"/></svg>
+          <svg class="ic-stop" width="12" height="12" viewBox="0 0 24 24" style="display:none"><rect x="6" y="6" width="12" height="12" rx="2.5" fill="currentColor"/></svg>
         </button>
       </div>
     </div>
   </div>
+
+    <!-- ============ 设置页（独立视图, 便于后续扩展） ============ -->
+    <div id="settings-page">
+      <header class="sp-header">
+        <span class="sp-title">设置</span>
+      </header>
+      <div class="sp-body">
+        <div class="sp-inner">
+          <div class="sp-section-body" data-section="appearance">
+          <div class="sp-section">外观</div>
+          <div class="set-row">
+            <div class="set-info">
+              <div class="set-name">主题外观</div>
+              <div class="set-desc">深色、浅色或跟随系统</div>
+            </div>
+            <button type="button" class="dd set-dd" id="sel-theme">
+              <span class="dd-label">跟随系统</span>
+              <span class="dd-chev"><svg width="9" height="6" viewBox="0 0 9 6" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M1 1l3.5 3.5L8 1"/></svg></span>
+            </button>
+          </div>
+          <div class="set-row">
+            <div class="set-info">
+              <div class="set-name">强调颜色</div>
+              <div class="set-desc">填写 16 进制色值（如 #8b80f9），输入即时生效</div>
+            </div>
+            <input id="accent-hex-input" class="hex-input" spellcheck="false" placeholder="#8b80f9" maxlength="7">
+          </div>
+          </div>
+        </div>
+      </div>
+    </div>
 </div>
 
 <!-- 权限审批模态框 -->
@@ -870,7 +1072,7 @@ const state = {
   sessions: [],             // 全量会话列表（loadSessions 填充）
   sideTab: "project",       // 侧栏列表模式: project | group
   draft: false,             // 草稿态: 已点"新建"但还没发首条消息（不建条目）
-  draftWorkdir: null,       // 草稿态选择的工作目录（项目的意义）
+  draftInput: "",           // 草稿态未发送的输入（跟随会话切换）
   serverWorkspace: null,    // 服务进程工作区名（无会话目录时的兜底展示）
   runs: {},                 // sessionId → 运行态（多会话并行: 各自 WS/流式指针/审批）
 };
@@ -900,6 +1102,25 @@ function runOf(id) {
 }
 const curRun = () => (state.sessionId ? runOf(state.sessionId) : null);
 
+/* 手动添加的项目 / 项目折叠状态: localStorage 持久化 */
+state.customProjects = JSON.parse(localStorage.getItem("xc-projects") || "[]");
+state.collapsedProjects = new Set(JSON.parse(localStorage.getItem("xc-collapsed") || "[]"));
+state.draftInput = "";   // 草稿态未发送的输入
+
+/* 输入框内容跟随会话: 切走前保存, 切回后恢复 */
+function saveCurrentInput() {
+  const v = $("input").value;
+  if (state.draft) state.draftInput = v;
+  else if (state.sessionId) runOf(state.sessionId).inputDraft = v;
+}
+function restoreCurrentInput() {
+  const v = state.draft ? state.draftInput
+    : (state.sessionId ? runOf(state.sessionId).inputDraft : "");
+  $("input").value = v || "";
+  autoGrow($("input"));
+  updateSendBtn();
+}
+
 /* ============================================================
  * 会话消息列: 每个会话一个常驻 DOM 列, 切换会话只做显隐。
  * 后台会话的流式事件继续写进自己的隐藏列, 切回原样恢复——
@@ -925,19 +1146,23 @@ function showCol(id) {
 }
 
 /* ============================================================
- * 主题: 深色默认, localStorage 持久化
+ * 主题: dark | light | system（跟随系统），localStorage 持久化
  * ============================================================ */
-function applyTheme(t) {
-  document.documentElement.dataset.theme = t;
-  localStorage.setItem("xc-theme", t);
-  // 图标显示"将切换到"的目标: 深色时显示太阳
-  $("icon-sun").style.display = t === "dark" ? "" : "none";
-  $("icon-moon").style.display = t === "dark" ? "none" : "";
+const THEME_KEY = "xc-theme";
+const mqDark = window.matchMedia("(prefers-color-scheme: dark)");
+function themePref() { return localStorage.getItem(THEME_KEY) || "system"; }
+function resolvedTheme() {
+  const pref = themePref();
+  return pref === "system" ? (mqDark.matches ? "dark" : "light") : pref;
 }
-$("btn-theme").onclick = () => {
-  applyTheme(document.documentElement.dataset.theme === "dark" ? "light" : "dark");
-};
-applyTheme(document.documentElement.dataset.theme || "dark");
+function applyTheme() {
+  document.documentElement.dataset.theme = resolvedTheme();
+}
+// 跟随系统时, 系统深浅切换实时生效
+mqDark.addEventListener("change", () => {
+  if (themePref() === "system") applyTheme();
+});
+applyTheme();
 
 /* ============================================================
  * markdown 渲染: marked.js 优先，加载失败降级为转义纯文本;
@@ -951,7 +1176,41 @@ function escapeHtml(s) {
 function renderMd(text) {
   if (window.marked && window.marked.parse) {
     try {
-      return window.marked.parse(text, { breaks: true, gfm: true });
+      let src = text;
+      // 1) 保护代码段（围栏/行内）: 公式解析不碰 `$` 出现在代码里的情况
+      const codeSlots = [];
+      src = src.replace(/```[\s\S]*?```|~~~[\s\S]*?~~~|`[^`\n]*`/g, m => {
+        codeSlots.push(m);
+        return "\u0000CODE" + (codeSlots.length - 1) + "\u0000";
+      });
+      // 2) 抽出公式（$$...$$ 块级 / $...$ 行内）为占位符, 免遭 markdown 转义
+      const mathSlots = [];
+      if (src.includes("$")) {
+        src = src.replace(/\$\$([\s\S]+?)\$\$/g, (_, tex) => {
+          mathSlots.push({ tex: tex.trim(), display: true });
+          return "\u0000MATH" + (mathSlots.length - 1) + "\u0000";
+        });
+        src = src.replace(/\$([^\s$][^$\n]*?)\$/g, (_, tex) => {
+          mathSlots.push({ tex: tex.trim(), display: false });
+          return "\u0000MATH" + (mathSlots.length - 1) + "\u0000";
+        });
+      }
+      // 3) 还原代码段, 交给 marked 正常解析
+      src = src.replace(/\u0000CODE(\d+)\u0000/g, (_, i) => codeSlots[+i]);
+      let html = window.marked.parse(src, { breaks: true, gfm: true });
+      // 4) 解析完成后用 KaTeX 还原公式（KaTeX 未加载/解析失败则回退原文）
+      html = html.replace(/\u0000MATH(\d+)\u0000/g, (_, i) => {
+        const slot = mathSlots[+i];
+        if (!window.katex) return "$" + slot.tex + "$";
+        try {
+          return window.katex.renderToString(slot.tex, {
+            displayMode: slot.display, throwOnError: false,
+          });
+        } catch (e) {
+          return "$" + slot.tex + "$";
+        }
+      });
+      return html;
     } catch (e) { /* 落到降级 */ }
   }
   return "<p>" + escapeHtml(text).replace(/\n/g, "<br>") + "</p>";
@@ -1057,14 +1316,15 @@ function scrollToBottom(force) {
  * 侧栏会话列表（项目 / 分组 两种模式 + 搜索过滤）
  * ============================================================ */
 function sessionDate(id) {
-  // 会话 id 是 %Y%m%d-%H%M%S 时间戳（可能有 "w" 后缀防撞）
+  // 会话 id 是 %Y%m%d-%H%M%S 的 UTC 时间戳（可能有 "w" 后缀防撞），
+  // 必须按 UTC 解析再转本地，否则所有会话都会显示成多出时区差的"旧"会话
   const m = /^(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})(\d{2})/.exec(id);
-  return m ? new Date(+m[1], +m[2] - 1, +m[3]) : null;
+  return m ? new Date(Date.UTC(+m[1], +m[2] - 1, +m[3])) : null;
 }
 function relativeTime(id) {
   const m = /^(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})(\d{2})/.exec(id);
   if (!m) return "";
-  const then = new Date(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6]);
+  const then = new Date(Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6]));
   const diff = (Date.now() - then.getTime()) / 1000;
   if (diff < 90) return "刚刚";
   if (diff < 3600) return Math.floor(diff / 60) + "分钟";
@@ -1102,6 +1362,16 @@ async function loadSessions() {
 
 const TRASH_SMALL_SVG = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 7h16M9.5 7V5h5v2M6.5 7l1 13h9l1-13"/></svg>';
 const PENCIL_SMALL_SVG = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20l4.5-1L20 7.5 16.5 4 5 15.5 4 20z"/></svg>';
+/* 会话状态图标: 运行中转圈 / 未读红点 / 空闲对话气泡 */
+const SPINNER_SVG = '<svg class="s-spin" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M12 3a9 9 0 019 9"/></svg>';
+const CHAT_SVG = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"><path d="M21 11.5a8.5 8.5 0 01-8.5 8.5c-1.6 0-3.1-.4-4.3-1.2L3 20l1.2-5.2A8.5 8.5 0 1121 11.5z"/></svg>';
+const DOT_RED_SVG = '<svg width="9" height="9" viewBox="0 0 24 24"><circle cx="12" cy="12" r="6" fill="currentColor"/></svg>';
+function sessionStateIcon(s) {
+  const run = state.runs[s.id];
+  if (run && run.busy) return SPINNER_SVG;               // 运行中
+  if (run && run.unread > 0) return DOT_RED_SVG;         // 有未读
+  return CHAT_SVG;                                        // 空闲
+}
 
 async function renameSession(id, title) {
   try {
@@ -1156,8 +1426,8 @@ function makeSessionItem(s) {
     + (unnamed ? " unnamed" : "");
   item.dataset.id = s.id;
   item.title = `${s.title} · ${s.message_count} 条消息`;
-  item.innerHTML = '<span class="s-ico">' + FOLDER_SVG + '</span>'
-    + '<span class="s-run" title="运行中"></span><span class="s-unread"></span>'
+  item.innerHTML = '<span class="s-ico">' + sessionStateIcon(s) + '</span>'
+    + '<span class="s-unread"></span>'
     + '<span class="title"></span><span class="meta"></span>'
     + '<button class="s-ren" title="重命名">' + PENCIL_SMALL_SVG + '</button>'
     + '<button class="s-del" title="删除会话">' + TRASH_SMALL_SVG + '</button>';
@@ -1229,10 +1499,6 @@ function renderSessionList() {
     s => !q
       || (s.title || "").toLowerCase().includes(q)
       || (s.workdir || "").toLowerCase().includes(q));   // 项目路径/目录名也可搜
-  if (!sessions.length) {
-    list.innerHTML = '<div class="list-empty">' + (q ? "没有匹配的会话" : "还没有会话") + "</div>";
-    return;
-  }
   const addLabel = text => {
     const l = document.createElement("div");
     l.className = "list-label";
@@ -1240,6 +1506,10 @@ function renderSessionList() {
     list.appendChild(l);
   };
   if (state.sideTab === "group") {
+    if (!sessions.length) {
+      list.innerHTML = '<div class="list-empty">' + (q ? "没有匹配的会话" : "还没有会话") + "</div>";
+      return;
+    }
     // 会话按时间倒序，分组标签自然按 今天→更早 顺序出现
     let bucket = -1;
     for (const s of sessions) {
@@ -1247,35 +1517,100 @@ function renderSessionList() {
       if (b !== bucket) { bucket = b; addLabel(BUCKET_LABELS[b]); }
       list.appendChild(makeSessionItem(s));
     }
-  } else {
-    // 按项目(工作目录)分组: 组标题是目录名, 悬停看完整路径;
-    // 没设置工作目录的会话归入「未设置项目」, 永远排在最后。
-    const groups = new Map();   // workdir → sessions(时间倒序, 列表本身已倒序)
-    for (const s of sessions) {
-      const key = s.workdir || "";
-      if (!groups.has(key)) groups.set(key, []);
-      groups.get(key).push(s);
+    return;
+  }
+
+  /* ---- 项目视图: 可折叠项目组 + 任务(未选择文件夹的会话) ---- */
+  const headRow = document.createElement("div");
+  headRow.className = "list-label-row";
+  headRow.innerHTML = '<span class="list-label">项目</span>';
+  const addBtn = document.createElement("button");
+  addBtn.type = "button";
+  addBtn.className = "icon-btn";
+  addBtn.id = "btn-add-project";
+  addBtn.title = "添加项目";
+  addBtn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>';
+  addBtn.onclick = async ev => {
+    ev.stopPropagation();
+    // 桌面端: 系统原生"选择文件夹"对话框; 浏览器/预览: 页面内目录选择兜底
+    if (window.xcodePickFolder) {
+      try {
+        const dir = await window.xcodePickFolder();
+        if (dir) addProject(dir);
+      } catch (e) { /* 用户取消 */ }
+      return;
     }
-    const named = [...groups.entries()].filter(([k]) => k);
-    named.sort((a, b) => b[1][0].id.localeCompare(a[1][0].id));  // 组间按最新会话
-    for (const [wd, items] of named) {
-      const label = document.createElement("div");
-      label.className = "list-label";
-      label.textContent = projectDisplayName(wd);
-      label.title = wd;          // 悬停显示完整路径
-      label.style.maxWidth = "calc(100% - 36px)";
-      label.style.overflow = "hidden";
-      label.style.textOverflow = "ellipsis";
-      label.style.whiteSpace = "nowrap";
-      list.appendChild(label);
-      for (const s of items) list.appendChild(makeSessionItem(s));
-    }
-    const loose = groups.get("") || [];
-    if (loose.length) {
-      addLabel("未设置项目");
-      for (const s of loose) list.appendChild(makeSessionItem(s));
+    openDirPop();
+  };
+  headRow.appendChild(addBtn);
+  list.appendChild(headRow);
+
+  if (!sessions.length && (q || !state.customProjects.length)) {
+    const e = document.createElement("div");
+    e.className = "list-empty";
+    e.textContent = q ? "没有匹配的会话" : "还没有项目，点上方 + 添加";
+    list.appendChild(e);
+  }
+
+  // 项目目录 = 会话的 workdir ∪ 手动添加的项目
+  const groups = new Map();
+  for (const s of sessions) {
+    if (!s.workdir) continue;
+    if (!groups.has(s.workdir)) groups.set(s.workdir, []);
+    groups.get(s.workdir).push(s);
+  }
+  for (const wd of state.customProjects) {
+    if (!groups.has(wd)) groups.set(wd, []);
+  }
+  const named = [...groups.entries()];
+  named.sort((a, b) => (b[1][0]?.id ?? "").localeCompare(a[1][0]?.id ?? ""));  // 组间按最新会话
+  const chev = '<svg class="p-chev" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>';
+  for (const [wd, items] of named) {
+    const collapsed = state.collapsedProjects.has(wd) && !q;   // 搜索时强制展开
+    const header = document.createElement("div");
+    header.className = "project-item" + (collapsed ? " collapsed" : "");
+    header.title = wd;   // 悬停显示完整路径
+    header.innerHTML = FOLDER_SVG + '<span class="p-name"></span>'
+      + '<span class="p-count"></span>' + chev;
+    header.querySelector(".p-name").textContent = projectDisplayName(wd);
+    header.querySelector(".p-count").textContent = items.length ? String(items.length) : "";
+    header.onclick = () => toggleProject(wd);
+    list.appendChild(header);
+    if (collapsed) continue;
+    for (const s of items) {
+      const it = makeSessionItem(s);
+      it.classList.add("in-project");
+      list.appendChild(it);
     }
   }
+
+  // 任务 = 没有选择文件夹的会话
+  const loose = sessions.filter(s => !s.workdir);
+  addLabel("任务");
+  if (!loose.length) {
+    const e = document.createElement("div");
+    e.className = "list-empty";
+    e.textContent = "还没有任务";
+    list.appendChild(e);
+  } else {
+    for (const s of loose) list.appendChild(makeSessionItem(s));
+  }
+}
+
+function toggleProject(wd) {
+  state.collapsedProjects.has(wd)
+    ? state.collapsedProjects.delete(wd)
+    : state.collapsedProjects.add(wd);
+  localStorage.setItem("xc-collapsed", JSON.stringify([...state.collapsedProjects]));
+  renderSessionList();
+}
+function addProject(wd) {
+  if (!state.customProjects.includes(wd)) {
+    state.customProjects.push(wd);
+    localStorage.setItem("xc-projects", JSON.stringify(state.customProjects));
+  }
+  renderSessionList();
+  toast("已添加项目：" + dirName(wd));
 }
 
 /* 项目分组的组标题: 与顶栏 ws-tag 一致取目录名(末段), 空路径兜底 */
@@ -1301,23 +1636,11 @@ function refreshDocTitle() {
 function dirName(p) { return p ? p.split(/[\\/]/).filter(Boolean).pop() : null; }
 
 function refreshWorkdirTag() {
-  // 顶栏标签: 草稿 → 选中的目录; 会话 → 其运行态里的工作目录; 兜底 → 服务进程工作区名
+  // 顶栏标签: 会话 → 其运行态里的工作目录; 兜底 → 服务进程工作区名
   const run = curRun();
-  const wd = state.draft ? state.draftWorkdir : (run ? run.currentWorkdir : null);
+  const wd = run ? run.currentWorkdir : null;
   $("ws-tag-text").textContent = dirName(wd) || state.serverWorkspace || "workplace";
   $("ws-tag").title = "工作目录: " + (wd || "服务进程目录");
-}
-
-function setDraftWorkdir(path) {
-  state.draftWorkdir = path;
-  $("wd-chip-text").textContent = dirName(path) || "选择工作目录";
-  $("wd-chip").title = "会话工作目录: " + (path || "未设置（用服务进程目录）");
-  refreshWorkdirTag();
-}
-
-function updateWdChipVisibility() {
-  // 只有草稿态需要选目录; 会话创建后项目归属显示在顶栏标签
-  $("wd-chip").classList.toggle("show", state.draft);
 }
 
 const dirPop = $("dir-pop");
@@ -1357,21 +1680,17 @@ async function browseDir(path) {
 }
 
 function openDirPop() {
-  const r = $("wd-chip").getBoundingClientRect();
+  const anchor = $("btn-add-project");
+  const r = anchor.getBoundingClientRect();
   dirPop.classList.add("open");
   const left = Math.max(10, Math.min(r.left, window.innerWidth - 352));
   dirPop.style.left = left + "px";
   dirPop.style.top = "auto";
   dirPop.style.bottom = (window.innerHeight - r.top + 8) + "px";
-  browseDir(state.draftWorkdir || "");
+  browseDir("");
 }
 function closeDirPop() { dirPop.classList.remove("open"); }
 
-$("wd-chip").onclick = ev => {
-  ev.stopPropagation();
-  if (!state.draft) return;
-  dirPop.classList.contains("open") ? closeDirPop() : openDirPop();
-};
 $("dir-up").onclick = () => {
   const parts = (dirBrowsePath || "").split(/[\\/]/).filter(Boolean);
   if (!parts.length) return;
@@ -1388,12 +1707,14 @@ $("dir-path-input").addEventListener("keydown", ev => {
 });
 $("dir-pick").onclick = () => {
   if (!dirBrowsePath) return;
-  setDraftWorkdir(dirBrowsePath);
+  addProject(dirBrowsePath);
   closeDirPop();
 };
 document.addEventListener("click", ev => {
   if (!dirPop.classList.contains("open")) return;
-  if (!dirPop.contains(ev.target) && !$("wd-chip").contains(ev.target)) closeDirPop();
+  const addBtn = $("btn-add-project");
+  if (!dirPop.contains(ev.target)
+      && !(addBtn && addBtn.contains(ev.target))) closeDirPop();
 });
 
 /* 顶栏标题点击重命名（Notion 式） */
@@ -1416,6 +1737,7 @@ $("doc-title").onclick = () => {
  * 会话切换 / 新建 / 历史回放
  * ============================================================ */
 async function selectSession(id) {
+  saveCurrentInput();           // 切走前保存当前会话的未发送输入
   state.draft = false;
   state.sessionId = id;
   const run = runOf(id);
@@ -1459,12 +1781,13 @@ async function selectSession(id) {
   setConn(run.ws && run.ws.readyState === 1 ? "on" : "", run.ws ? (run.ws.readyState === 1 ? "已连接" : "连接中…") : "未连接");
   // 有挂着的审批请求: 重新弹出
   if (id === state.sessionId && run.pendingPerm) onPermissionRequest(run.pendingPerm);
+  restoreCurrentInput();        // 输入框恢复成该会话未发送的内容
   scrollToBottom(true);
 }
 
 const SUGGESTIONS = [
   "帮我看看这个项目的整体结构",
-  "解释一下 runtime.py 的主循环",
+  "解释一下核心模块的实现思路",
   "跑一下全部测试并总结结果",
 ];
 
@@ -1487,21 +1810,18 @@ function showEmptyState() {
 }
 
 function startDraft() {
-  /* "新建任务"只进入草稿态，不向服务端要 id——首条消息发出时才真正建会话，
-     避免侧栏堆一批没有内容的"未命名任务"条目。
-     其他会话在跑也允许新建——多会话并行是本来的意义。 */
+  saveCurrentInput();          // 离开原会话: 保存其未发送输入
   state.draft = true;
   state.sessionId = null;
   markActiveSession();
   refreshDocTitle();
-  updateWdChipVisibility();
-  setDraftWorkdir(state.draftWorkdir);   // 保留上次选择，方便连建同项目会话
   const col = colOf("__draft__");
   col.innerHTML = "";
   showCol("__draft__");
   showEmptyState();
   setBusyUi(false);
   setConn("", "未连接");
+  restoreCurrentInput();       // 恢复草稿态自己的输入
   $("input").focus();
 }
 
@@ -1597,35 +1917,41 @@ function closeWs(id) {
  * 服务端消息分派
  * ============================================================ */
 function handleServerMessage(msg, sid) {
-  // 后台会话的事件: 写进它自己的消息列（隐藏）, 只给侧栏累计未读。
-  // 列是常驻的, 后台流式内容不会丢, 切回原样恢复, 无需重拉历史。
+  const run = runOf(sid);
+  // 后台会话: 流式内容照常写进它自己的常驻列（隐藏）, 切回时完整可见;
+  // 只对 权限/结果/结束/错误 累计未读。结束/接力时同步运行态。
   if (sid !== state.sessionId) {
-    const run = runOf(sid);
-    if (msg.type === "permission_request") bumpUnread(sid);
+    if (msg.type === "text_delta") onTextDelta(msg, sid);
+    else if (msg.type === "thinking_start") onThinkingStart(msg, sid);
+    else if (msg.type === "thinking_end") onThinkingEnd(msg, sid);
+    else if (msg.type === "tool_use") onToolUse(msg, sid);
+    else if (msg.type === "tool_result") onToolResult(msg, sid);
+
+    if (msg.type === "permission_request") { bumpUnread(sid); run.pendingPerm = msg; }
     else if (msg.type === "tool_result") bumpUnread(sid);
-    else if (msg.type === "turn_done" || msg.type === "error") bumpUnread(sid);
-    if (msg.type === "permission_request") {
-      run.pendingPerm = msg;           // 记下待审批, 点回去即见弹窗
-    } else if (msg.type === "turn_done" || msg.type === "error") {
+    else if (msg.type === "turn_done" || msg.type === "error") {
+      bumpUnread(sid);
       run.busy = false;
       run.queued = false;
       run.pendingPerm = null;
-      // 后台轮次结束: 悬空的工具行同样收口（列是常驻的, 不收会一直转圈）
+      // 轮次收口: 悬空工具行标"已中断", 清掉流式指针
       if (run.activeToolCard && run.activeToolCard.dataset.state === "run") {
         setToolState(run.activeToolCard, "stopped");
       }
       run.activeToolCard = null;
+      run.curBubble = null;
+      run.curThinking = null;
     } else if (msg.type === "turn_started") {
-      run.busy = true;                 // 排队的后续消息接力开跑
+      run.busy = true;               // 排队的后续消息接力开跑
     }
     return;
   }
   switch (msg.type) {
-    case "text_delta":         onTextDelta(msg); break;
-    case "tool_use":           onToolUse(msg); break;
-    case "tool_result":        onToolResult(msg); break;
-    case "thinking_start":     onThinkingStart(msg); break;
-    case "thinking_end":       onThinkingEnd(msg); break;
+    case "text_delta":         onTextDelta(msg, sid); break;
+    case "tool_use":           onToolUse(msg, sid); break;
+    case "tool_result":        onToolResult(msg, sid); break;
+    case "thinking_start":     onThinkingStart(msg, sid); break;
+    case "thinking_end":       onThinkingEnd(msg, sid); break;
     case "turn_queued":        onTurnQueued(msg); break;
     case "turn_started":       onTurnStarted(msg, sid); break;
     case "turn_queued_user":   onTurnQueuedUser(msg, sid); break;
@@ -1646,12 +1972,13 @@ function bumpUnread(sid) {
   renderSessionList();
 }
 
-/* ---------- 正文流式 ---------- */
-function onTextDelta(msg) {
-  const run = curRun();
-  $("thinking").style.display = "none";
+/* ---------- 正文流式（sid 感知: 后台会话写进自己的列） ---------- */
+function onTextDelta(msg, sid) {
+  const run = runOf(sid);
+  const active = sid === state.sessionId;
+  if (active) $("thinking").style.display = "none";
   if (!run.curBubble) {
-    run.curBubble = addAssistantBubble("");
+    run.curBubble = addAssistantBubble("", "", colOf(sid));
     run.curBubble._raw = "";
   }
   run.curBubble._raw += msg.text;
@@ -1661,8 +1988,7 @@ function onTextDelta(msg) {
 }
 
 /* 流式气泡收口: 有内容就固化，下一轮正文开新气泡 */
-function flushAssistantBubble() {
-  const run = curRun();
+function flushAssistantBubble(run) {
   if (!run) return;
   if (run.curBubble && !run.curBubble._raw) {
     run.curBubble.closest(".msg").remove();   // 空气泡（模型直接调工具）: 移除
@@ -1691,23 +2017,25 @@ function fmtDuration(ms) {
   return r ? `${m} 分 ${r} 秒` : `${m} 分钟`;
 }
 
-function onThinkingStart() {
-  const run = curRun();
-  $("thinking").style.display = "none";
-  flushAssistantBubble();
+function onThinkingStart(msg, sid) {
+  const run = runOf(sid);
+  const active = sid === state.sessionId;
+  if (active) $("thinking").style.display = "none";
+  flushAssistantBubble(run);
   if (run.curThinking) return;   // 已有实时思考行
   const div = document.createElement("div");
   div.className = "think-row thinking";
   div.innerHTML = '<span class="t-ico">' + ICON_MIND + '</span>' +
     '<span class="shine">思考中…</span>';
-  msgCol().appendChild(div);
+  colOf(sid).appendChild(div);
   run.curThinking = { el: div, t0: Date.now() };
-  scrollToBottom();
+  if (active) scrollToBottom();
 }
 
-function onThinkingEnd(msg) {
-  const run = curRun();
-  $("thinking").style.display = "none";
+function onThinkingEnd(msg, sid) {
+  const run = runOf(sid);
+  const active = sid === state.sessionId;
+  if (active) $("thinking").style.display = "none";
   const cur = run.curThinking;
   if (!cur) return;
   // 服务端计时优先，缺失（轮次兜底收口）时用客户端起止时间
@@ -1716,7 +2044,7 @@ function onThinkingEnd(msg) {
   cur.el.innerHTML = '<span class="t-ico">' + ICON_MIND + '</span>' +
     '<span>思考 · 持续了 ' + fmtDuration(ms) + '</span>';
   run.curThinking = null;
-  scrollToBottom();
+  if (active) scrollToBottom();
 }
 
 /* ---------- 工具调用 ---------- */
@@ -1737,7 +2065,7 @@ function describeInput(raw) {
   return String(raw || "").replace(/\s+/g, " ").slice(0, 90);
 }
 
-function addToolCard({ id, name, input, result }) {
+function addToolCard({ id, name, input, result }, col) {
   const meta = TOOL_META[name] || { label: name, icon: ICON_TOOL };
   const row = document.createElement("div");
   row.className = "tool-row";
@@ -1751,7 +2079,7 @@ function addToolCard({ id, name, input, result }) {
   } else {
     setToolState(row, "run");
   }
-  msgCol().appendChild(row);
+  (col || msgCol()).appendChild(row);
   scrollToBottom();
   return row;
 }
@@ -1774,22 +2102,23 @@ function completeToolCard(row, { is_error, denied }) {
   }
 }
 
-function onToolUse(msg) {
-  const run = curRun();
-  $("thinking").style.display = "none";
-  flushAssistantBubble();   // 工具前先收掉流式中的正文气泡
-  run.activeToolCard = addToolCard({ id: msg.id, name: msg.name, input: msg.input });
+function onToolUse(msg, sid) {
+  const run = runOf(sid);
+  const active = sid === state.sessionId;
+  if (active) $("thinking").style.display = "none";
+  flushAssistantBubble(run);   // 工具前先收掉流式中的正文气泡
+  run.activeToolCard = addToolCard({ id: msg.id, name: msg.name, input: msg.input }, colOf(sid));
 }
 
-function onToolResult(msg) {
-  const run = curRun();
-  flushAssistantBubble();
+function onToolResult(msg, sid) {
+  const run = runOf(sid);
+  flushAssistantBubble(run);
   // 优先配对流式卡片；配不上（历史遗留）就新开卡片兜底
   const card = run.activeToolCard;
   if (card) {
     completeToolCard(card, msg);
   } else {
-    const fallback = addToolCard({ id: msg.id, name: msg.name, input: msg.input });
+    const fallback = addToolCard({ id: msg.id, name: msg.name, input: msg.input }, colOf(sid));
     completeToolCard(fallback, msg);
   }
   run.activeToolCard = null;
@@ -1837,13 +2166,13 @@ function endTurnUiReset() {
     run.busy = false;
     run.queued = false;
     run.unread = 0;             // 前台亲眼看完了, 未读清零
-    flushAssistantBubble();
+    flushAssistantBubble(run);
     // 轮次结束还有工具行停在"运行中"（被打断/异常, 结果永远来不了）: 收口
     if (run.activeToolCard && run.activeToolCard.dataset.state === "run") {
       setToolState(run.activeToolCard, "stopped");
     }
     run.activeToolCard = null;
-    if (run.curThinking) onThinkingEnd({});   // 思考行兜底收口（客户端计时）
+    if (run.curThinking) onThinkingEnd({}, state.sessionId);   // 思考行兜底收口（客户端计时）
   }
   $("thinking").style.display = "none";
   setBusyUi(false);
@@ -1958,7 +2287,7 @@ function addUserBubble(text, queued) {
   return b;
 }
 
-function addAssistantBubble(html) {
+function addAssistantBubble(html, raw, col) {
   const div = document.createElement("div");
   div.className = "msg assistant";
   const avatar = document.createElement("div");
@@ -1970,17 +2299,25 @@ function addAssistantBubble(html) {
   decorateCode(b);
   div.appendChild(avatar);
   div.appendChild(b);
-  msgCol().appendChild(div);
+  (col || msgCol()).appendChild(div);
   scrollToBottom();
   return b;
 }
 
 /* ============================================================
- * 发送 / 停止 / 输入框
+ * 发送 / 中断 / 输入框
+ * 同一个圆钮双形态: 输入框有内容 = 发送; 为空且本轮进行中 = 中断
  * ============================================================ */
+function updateSendBtn() {
+  const hasText = !!$("input").value.trim();
+  const busy = !!(curRun() && curRun().busy);
+  const btn = $("btn-send");
+  const stop = !hasText && busy;
+  btn.dataset.mode = stop ? "stop" : "send";
+  btn.title = stop ? "停止本轮" : "发送";
+}
 function setBusyUi(busy) {
-  // 忙碌（含排队）时显示停止钮; 发送钮常驻——本轮进行中发送 = 追加排队
-  $("btn-stop").style.display = busy ? "inline-flex" : "none";
+  updateSendBtn();
 }
 
 async function sendCurrent() {
@@ -1991,9 +2328,7 @@ async function sendCurrent() {
   if (!text) return;
   if (!state.draft && (!run || !run.ws || run.ws.readyState !== 1)) return;
   // 草稿态: 此刻才向服务端要 id 建会话条目；失败则留在草稿态
-  let firstWorkdir = null;
   if (state.draft) {
-    firstWorkdir = state.draftWorkdir;
     try {
       const r = await fetch("/api/sessions", { method: "POST" });
       if (!r.ok) throw new Error("HTTP " + r.status);
@@ -2008,31 +2343,27 @@ async function sendCurrent() {
   addUserBubble(text, busy);
   input.value = "";
   autoGrow(input);
+  saveCurrentInput();          // 已发送: 清空本会话的输入草稿
   const myRun = runOf(state.sessionId);
   if (!busy) {
     myRun.busy = true;
     $("thinking").style.display = "flex";
     setBusyUi(true);
+    renderSessionList();   // 立即显示运行状态（转圈图标）
   }
   if (state.draft) {
     state.draft = false;
-    myRun.currentWorkdir = state.draftWorkdir;
     myRun.loaded = true;   // 草稿列里的气泡就是全部内容, 无需再拉历史
     // 草稿列转正为该会话的消息列（气泡不挪窝）
     colOf("__draft__").id = "msg-col-" + state.sessionId;
     // 列表此刻才出现新条目并选中；WS 建立期间消息会排队，onopen 后冲刷
     await loadSessions();
-    // workdir 在首条消息落盘时才写入 JSONL, 此刻接口还查不到;
-    // 先补进本地条目, 项目分组立即正确(下次 loadSessions 会以接口为准)
-    const mine = state.sessions.find(s => s.id === state.sessionId);
-    if (mine && state.draftWorkdir) mine.workdir = state.draftWorkdir;
     renderSessionList();
     markActiveSession();
     refreshDocTitle();
-    updateWdChipVisibility();
     connectWs(state.sessionId);
   }
-  sendWs({ type: "user", text, workdir: firstWorkdir || "" });
+  sendWs({ type: "user", text, workdir: "" });
 }
 
 function sendWs(obj) {
@@ -2045,8 +2376,10 @@ function sendWs(obj) {
   }
 }
 
-$("btn-send").onclick = sendCurrent;
-$("btn-stop").onclick = () => sendWs({ type: "stop" });
+$("btn-send").onclick = () => {
+  if ($("btn-send").dataset.mode === "stop") sendWs({ type: "stop" });
+  else sendCurrent();
+};
 $("btn-new").onclick = startDraft;
 
 $("input").addEventListener("keydown", ev => {
@@ -2055,6 +2388,7 @@ $("input").addEventListener("keydown", ev => {
     sendCurrent();
   }
 });
+$("input").addEventListener("input", () => { saveCurrentInput(); updateSendBtn(); });
 function autoGrow(el) {
   el.style.height = "auto";
   el.style.height = Math.min(el.scrollHeight, 160) + "px";
@@ -2083,10 +2417,7 @@ function closeSearch() {
   renderSessionList();
 }
 $("btn-search").onclick = openSearch;
-$("btn-filter").onclick = () => {
-  if ($("search-box").classList.contains("open")) closeSearch();
-  else openSearch();
-};
+
 $("search-input").addEventListener("input", renderSessionList);
 $("search-input").addEventListener("keydown", ev => {
   if (ev.key === "Escape") closeSearch();
@@ -2103,9 +2434,96 @@ document.addEventListener("keydown", ev => {
   }
 });
 
-/* 装饰入口统一提示 */
-document.querySelectorAll("[data-stub]").forEach(b => {
-  b.onclick = () => toast("敬请期待");
+
+/* ============================================================
+ * 划词工具条: 选中聊天文本后浮出
+ *   添加到当前任务 → 选中文本预填进当前会话输入框
+ *   复制仍走浏览器原生: 选中后右键"复制"或 Ctrl+C
+ * ============================================================ */
+const selBar = document.createElement("div");
+selBar.className = "sel-bar";
+selBar.innerHTML = '<button type="button" data-act="task">添加到当前任务</button>';
+selBar.style.display = "none";
+document.body.appendChild(selBar);
+
+function hideSelBar() { selBar.style.display = "none"; }
+function selectionInMessages() {
+  const sel = window.getSelection();
+  if (!sel || sel.isCollapsed || sel.rangeCount === 0) return "";
+  if (!$("messages").contains(sel.getRangeAt(0).commonAncestorContainer)) return "";
+  return sel.toString().trim();
+}
+function moveSelBar() {
+  const text = selectionInMessages();
+  if (!text) { hideSelBar(); return; }
+  const rect = window.getSelection().getRangeAt(0).getBoundingClientRect();
+  if (!rect || (!rect.width && !rect.height)) { hideSelBar(); return; }
+  selBar.style.display = "flex";
+  const bw = selBar.offsetWidth, bh = selBar.offsetHeight;
+  let left = rect.left + rect.width / 2 - bw / 2;
+  left = Math.max(8, Math.min(left, window.innerWidth - bw - 8));
+  let top = rect.top - bh - 8;              // 默认浮在选区上方
+  if (top < 8) top = Math.min(rect.bottom + 8, window.innerHeight - bh - 8);
+  selBar.style.left = left + "px";
+  selBar.style.top = top + "px";
+}
+document.addEventListener("selectionchange", () => {
+  clearTimeout(moveSelBar._t);
+  moveSelBar._t = setTimeout(moveSelBar, 120);   // 拖选过程轻微防抖
+});
+window.addEventListener("scroll", hideSelBar, true);
+window.addEventListener("resize", hideSelBar);
+selBar.addEventListener("mousedown", ev => ev.preventDefault());   // 点击按钮不丢选区
+selBar.addEventListener("click", ev => {
+  const btn = ev.target.closest("button");
+  if (!btn) return;
+  const text = selectionInMessages();
+  hideSelBar();
+  const sel = window.getSelection();
+  if (sel) sel.removeAllRanges();
+  if (!text) return;
+  $("input").value = text;
+  autoGrow($("input"));
+  updateSendBtn();
+  $("input").focus();
+});
+
+/* ---------- 右键菜单兜底: 选中文字后右键 → "复制" ---------- */
+/* Electron 里由主进程弹原生菜单（userAgent 含 Electron 时跳过）,
+   普通浏览器/内嵌预览没有原生菜单, 用这个页面内菜单兜底 */
+const ctxMenu = document.createElement("div");
+ctxMenu.className = "ctx-menu";
+ctxMenu.innerHTML = '<button type="button" data-act="copy">复制</button>';
+ctxMenu.style.display = "none";
+document.body.appendChild(ctxMenu);
+function hideCtxMenu() { ctxMenu.style.display = "none"; }
+document.addEventListener("contextmenu", ev => {
+  hideCtxMenu();
+  if (window.xcodeDesktop) return;   // Electron 桌面端: 主进程弹原生菜单（preload 桥标记）
+  const sel = window.getSelection();
+  if (!sel || sel.isCollapsed || sel.rangeCount === 0
+      || !$("messages").contains(sel.getRangeAt(0).commonAncestorContainer)) {
+    return;   // 没有聊天区选区: 走浏览器默认菜单（输入框的粘贴等）
+  }
+  ev.preventDefault();
+  hideSelBar();
+  ctxMenu.style.display = "block";
+  ctxMenu.style.left = Math.min(ev.clientX, window.innerWidth - 140) + "px";
+  ctxMenu.style.top = Math.min(ev.clientY, window.innerHeight - 50) + "px";
+});
+ctxMenu.addEventListener("mousedown", e => e.preventDefault());   // 不丢选区
+ctxMenu.addEventListener("click", ev => {
+  const btn = ev.target.closest("button[data-act='copy']");
+  if (!btn) return;
+  const sel = window.getSelection();
+  const text = sel ? sel.toString() : "";
+  hideCtxMenu();
+  if (sel) sel.removeAllRanges();
+  copyText(text).then(ok => toast(ok ? "已复制" : "复制失败"));
+});
+window.addEventListener("scroll", hideCtxMenu, true);
+document.addEventListener("click", ev => {
+  if (!ctxMenu.contains(ev.target)) hideCtxMenu();
 });
 
 /* ============================================================
@@ -2146,13 +2564,18 @@ function makeDropdown(trigger, opts) {
   function open() {
     if (pop) { close(); return; }
     pop = document.createElement("div");
-    pop.className = "dd-pop";
+    pop.className = "dd-pop" + (items.some(i => i.desc) ? " rich" : "");
     for (const it of items) {
       const o = document.createElement("button");
       o.type = "button";
-      o.className = "dd-opt" + (it.value === value ? " on" : "");
-      o.innerHTML = '<span class="dd-check">' + CHECK_SVG + '</span><span class="dd-txt"></span>';
+      o.className = "dd-opt" + (it.desc ? " rich" : "") + (it.value === value ? " on" : "");
+      o.innerHTML = '<span class="dd-check">' + CHECK_SVG + '</span>'
+        + (it.icon ? '<span class="dd-ico">' + it.icon + '</span>' : '')
+        + '<span class="dd-col"><span class="dd-txt"></span>'
+        + (it.desc ? '<span class="dd-desc"></span>' : '')
+        + '</span>';
       o.querySelector(".dd-txt").textContent = it.label;
+      if (it.desc) o.querySelector(".dd-desc").textContent = it.desc;
       o.onclick = () => choose(it.value);
       pop.appendChild(o);
     }
@@ -2181,12 +2604,23 @@ function makeDropdown(trigger, opts) {
   };
 }
 
+/* 权限模式: 富菜单（图标 + 名称 + 描述, 当前项打勾） */
+const ICON_MODE_EYE = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12z"/><circle cx="12" cy="12" r="3"/></svg>';
+const ICON_MODE_HAND = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M8 12.5V5.5a1.5 1.5 0 013 0V11m0-5.5v-1a1.5 1.5 0 013 0V11m0-4.5a1.5 1.5 0 013 0V12m-9 .5l-2.4-2.2c-.9-.8-2.2-.4-2.5.8-.1.5 0 1 .3 1.4L10 19c1 1.3 2.3 2 4.2 2 3.2 0 4.8-2 4.8-5v-3.5"/></svg>';
+const ICON_MODE_PENCIL = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20l4.5-1L20 7.5 16.5 4 5 15.5 4 20z"/></svg>';
+const ICON_MODE_SHIELD = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l7 2.8v5.4c0 4.4-2.9 7.8-7 9.8-4.1-2-7-5.4-7-9.8V5.8L12 3z"/></svg>';
+const ICON_MODE_ALLOW = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 12.5l5 5L19.5 5"/></svg>';
 const MODE_ITEMS = [
-  { value: "read-only", label: "只读" },
-  { value: "workspace-write", label: "工作区写入" },
-  { value: "danger-full-access", label: "完全访问" },
-  { value: "prompt", label: "每次询问" },
-  { value: "allow", label: "全部允许" },
+  { value: "read-only", label: "只读", icon: ICON_MODE_EYE,
+    desc: "只查看和分析，不执行任何修改。" },
+  { value: "prompt", label: "每次询问", icon: ICON_MODE_HAND,
+    desc: "改动前先征求我的意见。" },
+  { value: "workspace-write", label: "自动编辑", icon: ICON_MODE_PENCIL,
+    desc: "自动编辑工作区内的文件。" },
+  { value: "danger-full-access", label: "完全访问", icon: ICON_MODE_SHIELD,
+    desc: "减少确认次数，放开全部权限。" },
+  { value: "allow", label: "全部允许", icon: ICON_MODE_ALLOW,
+    desc: "所有工具直接放行，不再询问。" },
 ];
 const THINK_ITEMS = [
   { value: "low", label: "低" },
@@ -2237,6 +2671,139 @@ async function saveSettings(patch) {
     thinkDd.setValue(s.thinking_level);
   } catch (e) { toast("设置失败: " + e.message); }
 }
+
+/* ============================================================
+ * 设置弹窗: 主题外观（深色 / 浅色 / 跟随系统）
+ * ============================================================ */
+const THEME_ITEMS = [
+  { value: "dark", label: "深色" },
+  { value: "light", label: "浅色" },
+  { value: "system", label: "跟随系统" },
+];
+const themeDd = makeDropdown($("sel-theme"), {
+  items: THEME_ITEMS, value: themePref(),
+  onChange: v => {
+    localStorage.setItem(THEME_KEY, v);
+    applyTheme();
+    applyAccentVars();   // 自定义色的派生令牌跟随深浅主题
+    syncAccentInput();
+  },
+});
+
+/* ---------- 强调颜色: 预设色板 + 自定义调色盘, 覆盖 --accent 令牌 ---------- */
+const ACCENT_KEY = "xc-accent";
+const ACCENT_CUSTOM_KEY = "xc-accent-custom";
+const ACCENTS = [
+  { id: "gray",   name: "浅灰", dark: "#b9bec7", light: "#757b85" },
+  { id: "blue",   name: "蓝色", dark: "#6aa6ff", light: "#2f6fd6" },
+  { id: "violet", name: "靛紫", dark: "#8b80f9", light: "#6a5be0" },
+  { id: "green",  name: "翠绿", dark: "#4ade80", light: "#17803b" },
+  { id: "orange", name: "暖橙", dark: "#f97316", light: "#e5622a" },
+  { id: "rose",   name: "玫红", dark: "#fb7185", light: "#cf3a5c" },
+];
+function accentPref() { return localStorage.getItem(ACCENT_KEY) || "gray"; }
+function customAccent() { return localStorage.getItem(ACCENT_CUSTOM_KEY) || "#8b80f9"; }
+
+function hexToRgb(hex) {
+  const m = /^#?([0-9a-fA-F]{6})$/.exec(hex.trim());
+  if (!m) return { r: 139, g: 128, b: 249 };
+  const n = parseInt(m[1], 16);
+  return { r: (n >> 16) & 255, g: (n >> 8) & 255, b: n & 255 };
+}
+function mixHex(a, b, w) {   // w = b 的权重
+  const A = hexToRgb(a), B = hexToRgb(b);
+  const ch = (x, y) => Math.round(x + (y - x) * w);
+  return "#" + [ch(A.r, B.r), ch(A.g, B.g), ch(A.b, B.b)]
+    .map(v => v.toString(16).padStart(2, "0")).join("");
+}
+/* 自定义颜色: 由主色派生 deep/soft/border（深浅主题各自规则），内联覆盖令牌 */
+function applyAccentVars() {
+  const st = document.documentElement.style;
+  if (accentPref() !== "custom") {
+    ["--accent", "--accent-deep", "--accent-soft", "--accent-border"]
+      .forEach(p => st.removeProperty(p));
+    return;
+  }
+  const c = customAccent();
+  const { r, g, b } = hexToRgb(c);
+  const dark = document.documentElement.dataset.theme === "dark";
+  st.setProperty("--accent", c);
+  st.setProperty("--accent-deep", mixHex(c, "#000000", dark ? 0.16 : 0.2));
+  st.setProperty("--accent-soft",
+    dark ? `rgba(${r}, ${g}, ${b}, .13)` : mixHex(c, "#ffffff", 0.9));
+  st.setProperty("--accent-border",
+    dark ? `rgba(${r}, ${g}, ${b}, .36)` : mixHex(c, "#ffffff", 0.74));
+}
+function applyAccent() {
+  const v = accentPref();
+  if (v === "gray") delete document.documentElement.dataset.accent;
+  else document.documentElement.dataset.accent = v;
+  applyAccentVars();
+}
+function renderAccentDots() { }   // 已由 16 进制输入框取代（保留空实现防旧调用）
+function syncAccentInput() {
+  const inp = $("accent-hex-input");
+  if (!inp) return;
+  const v = accentPref();
+  if (v === "custom") {
+    inp.value = customAccent();
+  } else {
+    const a = ACCENTS.find(x => x.id === v);
+    inp.value = a ? (document.documentElement.dataset.theme === "dark" ? a.dark : a.light) : "";
+  }
+  inp.classList.remove("invalid");
+}
+$("accent-hex-input").addEventListener("input", () => {
+  const inp = $("accent-hex-input");
+  let v = inp.value.trim();
+  if (v && !v.startsWith("#")) v = "#" + v;
+  if (/^#[0-9a-fA-F]{6}$/.test(v)) {
+    inp.classList.remove("invalid");
+    localStorage.setItem(ACCENT_CUSTOM_KEY, v.toLowerCase());
+    localStorage.setItem(ACCENT_KEY, "custom");
+    applyAccent();
+  } else {
+    inp.classList.add("invalid");
+  }
+});
+$("accent-hex-input").addEventListener("keydown", ev => {
+  ev.stopPropagation();   // 别让 Enter/Esc 冒泡成全局快捷键
+  if (ev.key === "Enter") ev.target.blur();
+});
+applyAccent();
+mqDark.addEventListener("change", () => {
+  applyAccentVars();   // 系统深浅切换: 自定义色的派生令牌跟随
+  syncAccentInput();
+});
+
+/* ---------- 设置页视图切换: 侧栏换设置导航, 主区换设置内容 ---------- */
+function openSettings() {
+  themeDd.setValue(themePref());   // 每次打开回显当前值
+  syncAccentInput();
+  $("sidebar").classList.add("settings-view");
+  $("pane").dataset.view = "settings";
+}
+function closeSettings() {
+  $("sidebar").classList.remove("settings-view");
+  $("pane").dataset.view = "chat";
+  $("input").focus();
+}
+document.querySelectorAll(".js-open-settings").forEach(b => { b.onclick = openSettings; });
+$("btn-settings-back").onclick = closeSettings;
+/* 设置导航项切换（当前只有"外观"一节, 结构预留多节扩展） */
+document.querySelectorAll("#side-settings .nav-item").forEach(b => {
+  b.onclick = () => {
+    document.querySelectorAll("#side-settings .nav-item")
+      .forEach(x => x.classList.toggle("on", x === b));
+    document.querySelectorAll("#settings-page .sp-section-body").forEach(s => {
+      s.style.display = s.dataset.section === b.dataset.section ? "" : "none";
+    });
+  };
+});
+document.addEventListener("keydown", ev => {
+  if ($("pane").dataset.view !== "settings") return;
+  if (ev.key === "Escape") { ev.preventDefault(); closeSettings(); }
+});
 
 /* ============================================================
  * 启动

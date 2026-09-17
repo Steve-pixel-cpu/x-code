@@ -412,8 +412,26 @@ class WebSession:
         # 排队区: 本轮进行中用户追加的后续消息（事件循环线程读写）,
         # 当前轮结束后由 _start_pending_turn 接力开跑
         self.pending: list[str] = []
-        self.emit: Optional[Callable] = None   # 所属 WS 连接的事件出口
+        # 事件出口集合: 同一会话可能被多个窗口/标签打开, 事件广播给所有连接,
+        # 连接断开时自动移除（key 为连接序号）
+        self.emits: dict[int, Callable] = {}
+        self._conn_seq = 0
         self.loop = None                       # 事件循环（worker 用它调度接力）
+
+    def add_emit(self, emit: Callable) -> int:
+        self._conn_seq += 1
+        self.emits[self._conn_seq] = emit
+        return self._conn_seq
+
+    def remove_emit(self, token: int) -> None:
+        self.emits.pop(token, None)
+
+    def broadcast(self, payload: dict) -> None:
+        for em in list(self.emits.values()):
+            try:
+                em(payload)
+            except Exception:
+                pass
 
 
 _sessions: dict[str, WebSession] = {}
@@ -603,7 +621,7 @@ def _spawn_turn_thread(web_session: WebSession, text: str,
             _turn_slots.release()
             _drain_queued_turns()
             # 本会话还有排队的后续消息: 回事件循环线程接力开跑下一轮
-            if (web_session.pending and web_session.emit is not None
+            if (web_session.pending and web_session.emits
                     and web_session.loop is not None):
                 web_session.loop.call_soon_threadsafe(_start_pending_turn, web_session)
 
@@ -632,11 +650,11 @@ def _start_pending_turn(web_session: WebSession) -> None:
     if not web_session.pending:
         return
     text = web_session.pending.pop(0)
-    if web_session.emit is None:
+    if not web_session.emits:
         return
     # 前端把"已排队"气泡转正, 并重新进入忙碌态
-    web_session.emit({"type": "turn_started", "text": text})
-    _start_turn(web_session, text, web_session.emit)
+    web_session.broadcast({"type": "turn_started", "text": text})
+    _start_turn(web_session, text, web_session.broadcast)
 
 
 def request_stop(web_session: WebSession) -> None:
@@ -652,8 +670,7 @@ def request_stop(web_session: WebSession) -> None:
     web_session.stop_requested = True
     if web_session.pending:
         web_session.pending.clear()
-        if web_session.emit is not None:
-            web_session.emit({"type": "turn_queue_cleared"})
+        web_session.broadcast({"type": "turn_queue_cleared"})
     if web_session.prompter is not None:
         web_session.prompter.cancel()
 
@@ -858,8 +875,8 @@ async def ws_endpoint(websocket: WebSocket, session_id: str):
         """工作线程调用: 事件路由到本连接的发送队列（线程安全、非阻塞）。"""
         loop.call_soon_threadsafe(out_queue.put_nowait, payload)
 
-    # 会话当前绑定本连接: 排队接力（_start_pending_turn）要用它把事件发回前端
-    web_session.emit = emit
+    # 注册本连接的事件出口: 会话事件广播给所有连接（多窗口/标签同时打开同一会话）
+    token = web_session.add_emit(emit)
     web_session.loop = loop
 
     def emit_error(message: str) -> None:
@@ -902,7 +919,7 @@ async def ws_endpoint(websocket: WebSocket, session_id: str):
                 except Exception as e:
                     emit_error(f"会话加载失败: {e}")
                     continue
-                _start_turn(web_session, text, emit)
+                _start_turn(web_session, text, web_session.broadcast)
 
             elif msg_type == "permission_response":
                 prompter = web_session.prompter
@@ -921,6 +938,7 @@ async def ws_endpoint(websocket: WebSocket, session_id: str):
         # 断连但一轮对话可能还在跑: 朝安全侧叫停；落盘由工作线程完成
         request_stop(web_session)
     finally:
+        web_session.remove_emit(token)   # 本连接注销: 不再接收广播
         sender_task.cancel()
         with suppress(asyncio.CancelledError):
             await sender_task
