@@ -11,7 +11,7 @@ from typing import Optional
 
 from dotenv import load_dotenv
 
-from api_client import ApiClient, ClaudeApiClient
+from api_client import ApiClient, ClaudeApiClient, THINKING_LEVELS
 from config import RuntimeConfig, ConfigLoader
 from hooks import HookRunner
 from models import Message, Session, TextContentBlock, ToolContentBlock
@@ -253,6 +253,7 @@ class SlashCommand(Enum):
     STATUS = "status"
     COMPACT = "compact"
     MODE = "mode"
+    THINKING = "thinking"
     RENAME = "rename"
     EXIT = "exit"
     UNKNOWN = "unknown"
@@ -350,8 +351,12 @@ def build_runtime(session: Session,
         permission_policy=permission_policy,
         session=session,
     )
-
-    return running_time
+    # 循环层预算接线: maxIterations / tokenBudget(=auto-compact 阈值) /
+    # turnTokenBudget 此前只是被解析, 从未生效
+    return (running_time
+            .with_max_iterations(hooks_config.max_iterations())
+            .with_auto_compact_threshold(hooks_config.token_budget())
+            .with_turn_output_budget(hooks_config.turn_token_budget()))
 
 def resolve_permission_mode(runtime_config: RuntimeConfig) -> PermissionMode:
     """决定启动时的权限模式。
@@ -400,6 +405,20 @@ def switch_mode(runtime: ConversationRuntime, mode_name: str) -> None:
     runtime.set_permission_mode(mode)
     print(f"权限模式已切换: {mode.as_str()}")
 
+def switch_thinking(runtime: ConversationRuntime, level_name: str) -> None:
+    """切换思考等级: /thinking 不带参数 = 打印当前等级与可选值; /thinking <level> = 切换。"""
+    if not level_name:
+        print(f"当前思考等级: {runtime.thinking_level()}")
+        print(f"可选: {' | '.join(THINKING_LEVELS)}")
+        return
+    level = level_name.strip().lower()
+    if level not in THINKING_LEVELS:
+        print(c_red(f"✗ 未知思考等级: {level_name}"))
+        print(f"可选: {' | '.join(THINKING_LEVELS)}")
+        return
+    runtime.set_thinking_level(level)
+    print(f"思考等级已切换: {level}")
+
 def print_status(runtime: "ConversationRuntime") -> None:
     """打印当前会话的用量收据（与权限面板同一套对齐风格）。"""
     usage = runtime.usage().cumulative_usage()
@@ -421,6 +440,9 @@ def print_status(runtime: "ConversationRuntime") -> None:
     print(field_line("轮数", f"{turns:,}"))
     print(field_line("消息数", f"{messages:,}"))
     print(field_line("权限模式", runtime.permission_mode().as_str()))
+    print(field_line("思考等级", runtime.thinking_level()))
+    latest = runtime.usage().current_turn_usage()
+    print(field_line("最近一轮", f"{latest.input_tokens:,} 入 / {latest.output_tokens:,} 出"))
     print(c_dim(SEPARATOR))
 
 def do_compact(runtime: ConversationRuntime):
@@ -564,6 +586,10 @@ def run_repl(runtime: ConversationRuntime,
                 switch_cmd_len = len(SlashCommand.MODE.value) + 1
                 mode_name = text[switch_cmd_len:].strip()
                 switch_mode(runtime, mode_name)
+            elif cmd == SlashCommand.THINKING:
+                thinking_cmd_len = len(SlashCommand.THINKING.value) + 1
+                level_name = text[thinking_cmd_len:].strip()
+                switch_thinking(runtime, level_name)
             elif cmd == SlashCommand.RENAME:
                 rename_cmd_len = len(SlashCommand.RENAME.value) + 1
                 do_rename(runtime, store, session_id, text[rename_cmd_len:])
@@ -571,8 +597,9 @@ def run_repl(runtime: ConversationRuntime,
         else:
             # 每轮对话开始: 细分隔线；块与块之间靠各视觉块自带的空行隔开
             print(c_dim(SEPARATOR))
+            summary = None
             try:
-                runtime.run_turn(text, prompter)
+                summary = runtime.run_turn(text, prompter)
             except KeyboardInterrupt:
                 # Ctrl+C 只中断本轮, 不退出 REPL; 修补悬空 tool_use 后照常落盘
                 print()
@@ -582,6 +609,12 @@ def run_repl(runtime: ConversationRuntime,
                 print()
                 print(c_red(f"✗ {e}"))
                 continue
+
+            # 循环层预算的收束是正常返回（不是异常），把触发原因讲给用户
+            if summary is not None and summary.budget_exhausted:
+                print(c_yellow("⚠ 本轮输出 token 预算已用尽，已提前收束本轮（可调大 turnTokenBudget）"))
+            elif summary is not None and summary.iterations_exhausted:
+                print(c_yellow(f"⚠ 已达单轮最大迭代次数（{summary.iterations} 次调用），已提前收束本轮"))
 
             for msg in runtime.session().messages[idx_before + 1:]:
                 last_uuid = store.save_message(
@@ -593,6 +626,14 @@ def run_repl(runtime: ConversationRuntime,
             titled = maybe_auto_title(runtime, store, session_id, titled)
 
 
+def build_registry() -> ToolRegistry:
+    """CLI 与 Web 共用的工具注册表: 四个内置工具一次注册到位。"""
+    return ToolRegistry().register(name="bash", handler=bash_tool).register(
+        name="powershell", handler=powershell_tool).register(
+        name="read_file", handler=read_tool).register(
+        name="write_file", handler=write_tool)
+
+
 def start(session_store:SessionStore,session_id:str):
     load_dotenv()
     api_key = os.getenv("API_KEY")
@@ -600,15 +641,11 @@ def start(session_store:SessionStore,session_id:str):
         print(c_red("✗ API_KEY not set!"))
         return
 
-    registry = ToolRegistry()
+    registry = build_registry()
 
     session_load = session_store.load_session(session_id)
     session_msgs = session_load[0]
     last_uuid = session_load[1]
-    registry.register(name="bash", handler=bash_tool).register(
-        name="powershell", handler=powershell_tool).register(
-        name="read_file", handler=read_tool).register(
-        name="write_file", handler=write_tool)
 
     config_loader = ConfigLoader(
         cwd=Path.cwd(),
@@ -619,7 +656,8 @@ def start(session_store:SessionStore,session_id:str):
     api_client = ClaudeApiClient(
         api_key=str(api_key),
         model=runtime_config.model() or DEFAULT_MODEL,
-        tools=TOOLS
+        tools=TOOLS,
+        thinking_level=runtime_config.thinking_level(),
     )
     runtime = build_runtime(
         api_client=api_client,

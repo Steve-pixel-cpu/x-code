@@ -17,6 +17,7 @@ CC 定义了一个工具注册表，通过名字查找并执行工具。每个�
 | **链式调用 (Builder)** | `register()` 返回 `self`，可以 `.register(A).register(B)` |
 | **依赖注入 (DI)** | 工具在外部注册，不在 registry 内部硬编码 |
 | **统一接口** | 所有工具签名相同: `(input_json: str) -> str` |
+| **输出截断** | `execute()` 返回前统一截断到 `MAX_TOOL_OUTPUT_CHARS`（保留首尾+标记）——无界工具输出会透支上下文、诱发过度思考 |
 
 ## 你需要写的东西
 

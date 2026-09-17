@@ -1,0 +1,232 @@
+"""server.py 协议层 / 设置接口测试（不起真实 LLM 请求，不动全局单例状态）。
+
+运行方式（在 x-code 目录下）:
+    .venv/Scripts/python.exe -m pytest tests/test_server.py -v
+
+说明: server.py 在 import 时做启动装配（读 .env、建 SessionStore），模块级
+单例（api_client / app_state / store）在测试里只做只读断言或经临时对象替换，
+全程不发起网络请求。
+"""
+
+import json
+import threading
+import time
+
+import pytest
+from fastapi.testclient import TestClient
+
+import server
+from permissions import PermissionDecision, PermissionRequest, PermissionMode
+
+
+# ------------------------------------------------------------
+# 夹具: 不触真实 .env 装配失败的问题——模块已可导入（import server 冒烟）
+# ------------------------------------------------------------
+
+@pytest.fixture()
+def client():
+    return TestClient(server.app)
+
+
+# ------------------------------------------------------------
+# REST — 首页 / 会话列表 / 新建 / 历史回放
+# ------------------------------------------------------------
+
+def test_index_serves_html(client):
+    r = client.get("/")
+    assert r.status_code == 200
+    assert "text/html" in r.headers["content-type"]
+    assert "x-code" in r.text
+
+
+def test_settings_roundtrip_and_validation(client):
+    # 合法值立即生效
+    r = client.post("/api/settings", json={"thinking_level": "low"})
+    assert r.status_code == 200
+    assert r.json()["thinking_level"] == "low"
+
+    r = client.get("/api/settings")
+    assert r.json()["thinking_level"] == "low"
+
+    # 非法值 400 且不改当前值
+    r = client.post("/api/settings", json={"thinking_level": "ultra"})
+    assert r.status_code == 400
+    assert client.get("/api/settings").json()["thinking_level"] == "low"
+
+
+def test_settings_permission_mode_validation(client):
+    r = client.post("/api/settings", json={"permission_mode": "no-such-mode"})
+    assert r.status_code == 400
+
+    r = client.post("/api/settings", json={"permission_mode": "read-only"})
+    assert r.status_code == 200
+    assert r.json()["permission_mode"] == "read-only"
+
+
+def test_get_messages_404_for_unknown_session(client):
+    r = client.get("/api/sessions/definitely-not-exist/messages")
+    assert r.status_code == 404
+
+
+def test_create_session_returns_timestamp_id(client):
+    r = client.post("/api/sessions")
+    assert r.status_code == 200
+    sid = r.json()["id"]
+    # 与 CLI 相同的 %Y%m%d-%H%M%S（14 位数字，可能带 w 后缀）
+    assert len(sid) >= 15 and sid[:8].isdigit() and sid[9:15].isdigit() and sid[8] == "-"
+
+
+# ------------------------------------------------------------
+# WebPermissionPrompter — 阻塞等待 / 超时安全侧 / cancel / stale 响应
+# ------------------------------------------------------------
+
+def _request() -> PermissionRequest:
+    return PermissionRequest(
+        tool_name="bash",
+        input='{"command": "rm -rf /"}',
+        current_mode=PermissionMode.WORKSPACE_WRITE,
+        required_mode=PermissionMode.DANGER_FULL_ACCESS,
+    )
+
+
+def test_prompter_allow_path():
+    prompter = server.WebPermissionPrompter(emit=lambda p: None)
+    threading.Thread(
+        target=lambda: prompter.resolve("perm-1", True), daemon=True
+    ).start()
+    result = prompter.decide(_request())
+    assert result.decision == PermissionDecision.ALLOW
+
+
+def test_prompter_deny_path():
+    prompter = server.WebPermissionPrompter(emit=lambda p: None)
+    threading.Thread(
+        target=lambda: prompter.resolve("perm-1", False), daemon=True
+    ).start()
+    result = prompter.decide(_request())
+    assert result.decision == PermissionDecision.DENY
+
+
+def test_prompter_timeout_denies(monkeypatch):
+    monkeypatch.setattr(server, "PERMISSION_TIMEOUT", 0.05)
+    prompter = server.WebPermissionPrompter(emit=lambda p: None)
+    result = prompter.decide(_request())
+    assert result.decision == PermissionDecision.DENY
+    assert "超时" in result.reason
+
+
+def test_prompter_cancel_denies_immediately():
+    prompter = server.WebPermissionPrompter(emit=lambda p: None)
+    threading.Thread(target=prompter.cancel, daemon=True).start()
+    result = prompter.decide(_request())
+    assert result.decision == PermissionDecision.DENY
+
+
+def test_prompter_ignores_stale_responses_then_accepts_current():
+    prompter = server.WebPermissionPrompter(emit=lambda p: None)
+    # 先塞一个过期 request_id 的响应，再塞正确的——前者应被忽略
+    prompter.resolve("perm-999", True)
+    threading.Thread(
+        target=lambda: prompter.resolve("perm-1", False), daemon=True
+    ).start()
+    result = prompter.decide(_request())
+    assert result.decision == PermissionDecision.DENY   # 来自 perm-1=False
+
+
+def test_prompter_emits_request_before_blocking():
+    """先推弹窗再阻塞: decide 内部必须先 emit permission_request。"""
+    seen = []
+    prompter = server.WebPermissionPrompter(emit=seen.append)
+    threading.Thread(
+        target=lambda: prompter.resolve("perm-1", True), daemon=True
+    ).start()
+    prompter.decide(_request())
+    assert seen and seen[0]["type"] == "permission_request"
+    assert seen[0]["request_id"] == "perm-1"
+    assert seen[0]["tool_name"] == "bash"
+
+
+# ------------------------------------------------------------
+# 协议层 — WS 消息处理（并发守卫 / 未知类型 / 非法 JSON）
+# 会话共用 server.STORE 覆盖，测试数据落 tmp 目录，不污染真实会话
+# ------------------------------------------------------------
+
+@pytest.fixture()
+def isolated_store(tmp_path, monkeypatch):
+    """把全局 store 换到 tmp 目录，测试互不串扰、不写真实会话目录。"""
+    from storage import SessionStore
+    fake = SessionStore(storage_dir=tmp_path)
+    monkeypatch.setattr(server, "store", fake)
+    # api_get_messages 里 list_sessions() 取自替换后的 store
+    return fake
+
+
+def test_ws_unknown_message_type(client, isolated_store):
+    with client.websocket_connect("/ws/s1") as ws:
+        ws.send_json({"type": "nope"})
+        reply = json.loads(ws.receive_text())
+        assert reply["type"] == "error"
+        assert "未知消息类型" in reply["message"]
+
+
+def test_ws_permission_response_without_pending(client, isolated_store):
+    with client.websocket_connect("/ws/s1") as ws:
+        ws.send_json({"type": "permission_response", "request_id": "perm-1",
+                      "approved": True})
+        reply = json.loads(ws.receive_text())
+        assert reply["type"] == "error"
+        assert "待审批" in reply["message"]
+
+
+def test_ws_rejects_second_turn_while_busy(client, isolated_store, monkeypatch):
+    """并发守卫: busy 会话上的第二条 user 消息收到 error，不触发第二轮。"""
+    web_session = server.get_or_create_web_session("s-busy")
+    web_session.busy = True
+    try:
+        with client.websocket_connect("/ws/s-busy") as ws:
+            ws.send_json({"type": "user", "text": "第二条"})
+            reply = json.loads(ws.receive_text())
+            assert reply["type"] == "error"
+            assert "一轮" in reply["message"]
+    finally:
+        web_session.busy = False
+
+
+def test_ws_empty_user_message_is_ignored(client, isolated_store):
+    """空文本不回错也不开轮: 服务端静默丢弃（收不到任何回复）。"""
+    with client.websocket_connect("/ws/s-empty") as ws:
+        ws.send_json({"type": "user", "text": "   "})
+        ws.send_json({"type": "nope"})          # 用已知会回包的消息探测
+        reply = json.loads(ws.receive_text())
+        assert reply["type"] == "error"
+        assert "未知消息类型" in reply["message"]
+
+
+# ------------------------------------------------------------
+# 单元 — 消息摊平 / TurnEmitter 配对
+# ------------------------------------------------------------
+
+def test_message_to_dict_blocks():
+    from models import Message
+    msg = Message.tool_result(
+        id="t1", name="bash", output="boom", is_error=True)
+    d = server._message_to_dict(msg)
+    assert d["role"] == "tool"
+    assert d["blocks"][0] == {
+        "type": "tool_result", "id": "t1", "name": "bash",
+        "output": "boom", "is_error": True,
+    }
+
+
+def test_turn_emitter_pairs_tool_ids():
+    """tool_use 入队 id、tool_result 按 FIFO 弹出补 id——前端按 id 配对卡片。"""
+    emitter = server.TurnEmitter(sink=lambda p: None)
+    emitter({"type": "tool_use", "id": "a", "name": "bash", "input": "{}"})
+    emitter({"type": "tool_use", "id": "b", "name": "read_file", "input": "{}"})
+    out = []
+    emitter2 = server.TurnEmitter(sink=out.append)
+    emitter2({"type": "tool_use", "id": "a", "name": "bash", "input": "{}"})
+    emitter2({"type": "tool_use", "id": "b", "name": "read_file", "input": "{}"})
+    emitter2({"type": "tool_result", "name": "bash", "input": "{}"})
+    emitter2({"type": "tool_result", "name": "read_file", "input": "{}"})
+    assert [p["id"] for p in out if p["type"] == "tool_result"] == ["a", "b"]

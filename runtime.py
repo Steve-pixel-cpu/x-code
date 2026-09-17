@@ -10,6 +10,9 @@ from permissions import PermissionMode, PermissionPolicy, PermissionPrompter, Pe
 
 DEFAULT_MAX_ITERATIONS = 128
 DEFAULT_AUTO_COMPACT_THRESHOLD =  200_000
+# 单轮输出预算（output_tokens 含思考）。正常单次调用被服务端 max_tokens=32768
+# 硬顶，取两倍意味着只有"失控轮"（超长思考连环调用）会被拦下。
+DEFAULT_TURN_OUTPUT_BUDGET = 65_536
 
 # --- Token 用量追踪 ---
 class TokenUsage(BaseModel):
@@ -87,6 +90,13 @@ def build_assistant_message(events: list[AssistantEvent]) -> tuple[Message, Opti
 
         elif isinstance(event, MessageStopEvent):
             finished = True
+            if event.usage is not None:
+                usage = TokenUsage(
+                    input_tokens=event.usage.input_tokens,
+                    output_tokens=event.usage.output_tokens,
+                    cache_creation_input_tokens=event.usage.cache_creation_input_tokens,
+                    cache_read_input_tokens=event.usage.cache_read_input_tokens,
+                )
 
     if text_chunk:
         text_block = TextContentBlock(
@@ -135,6 +145,8 @@ class TurnSummary(BaseModel):
     iterations: int
     usage: TokenUsage
     auto_compacted: bool
+    budget_exhausted: bool = False
+    iterations_exhausted: bool = False
 
 
 # --- ConversationRuntime ---
@@ -148,6 +160,7 @@ class ConversationRuntime:
                  hook_runner: Optional[HookRunner] =None):
         self._max_iterations = DEFAULT_MAX_ITERATIONS
         self._auto_compact_threshold = DEFAULT_AUTO_COMPACT_THRESHOLD
+        self._turn_output_budget = DEFAULT_TURN_OUTPUT_BUDGET
         self._api_client = api_client
         self._tool_executor = tool_executor
         self._permission_policy = permission_policy
@@ -164,6 +177,10 @@ class ConversationRuntime:
         self._auto_compact_threshold = n
         return self
 
+    def with_turn_output_budget(self, n) -> "ConversationRuntime":
+        self._turn_output_budget = n
+        return self
+
     def session(self)-> Session:
         return self._session
 
@@ -175,6 +192,12 @@ class ConversationRuntime:
 
     def set_permission_mode(self, mode: PermissionMode) -> None:
         self._permission_policy.set_mode(mode)
+
+    def thinking_level(self) -> str:
+        return self._api_client.thinking_level
+
+    def set_thinking_level(self, level: str) -> None:
+        self._api_client.set_thinking_level(level)
 
     def _process_tool_use(self, tool_block: ToolContentBlock, prompter: Optional[PermissionPrompter]=None)-> Message | None:
 
@@ -248,8 +271,10 @@ class ConversationRuntime:
         return f"Compact sussess! Remove count = {compact_reslut.removed_count}."
 
     def _maybe_auto_compact(self)-> bool:
-
-        if self.usage().cumulative_usage().input_tokens >= self._auto_compact_threshold:
+        # 信号: 最近一次调用的 input_tokens ≈ 当前上下文占用。
+        # 旧实现用累计 input（计费口径，单调涨），和上下文大小无关。
+        latest = self.usage().current_turn_usage()
+        if latest.input_tokens >= self._auto_compact_threshold:
             curr_session = self._session
             compact_reslut = compact_session(
                 messages=curr_session.messages,
@@ -272,18 +297,29 @@ class ConversationRuntime:
         curr_session = self._session
         tool_results : list[Message] = []
         assistant_messages = []
+        turn_output_tokens = 0       # 本轮累计输出（含思考），循环层预算的计量
+        budget_exhausted = False
+        iterations_exhausted = False
 
         curr_session.messages.append(Message.user_text(user_input))
         while True:
-            iterations += 1
-            if iterations > self._max_iterations:
-                raise RuntimeError("迭代次数超过最大迭代次数!")
+            # 循环层预算检查点: 收束发生在这里——上一迭代的工具结果已全部
+            # 回填，会话历史一致，break 不会产生悬空 tool_use，也不需要异常
+            # 修补。服务端 max_tokens 管单次调用上限，这里管跨次累加。
+            if turn_output_tokens >= self._turn_output_budget:
+                budget_exhausted = True
+                break
+            if iterations >= self._max_iterations:
+                iterations_exhausted = True
+                break
 
+            iterations += 1
             events = self._api_client.stream(system_prompt=self._system_prompt, messages=curr_session.messages)
             message,token_usage = build_assistant_message(events)
             assistant_messages.append(message)
             if token_usage:
                 self.usage().record(usage=token_usage)
+                turn_output_tokens += token_usage.output_tokens
             curr_session.messages.append(message)
 
             tool_use_blocks = []
@@ -307,7 +343,9 @@ class ConversationRuntime:
             tool_results=tool_results,
             iterations=iterations,
             usage=self.usage().cumulative_usage(),
-            auto_compacted= auto_compacted
+            auto_compacted= auto_compacted,
+            budget_exhausted=budget_exhausted,
+            iterations_exhausted=iterations_exhausted,
         )
 
 

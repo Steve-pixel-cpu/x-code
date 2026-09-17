@@ -32,6 +32,7 @@ deep_merge(target, source) -> new_dict
 RuntimeFeatureConfig(BaseModel)
   hooks_pre_tool_use, hooks_post_tool_use
   model, permission_mode, timeout, max_iterations, token_budget
+  thinking_level — 默认 "medium"; 合法值 low/medium/high/max
 
 RuntimeConfig(BaseModel)
   merged: dict              — 原始合并结果（forward compatibility）
@@ -75,3 +76,14 @@ result = deep_merge(a, b)
 - 空文件应返回空 dict `{}`，不是 None
 - 环境变量类型转换要 try/except（比如 `CLAUDE_TIMEOUT=abc` 应该报错）
 - permission mode 支持多个别名（如 `"auto"` = `"workspace-write"`）
+
+## 配置键速查
+
+| 配置键 | 环境变量 | 说明 |
+|--------|----------|------|
+| `model` | `CLAUDE_MODEL` | 模型名 |
+| `timeout` | `CLAUDE_TIMEOUT` | 工具超时秒数 |
+| `maxIterations` | `CLAUDE_MAX_ITERATIONS` | 单轮最大模型调用次数，超限优雅收束（不再抛异常） |
+| `tokenBudget` | `CLAUDE_TOKEN_BUDGET` | auto-compact 阈值：最近一次调用 input_tokens 达到即压缩 |
+| `thinkingLevel` | `CLAUDE_THINKING_LEVEL` | 思考档位 low/medium/high/max，默认 medium；budget 映射见 api_client.py |
+| `turnTokenBudget` | `CLAUDE_TURN_TOKEN_BUDGET` | 单轮累计 output tokens（含思考）上限，默认 65536，超限本轮提前收束 |

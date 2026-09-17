@@ -258,6 +258,11 @@ class SystemPromptBuilder:
             "Do not create files unless they are required to complete the task.",
             "If an approach fails, diagnose the failure before switching tactics.",
             "Be careful not to introduce security vulnerabilities.",
+            # 动作经济性: 抑制过度思考的 prompt 层手段——模型思考长度随任务
+            # 诱导膨胀，明确告诉它"信息够了就动手"能显著减少无谓探索
+            "Act economically: when the information you have is sufficient, "
+            "act directly instead of gathering more; avoid exhaustive "
+            "exploration and redundant verification.",
         ]
         return "# Doing tasks\n" + "\n".join(f" - {item}" for item in items)
 

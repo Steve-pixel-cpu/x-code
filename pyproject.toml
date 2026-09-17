@@ -6,6 +6,8 @@ dependencies = [
     "anthropic>=1.5.0",
     "pydantic>=2.13.5",
     "python-dotenv>=1.2.3",
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
 ]
 
 [dependency-groups]

@@ -22,8 +22,17 @@ class ToolUseEvent(BaseModel):
     input: str
 
 
+class UsageInfo(BaseModel):
+    """一次模型调用的 token 用量（来自流式事件的 message_start / message_delta）。"""
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cache_creation_input_tokens: int = 0
+    cache_read_input_tokens: int = 0
+
+
 class MessageStopEvent(BaseModel):
     type: Literal['message_stop'] = 'message_stop'
+    usage: Optional[UsageInfo] = None
 
 
 AssistantEvent = TextDeltaEvent | ToolUseEvent | MessageStopEvent
@@ -34,6 +43,15 @@ ANSI_DIM = "\033[2m"
 ANSI_RESET = "\033[0m"
 ANSI_CLEAR_LINE = "\033[K"   # 清除光标到行尾（配合 \r 原地更新）
 THINKING_MARKER = "✻ 思考中…"
+
+# 思考等级 → thinking.budget_tokens。GLM-5.3-flash 强制思考无法关闭，只能调
+# 深浅；"max" 不传参数走模型默认（最高档）。budget 须 ≥1024 且 < max_tokens。
+THINKING_LEVELS = ("low", "medium", "high", "max")
+THINKING_LEVEL_TO_BUDGET = {
+    "low": 2048,
+    "medium": 8192,
+    "high": 16384,
+}
 
 
 def _end_thinking_indicator(out, streaming_thinking: bool) -> bool:
@@ -52,6 +70,15 @@ def _stop_text_line(out, streaming_text: bool) -> bool:
     out.write("\n")
     out.flush()
     return False
+
+
+def _collect_usage(acc: dict, usage) -> None:
+    """把 SDK 用量对象里非 None 的字段并进 acc（message_start 与 message_delta 各报一部分）。"""
+    for field in ("input_tokens", "output_tokens",
+                  "cache_creation_input_tokens", "cache_read_input_tokens"):
+        value = getattr(usage, field, None)
+        if value is not None:
+            acc[field] = value
 
 
 class ApiClient(ABC):
@@ -118,14 +145,19 @@ class ClaudeApiClient(ApiClient):
                  api_key: str,
                  model: str,
                  tools: list[dict] | None = None,
-                 emit_output: bool = True):
+                 emit_output: bool = True,
+                 thinking_level: str = "medium"):
 
         self.model = model
         self.tools = tools or []
         self.emit_output = emit_output
-        # 初始化客户端（提前创建，避免每次 stream 都新建）
-        self.client = anthropic.Anthropic(api_key=api_key)
+        self.thinking_level = thinking_level
+        # 流式读超时: 两条流式事件之间最大间隔 300s。没有它，一条 stalled 的
+        # 连接会让 run_turn 永久挂死（CLI 卡死 / Web 端 busy 永远不解锁）
+        self.client = anthropic.Anthropic(api_key=api_key, timeout=300.0)
 
+    def set_thinking_level(self, level: str) -> None:
+        self.thinking_level = level
 
     def stream(self, system_prompt: list[str], messages: list[Message]) -> List[AssistantEvent]:
         events: List[AssistantEvent] = []
@@ -139,9 +171,15 @@ class ClaudeApiClient(ApiClient):
         }
         if self.tools:
             kwargs["tools"] = self.tools
+        budget = THINKING_LEVEL_TO_BUDGET.get(self.thinking_level)
+        if budget is not None:
+            kwargs["thinking"] = {"type": "enabled", "budget_tokens": budget}
         streaming_text = False      # 正在流式输出正式回复文本
         streaming_thinking = False  # 思考指示器行正在原地刷新（仅终端，不进事件流）
         thinking_chars = 0          # 当前思考块累计字符数
+        # token 用量: input 侧在 message_start，output 侧在 message_delta。
+        # output_tokens 含思考 tokens——思考文本不进历史，但用量进，循环层预算靠它。
+        usage_acc: dict = {}
         # 部分Windows控制台默认关闭 ANSI（VT）转义支持；shell 跑一次空命令
         # 会经 cmd.exe 初始化控制台从而启用。旧式写法是 os.system("")（已软废弃）
         subprocess.run("", shell=True)
@@ -210,14 +248,20 @@ class ClaudeApiClient(ApiClient):
                         # thinking 块结束：收指示器行
                         streaming_thinking = _end_thinking_indicator(out, streaming_thinking)
                         thinking_chars = 0
+                elif event.type == 'message_start':
+                    usage = getattr(event.message, "usage", None)
+                    if usage is not None:
+                        _collect_usage(usage_acc, usage)
+
                 elif event.type == 'message_delta':
+                    usage = getattr(event, "usage", None)
+                    if usage is not None:
+                        _collect_usage(usage_acc, usage)
                     if self.emit_output:
                         streaming_thinking = _end_thinking_indicator(out, streaming_thinking)
                         streaming_text = _stop_text_line(out, streaming_text)
                     if event.delta.stop_reason == "max_tokens":
                         out.write("输出被 max_tokens 截断!")
-
-
 
                 elif event.type == 'message_stop':
                     streaming_thinking = _end_thinking_indicator(out, streaming_thinking)
@@ -227,6 +271,8 @@ class ClaudeApiClient(ApiClient):
                         out.write(ANSI_RESET)
                         out.flush()
 
-                    events.append(MessageStopEvent())
+                    events.append(MessageStopEvent(
+                        usage=UsageInfo(**usage_acc) if usage_acc else None,
+                    ))
 
         return  events

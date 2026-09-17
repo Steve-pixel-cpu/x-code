@@ -44,8 +44,12 @@ class RuntimeFeatureConfig(BaseModel):
     model: Optional[str] = None
     permission_mode: Optional[str] = None
     timeout: int = 30
-    max_iterations: int = 10
+    # 默认与 runtime.DEFAULT_MAX_ITERATIONS 对齐。10 是历史占位值，
+    # 接线前从未生效——真放出来正常任务一轮就会被掐断
+    max_iterations: int = 128
     token_budget: int = 200_000
+    thinking_level: str = "medium"
+    turn_token_budget: int = 65_536
 
 class RuntimeConfig(BaseModel):
     merged: dict = Field(default_factory=dict)
@@ -68,6 +72,9 @@ class RuntimeConfig(BaseModel):
     def model(self) -> Optional[str]:
         return self.feature_config.model
 
+    def thinking_level(self) -> str:
+        return self.feature_config.thinking_level
+
     def permission_mode(self) -> Optional[str]:
         return self.feature_config.permission_mode
 
@@ -76,6 +83,12 @@ class RuntimeConfig(BaseModel):
 
     def token_budget(self) -> int:
         return self.feature_config.token_budget
+
+    def max_iterations(self) -> int:
+        return self.feature_config.max_iterations
+
+    def turn_token_budget(self) -> int:
+        return self.feature_config.turn_token_budget
 
     @staticmethod
     def empty() -> "RuntimeConfig":
@@ -131,14 +144,23 @@ class ConfigLoader:
                 raise ConfigError(f"permissionMode: unsupported mode '{raw_mode}'", kind="parse")
             permission_mode = mode_map[raw_mode]
 
+        # thinking_level: 思考深浅档位，budget 映射见 api_client.THINKING_LEVEL_TO_BUDGET
+        raw_level = merged.get("thinkingLevel", "medium")
+        if not isinstance(raw_level, str) or raw_level.strip().lower() not in (
+            "low", "medium", "high", "max",
+        ):
+            raise ConfigError(f"thinkingLevel: unsupported level '{raw_level}'", kind="parse")
+
         return RuntimeFeatureConfig(
             hooks_pre_tool_use=pre,
             hooks_post_tool_use=post,
             model=merged.get("model"),
             permission_mode=permission_mode,
             timeout=merged.get("timeout", 30),
-            max_iterations=merged.get("maxIterations", 10),
+            max_iterations=merged.get("maxIterations", 128),
             token_budget=merged.get("tokenBudget", 200_000),
+            thinking_level=raw_level.strip().lower(),
+            turn_token_budget=merged.get("turnTokenBudget", 65_536),
         )
 
     @staticmethod
@@ -182,6 +204,8 @@ class ConfigLoader:
             "CLAUDE_TIMEOUT": ("timeout", int),
             "CLAUDE_MAX_ITERATIONS": ("maxIterations", int),
             "CLAUDE_TOKEN_BUDGET": ("tokenBudget", int),
+            "CLAUDE_TURN_TOKEN_BUDGET": ("turnTokenBudget", int),
+            "CLAUDE_THINKING_LEVEL": "thinkingLevel",
         }
 
         for key, target in env_map.items():

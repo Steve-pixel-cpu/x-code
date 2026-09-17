@@ -6,6 +6,27 @@ import json
 
 from runtime import ToolError
 
+# 工具输出进入会话历史前的硬上限。模型的思考长度随上下文膨胀，无界的
+# 工具输出（大文件、长命令输出）是透支上下文、诱发过度思考的根源，所以
+# 在 registry 这个唯一入口统一截断，而不是散在各 handler 里。
+MAX_TOOL_OUTPUT_CHARS = 20_000
+_KEEP_HEAD = 14_000  # 开头: 结构、表头、命令回显
+_KEEP_TAIL = 6_000   # 结尾: 报错和最终状态通常在这里
+
+
+def truncate_tool_output(output: str) -> str:
+    """超限时保留首尾、掐掉中段，并留标记让模型知道去拿哪部分。"""
+    if len(output) <= MAX_TOOL_OUTPUT_CHARS:
+        return output
+    omitted = len(output) - _KEEP_HEAD - _KEEP_TAIL
+    return (
+        output[:_KEEP_HEAD]
+        + f"\n\n[... output truncated: {omitted} characters omitted. "
+        f"Repeat the call more narrowly (specific file range / filtered command) "
+        f"if you need the omitted part ...]\n\n"
+        + output[-_KEEP_TAIL:]
+    )
+
 
 class ToolRegistry():
     def __init__(self):
@@ -29,7 +50,7 @@ class ToolRegistry():
 
         try:
             result = self._handlers[name](params)
-            return result
+            return truncate_tool_output(result)
         except Exception as e:
             raise ToolError(f"Tool execution error: {e}")
 

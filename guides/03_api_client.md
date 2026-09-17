@@ -30,9 +30,23 @@ ApiClient(ABC)
   abstract stream(system_prompt, messages) -> list[AssistantEvent]
 
 ClaudeApiClient(ApiClient)
-  __init__(api_key, model, tools=[])
+  __init__(api_key, model, tools=[], thinking_level="medium")
+  set_thinking_level(level) — 运行时切换（/thinking 命令）
   stream() — 调用 Anthropic SDK，解析事件流
 ```
+
+## 思考等级（GLM-5.3-flash）
+
+GLM-5.3-flash 强制思考、无法关闭，只能通过 `thinking.budget_tokens` 调深浅。
+
+```
+THINKING_LEVELS = ("low", "medium", "high", "max")
+THINKING_LEVEL_TO_BUDGET = {low: 2048, medium: 8192, high: 16384}
+```
+
+- `low/medium/high` → 请求体加 `thinking: {"type": "enabled", "budget_tokens": N}`
+- `max`（及未知值）→ 不传参数，走模型默认（最高档）
+- budget 须 ≥1024 且 < max_tokens
 
 ## 关键知识: Anthropic SDK 的事件流
 
