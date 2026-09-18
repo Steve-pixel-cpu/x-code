@@ -48,10 +48,27 @@ class EchoExecutor:
         self.fail = fail
         self.called = False
 
-    def execute(self, tool_name: str, input: str) -> str:
+    def execute(self, tool_name: str, input: str, tool_use_id=None) -> str:
         self.called = True
         if self.fail:
             raise ToolError("boom")
+        return self.reply
+
+
+class RecordingExecutor:
+    """并发安全地记录每次执行入参的执行器（并行调度路径用）。"""
+
+    def __init__(self, reply: str = "done"):
+        import threading
+        self.reply = reply
+        self.inputs: list[str] = []
+        self.ids: list[str] = []
+        self._lock = threading.Lock()
+
+    def execute(self, tool_name: str, input: str, tool_use_id=None) -> str:
+        with self._lock:
+            self.inputs.append(input)
+            self.ids.append(tool_use_id)
         return self.reply
 
 
@@ -223,3 +240,55 @@ def test_run_turn_工具抛错转为is_error消息():
     result_block = summary.tool_results[0].content[0]
     assert result_block.is_error
     assert result_block.output == "boom"  # 异常翻译成文字，而不是炸穿循环
+
+
+def test_run_turn_多工具并行执行且按原序回填():
+    # 同一条 assistant 消息里的多个 tool_use 相互独立: 执行可并行,
+    # 但回填顺序必须与消息中 tool_use 的顺序一致（不产生乱序历史）
+    fake = ScriptedApiClient([
+        [
+            ToolUseEvent(id="t1", name="bash", input="cmd1"),
+            ToolUseEvent(id="t2", name="bash", input="cmd2"),
+            MessageStopEvent(),
+        ],
+        [TextDeltaEvent(text="done"), MessageStopEvent()],
+    ])
+    executor = RecordingExecutor()
+    rt = make_runtime(fake, executor=executor)
+
+    summary = rt.run_turn("multi")
+
+    assert sorted(executor.inputs) == ["cmd1", "cmd2"]  # 两个都被执行
+    assert sorted(executor.ids) == ["t1", "t2"]  # tool_use_id 直传执行器（事件配对靠它）
+    assert [m.content[0].id for m in summary.tool_results] == ["t1", "t2"]
+    roles = [m.role for m in rt.session().messages]
+    assert roles == ["user", "assistant", "tool", "tool", "assistant"]
+
+
+def test_run_turn_并行工具可同时进入执行():
+    # 回归: 并行任务必须各自 copy_context——共享同一份 contextvars 快照时,
+    # 并发 ctx.run 会炸 "cannot enter context: already entered"（Web 端整个
+    # turn 报错）。两个工具用栅栏对齐, 只有真能同时进入执行才算通过。
+    import threading
+
+    class BarrierExecutor:
+        def __init__(self):
+            self.barrier = threading.Barrier(2, timeout=5)
+
+        def execute(self, tool_name: str, input: str, tool_use_id=None) -> str:
+            self.barrier.wait()   # 第二个工具进不来时这里超时炸穿
+            return "ok"
+
+    fake = ScriptedApiClient([
+        [
+            ToolUseEvent(id="t1", name="bash", input="cmd1"),
+            ToolUseEvent(id="t2", name="bash", input="cmd2"),
+            MessageStopEvent(),
+        ],
+        [TextDeltaEvent(text="done"), MessageStopEvent()],
+    ])
+    rt = make_runtime(fake, executor=BarrierExecutor())
+
+    summary = rt.run_turn("multi")
+
+    assert [m.content[0].output for m in summary.tool_results] == ["ok", "ok"]

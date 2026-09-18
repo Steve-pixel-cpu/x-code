@@ -1,0 +1,11 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "main-capability",
+  "windows": ["main"],
+  "remote": {
+    "urls": ["http://127.0.0.1", "http://127.0.0.1:*", "http://localhost", "http://localhost:*"]
+  },
+  "permissions": [
+    "core:default"
+  ]
+}

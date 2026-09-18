@@ -9,9 +9,9 @@ import pytest
 from api_client import MessageStopEvent, TextDeltaEvent, ToolUseEvent, UsageInfo
 from config import ConfigLoader, RuntimeConfig, RuntimeFeatureConfig
 from main import build_runtime
-from models import Session
+from models import Message, Session
 from permissions import ALLOW_MODE, PermissionMode, PermissionPolicy
-from runtime import ConversationRuntime, build_assistant_message
+from runtime import ConversationRuntime, TokenUsage, build_assistant_message
 from tools import ToolRegistry
 
 
@@ -41,21 +41,23 @@ def make_tool_events(out_tokens: int = 10) -> list:
 
 
 class ScriptedClient:
-    """按剧本逐次返回事件流；剧本耗尽后重复最后一条。记录调用次数。"""
+    """按剧本逐次返回事件流；剧本耗尽后重复最后一条。记录调用次数与每次看到的消息。"""
 
     def __init__(self, script: list):
         self.script = list(script)
         self.calls = 0
+        self.seen: list[list] = []       # 每次调用收到的 messages 快照
         self.thinking_level = "medium"   # runtime 构建时读取（会话级等级初值）
 
     def stream(self, system_prompt, messages, thinking_level=None) -> list:
+        self.seen.append(list(messages))
         events = self.script[self.calls] if self.calls < len(self.script) else self.script[-1]
         self.calls += 1
         return events
 
 
 class NoopExecutor:
-    def execute(self, tool_name, input) -> str:
+    def execute(self, tool_name, input, tool_use_id=None) -> str:
         return ""
 
 
@@ -138,15 +140,38 @@ def test_max_iterations_stops_gracefully():
 
 
 # ------------------------------------------------------------
-# auto-compact 信号 — 用最近一次调用的 input（≈上下文占用），
-# 而不是只增不减的累计 input
+# auto-compact 信号 — 用最近一次调用的真实上下文占用（input + 缓存读写）,
+# 而不是只增不减的累计 input; auto_compacted 语义 = "实际压缩了",
+# 不是"闸门触发过"
 # ------------------------------------------------------------
 
 def test_auto_compact_triggers_on_latest_input():
+    # 消息数充足: 过阈值且真压掉了 → True
+    session = Session(messages=[
+        Message.user_text(f"旧消息{i} " + "x" * 40) for i in range(6)
+    ])
+    client = ScriptedClient([make_events("ok", out_tokens=1, in_tokens=500_000)])
+    runtime = ConversationRuntime(
+        session=session,
+        api_client=client,
+        tool_executor=NoopExecutor(),
+        permission_policy=PermissionPolicy(active_mode=ALLOW_MODE),
+        system_prompt=["你是助手"],
+    ).with_auto_compact_threshold(200_000)
+
+    summary = runtime.run_turn("hi")
+
+    assert summary.auto_compacted is True
+    assert len(runtime.session().messages) == 5   # 摘要 + 保留 4 条
+
+
+def test_auto_compact_not_fires_when_nothing_removable():
+    # 过阈值但消息数 <= preserve_recent(4)（如单条超大粘贴）:
+    # 没东西可压 → False, 不亮假阳性信号
     client = ScriptedClient([make_events("ok", out_tokens=1, in_tokens=500_000)])
     runtime = make_runtime(client, auto_compact_threshold=200_000)
 
-    assert runtime.run_turn("hi").auto_compacted is True
+    assert runtime.run_turn("hi").auto_compacted is False
 
 
 def test_auto_compact_not_triggered_under_threshold():
@@ -154,6 +179,48 @@ def test_auto_compact_not_triggered_under_threshold():
     runtime = make_runtime(client, auto_compact_threshold=200_000)
 
     assert runtime.run_turn("hi").auto_compacted is False
+
+
+def test_auto_compact_fires_mid_turn_before_next_call():
+    # 阈值在单轮中途被跨过: 第二次调用前就地压缩（此时工具结果已回填、
+    # 历史一致），而不是等 turn 结束——更不会等上下文撑爆 API 报 400
+    session = Session(messages=[
+        Message.user_text(f"旧消息{i} " + "x" * 40) for i in range(6)
+    ])
+    first = make_tool_events(out_tokens=10)
+    first[1].usage.input_tokens = 50_000          # 第一次调用后即跨过阈值
+    client = ScriptedClient([
+        first,
+        make_events("ok", out_tokens=1, in_tokens=100),
+    ])
+    runtime = ConversationRuntime(
+        session=session,
+        api_client=client,
+        tool_executor=NoopExecutor(),
+        permission_policy=PermissionPolicy(active_mode=ALLOW_MODE),
+        system_prompt=["你是助手"],
+    ).with_auto_compact_threshold(10_000)
+
+    summary = runtime.run_turn("新任务")
+
+    assert summary.auto_compacted is True
+    assert client.calls == 2
+    # 第二次调用看到的是压缩后历史: 摘要开头 + 保留的最近几条, 不再是全量
+    second_call = client.seen[1]
+    assert len(second_call) < 9                   # 未压缩应为 6旧+user+assistant+tool
+    assert "continued from a previous conversation" in second_call[0].content[0].text
+    # 压缩不产生悬空 tool_use: tool_use 与 tool_result 必须成对保留在末尾
+    assert second_call[-2].role == "assistant"
+    assert second_call[-1].role == "tool"
+
+
+def test_context_tokens_counts_cache_usage():
+    # 开 prompt caching 后 input_tokens 只计未命中部分;
+    # 压缩闸门必须看 input + 缓存写入 + 缓存读的真实占用
+    usage = TokenUsage(input_tokens=500,
+                       cache_creation_input_tokens=30_000,
+                       cache_read_input_tokens=70_000)
+    assert usage.context_tokens() == 100_500
 
 
 # ------------------------------------------------------------

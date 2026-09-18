@@ -376,3 +376,142 @@ def test_ping_identifies_backend(client):
     r = client.get("/api/ping")
     assert r.status_code == 200
     assert r.json() == {"app": "x-code"}
+
+
+# ------------------------------------------------------------
+# TurnDispatch 上下文路由 — 工具并行执行的回归钉子。
+# 旧实现按线程号存 emit: 工具进线程池后挂点查不到绑定, tool_result
+# 被静默吞掉, 前端工具卡全部收口成"已中断"。runtime 现在用
+# copy_context() 提交并行任务, 绑定必须跨池线程可见。
+# ------------------------------------------------------------
+
+def test_turn_dispatch_绑定经copy_context在池线程可见():
+    import contextvars
+    from concurrent.futures import ThreadPoolExecutor
+
+    seen = {}
+    stop_flag = lambda: False
+
+    def probe():
+        seen["emit"] = server.dispatch.current()
+        seen["workdir"] = server.dispatch.current_workdir()
+        seen["should_stop"] = server.dispatch.current_should_stop()
+
+    server.dispatch.bind(emit="EMIT", workdir="D:/work", should_stop=stop_flag)
+    try:
+        ctx = contextvars.copy_context()
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            pool.submit(ctx.run, probe).result()
+        assert seen == {"emit": "EMIT", "workdir": "D:/work",
+                        "should_stop": stop_flag}
+    finally:
+        server.dispatch.unbind()
+
+    # unbind 后新快照不再带绑定（工作线程被复用也不串轮）
+    ctx2 = contextvars.copy_context()
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        pool.submit(ctx2.run, probe).result()
+    assert seen["emit"] is None and seen["workdir"] is None
+
+
+def test_turn_dispatch_并发轮次互不串线():
+    import contextvars
+    from concurrent.futures import ThreadPoolExecutor
+
+    barrier = threading.Barrier(2)
+    seen = {}
+
+    def turn(tag):
+        server.dispatch.bind(emit=f"emit-{tag}", workdir=f"dir-{tag}")
+        barrier.wait()          # 两轮都绑定完成后互查
+        ctx = contextvars.copy_context()
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            seen[tag] = pool.submit(ctx.run, server.dispatch.current).result()
+        server.dispatch.unbind()
+
+    t1 = threading.Thread(target=turn, args=("a",))
+    t2 = threading.Thread(target=turn, args=("b",))
+    t1.start(); t2.start(); t1.join(); t2.join()
+
+    assert seen["a"] == "emit-a"
+    assert seen["b"] == "emit-b"
+
+
+# ------------------------------------------------------------
+# TurnEmitter id 配对 — 并行下 tool_result 按完成序到达
+# ------------------------------------------------------------
+
+def test_turn_emitter_乱序结果按真实id配对():
+    captured = []
+    emitter = server.TurnEmitter(sink=captured.append)
+
+    emitter({"type": "tool_use", "id": "t1", "name": "bash"})
+    emitter({"type": "tool_use", "id": "t2", "name": "bash"})
+    emitter({"type": "tool_result", "id": "t2"})   # t2 先完成
+    emitter({"type": "tool_result", "id": "t1"})
+
+    assert [p["id"] for p in captured] == ["t1", "t2", "t2", "t1"]
+
+
+def test_turn_emitter_无id事件回退FIFO():
+    captured = []
+    emitter = server.TurnEmitter(sink=captured.append)
+
+    emitter({"type": "tool_use", "id": "t1"})
+    emitter({"type": "tool_use", "id": "t2"})
+    emitter({"type": "tool_result"})               # 权限拒绝等旧式事件不带 id
+    emitter({"type": "tool_result"})
+
+    assert [p["id"] for p in captured][2:] == ["t1", "t2"]
+
+
+# ------------------------------------------------------------
+# 插队不遗弃: 被抢占任务自动回队尾接力, 手动停止才是彻底停
+# ------------------------------------------------------------
+
+def _stub_session(**kw):
+    from types import SimpleNamespace
+    s = SimpleNamespace(busy=True, pending=[], prompter=None,
+                        preempted=False, current_text=None,
+                        stop_requested=False, broadcast=lambda p: None)
+    for k, v in kw.items():
+        setattr(s, k, v)
+    return s
+
+
+def test_promote_pending_置位抢占并提到队首():
+    s = _stub_session(current_text="任务A", pending=["B", "C"])
+
+    assert server.promote_pending(s, "B") is True
+    assert s.pending == ["B", "C"]
+    assert s.preempted is True and s.stop_requested is True
+
+
+def test_promote_pending_不在队列时静默忽略():
+    s = _stub_session(pending=["B"])
+
+    assert server.promote_pending(s, "X") is False
+    assert s.preempted is False and s.stop_requested is False
+
+
+def test_抢占收尾_被打断任务合成接力消息回队尾():
+    s = _stub_session(preempted=True, current_text="看看目前子agent的编排实现了没",
+                      pending=["B"])
+
+    server._schedule_continuation(s)
+
+    assert s.preempted is False
+    assert s.pending[0] == "B"
+    assert len(s.pending) == 2
+    assert "看看目前子agent的编排实现了没" in s.pending[1]
+    assert "插队" in s.pending[1]        # 接力消息自描述: 引用原文 + 进度在历史里
+
+
+def test_手动停止不续跑():
+    s = _stub_session(preempted=True, current_text="任务A", pending=["B"])
+
+    server.request_stop(s)               # 叫停清掉抢占标记并清空排队区
+    assert s.preempted is False and s.pending == []
+
+    server._schedule_continuation(s)     # 收尾时不再合成接力消息
+    assert s.pending == []

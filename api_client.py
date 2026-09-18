@@ -1,6 +1,8 @@
 import contextlib
 import json
 import subprocess
+import sys
+import threading
 from json import JSONDecodeError
 
 import anthropic
@@ -9,6 +11,7 @@ from abc import ABC, abstractmethod
 from typing import List, Literal, Dict, final, Optional
 
 from models import Message, ToolResultContentBlock, ToolContentBlock, TextContentBlock
+from prompt import SYSTEM_PROMPT_DYNAMIC_BOUNDARY
 from retry import (
     ApiError as RetryApiError,
     ConnectionError as RetryConnectionError,
@@ -60,6 +63,40 @@ THINKING_LEVEL_TO_BUDGET = {
     "medium": 8192,
     "high": 16384,
 }
+
+# --- prompt caching ---
+# 断点（tools 末位 → system 静态段 → messages 最后一块滚动）之间的前缀在
+# 迭代间逐字节一致, 命中后服务端对前缀只按缓存读计价/预填充——长会话里
+# 每步的输入成本和首 token 延迟都随历史增长而不再随之线性变贵变慢。
+CACHE_CONTROL = {"type": "ephemeral"}
+
+_ansi_lock = threading.Lock()
+_ansi_enabled = False
+
+
+def _ensure_ansi() -> None:
+    """部分Windows控制台默认关闭 ANSI（VT）转义支持；shell 跑一次空命令
+    会经 cmd.exe 初始化控制台从而启用。旧式写法是 os.system("")（已软废弃）。
+    进程内一次就够——放在 stream() 里会让每次 LLM 调用都冷启动一个 cmd.exe。"""
+    global _ansi_enabled
+    with _ansi_lock:
+        if _ansi_enabled:
+            return
+        try:
+            subprocess.run("", shell=True)
+        except OSError:
+            pass
+        _ansi_enabled = True
+
+
+def _split_system_prompt(sections: list[str]) -> tuple[list[str], list[str]]:
+    """按 SYSTEM_PROMPT_DYNAMIC_BOUNDARY 把 sections 分成（静态, 动态）两段,
+    边界标记本身只是构建器与 API 客户端之间的内部约定, 不发给模型。
+    没有标记时全部视为静态——缓存只要求会话内前缀一致, 自定义 prompt 天然满足。"""
+    if SYSTEM_PROMPT_DYNAMIC_BOUNDARY not in sections:
+        return list(sections), []
+    idx = sections.index(SYSTEM_PROMPT_DYNAMIC_BOUNDARY)
+    return sections[:idx], sections[idx + 1:]
 
 
 def _end_thinking_indicator(out, streaming_thinking: bool) -> bool:
@@ -167,13 +204,16 @@ class ClaudeApiClient(ApiClient):
                  model: str,
                  tools: list[dict] | None = None,
                  emit_output: bool = True,
-                 thinking_level: str = "medium",
+                 thinking_level: str = "low",
                  base_url: str | None = None):
 
         self.model = model
         self.tools = tools or []
         self.emit_output = emit_output
         self.thinking_level = thinking_level
+        # prompt caching 开关: 端点对 cache_control 报"cache 相关 400"时降级
+        # 关闭并本实例不再附加（见 stream() 里 _open_stream 的兜底分支）。
+        self._cache_control_ok = True
         # 供应商配置: base_url/api_key 可在运行期经 configure() 切换
         self._api_key = api_key
         self._base_url = base_url
@@ -214,38 +254,74 @@ class ClaudeApiClient(ApiClient):
     def set_thinking_level(self, level: str) -> None:
         self.thinking_level = level
 
+    def _build_kwargs(self, converted_messages: list[dict], system_prompt: list[str],
+                      thinking_level: Optional[str], use_cache: bool) -> dict:
+        """组装请求参数。use_cache 时打三处 cache_control 断点: tools 末位、
+        system 静态段、messages 最后一块（滚动断点）。滚动断点让"上一迭代结束
+        时的全部历史"成为下一调用的缓存前缀, 全价只付一次。"""
+        static, dynamic = _split_system_prompt(system_prompt)
+        system_blocks: list[dict] = []
+        if static:
+            block = {"type": "text", "text": "\n\n".join(static)}
+            if use_cache:
+                block["cache_control"] = dict(CACHE_CONTROL)
+            system_blocks.append(block)
+        if dynamic:
+            system_blocks.append({"type": "text", "text": "\n\n".join(dynamic)})
+
+        kwargs: dict = {
+            "model": self.model,
+            "messages": converted_messages,
+            "max_tokens": 32768,
+        }
+        if system_blocks:
+            kwargs["system"] = system_blocks
+        if self.tools:
+            # 浅拷贝: 断点不能写进多会话共享的 spec 列表
+            tools = [dict(t) for t in self.tools]
+            if use_cache:
+                tools[-1] = {**tools[-1], "cache_control": dict(CACHE_CONTROL)}
+            kwargs["tools"] = tools
+        level = thinking_level if thinking_level is not None else self.thinking_level
+        budget = THINKING_LEVEL_TO_BUDGET.get(level)
+        if budget is not None:
+            kwargs["thinking"] = {"type": "enabled", "budget_tokens": budget}
+        if use_cache and converted_messages:
+            # 滚动断点。converted 是本次调用现转的临时结构; 先剥掉可能残留的
+            # 旧标记再加, 保证降级重建（use_cache=False）后 messages 干净
+            last_blocks = converted_messages[-1]["content"]
+            if isinstance(last_blocks, list) and last_blocks:
+                clean = {k: v for k, v in last_blocks[-1].items()
+                         if k != "cache_control"}
+                clean["cache_control"] = dict(CACHE_CONTROL)
+                last_blocks[-1] = clean
+        elif converted_messages:
+            last_blocks = converted_messages[-1]["content"]
+            if isinstance(last_blocks, list) and last_blocks:
+                last_blocks[-1] = {k: v for k, v in last_blocks[-1].items()
+                                   if k != "cache_control"}
+        return kwargs
+
     def stream(self, system_prompt: list[str], messages: list[Message],
                thinking_level: Optional[str] = None) -> List[AssistantEvent]:
         """thinking_level 可选参数: 多会话共用 client 时, 每轮调用携带
         自己会话的思考等级, 避免共享实例状态互相串。None = 用实例默认
         （CLI 单会话语义不变）。"""
         events: List[AssistantEvent] = []
-        _system_prompt = "\n".join(system_prompt)
-        kwargs = {
-            "model": self.model,
-            "messages": _convert_message(messages),
-            "system": _system_prompt,
-            "max_tokens": 32768,
-
-        }
-        if self.tools:
-            kwargs["tools"] = self.tools
+        converted_messages = _convert_message(messages)
         level = thinking_level if thinking_level is not None else self.thinking_level
-        budget = THINKING_LEVEL_TO_BUDGET.get(level)
-        if budget is not None:
-            kwargs["thinking"] = {"type": "enabled", "budget_tokens": budget}
+        kwargs = self._build_kwargs(converted_messages, system_prompt, level,
+                                    use_cache=self._cache_control_ok)
         streaming_text = False      # 正在流式输出正式回复文本
         streaming_thinking = False  # 思考指示器行正在原地刷新（仅终端，不进事件流）
         thinking_chars = 0          # 当前思考块累计字符数
         # token 用量: input 侧在 message_start，output 侧在 message_delta。
         # output_tokens 含思考 tokens——思考文本不进历史，但用量进，循环层预算靠它。
         usage_acc: dict = {}
-        # 部分Windows控制台默认关闭 ANSI（VT）转义支持；shell 跑一次空命令
-        # 会经 cmd.exe 初始化控制台从而启用。旧式写法是 os.system("")（已软废弃）
-        subprocess.run("", shell=True)
+        if self.emit_output and sys.stdout.isatty():
+            _ensure_ansi()
 
-        import sys as _sys
-        out = _sys.stdout
+        out = sys.stdout
         stack = contextlib.ExitStack()
         try:
             # 建连阶段（连接失败/超时/429/5xx）经 retry.py 退避重试（默认再试 2 次）;
@@ -254,6 +330,26 @@ class ClaudeApiClient(ApiClient):
                 try:
                     # ExitStack 只在进入成功后登记清理: 失败的尝试无残留, 可安全重试
                     return stack.enter_context(self.client.messages.stream(**kwargs))
+                except anthropic.BadRequestError as e:
+                    # 个别兼容端点不认 cache_control: 报错文本提到 cache 时剥掉
+                    # 断点重建一次并本实例禁用; 其余 400 是真实请求错误,
+                    # 维持"立即抛出不重试"的既有语义。
+                    if self._cache_control_ok and "cache" in str(e).lower():
+                        self._cache_control_ok = False
+                        no_cache_kwargs = self._build_kwargs(
+                            converted_messages, system_prompt, level, use_cache=False)
+                        try:
+                            return stack.enter_context(
+                                self.client.messages.stream(**no_cache_kwargs))
+                        except Exception as e2:
+                            retry_err = _map_to_retry_error(e2)
+                            if retry_err is None:
+                                raise e2
+                            raise retry_err from e2
+                    api_err = _map_to_retry_error(e)
+                    if api_err is None:
+                        raise
+                    raise api_err from e
                 except Exception as e:
                     api_err = _map_to_retry_error(e)
                     if api_err is None:
@@ -294,7 +390,9 @@ class ClaudeApiClient(ApiClient):
                             out.flush()
                         events.append(TextDeltaEvent(text=event.delta.text))
                     elif event.delta.type == 'input_json_delta':
-                        blocks.get(event.index,{"json":""})["json"] += event.delta.partial_json
+                        info = blocks.get(event.index)
+                        if info is not None and "json" in info:
+                            info["json"] += event.delta.partial_json
                     elif event.delta.type == 'thinking_delta':
                         # 思考内容只驱动指示器（暗灰、\r 原地刷新），绝不 append 进
                         # events 列表：一旦进入就会被存入会话历史并重放，污染上下文

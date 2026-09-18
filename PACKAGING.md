@@ -10,12 +10,14 @@ build-exe.cmd
 
 | 文件 | 说明 |
 |---|---|
-| `x-code Setup <版本>.exe` | NSIS 安装包（可选安装目录、创建桌面快捷方式） |
-| `x-code <版本>.exe` | 便携版，单个 exe 双击即用 |
+| `x-code_0.1.0_x64-setup.exe` | NSIS 安装包（当前用户安装, 可选安装目录） |
 
-两个包都是 **Electron 壳 + PyInstaller 冻结的 Python 后端** 组合：启动时 Electron 拉起
-`resources\server\x-code-server.exe`（默认监听 127.0.0.1:8000），窗口加载本地服务；如果
-8000 端口已有 x-code 在跑则直接复用，不重复拉进程。
+技术栈：**Tauri 2 壳（Rust + 系统 WebView2）+ PyInstaller 冻结的 Python 后端**。
+启动时 Tauri 拉起 `resources\server\x-code-server.exe`（默认监听 127.0.0.1:8000），
+WebView2 窗口加载本地服务；如果 8000 端口已有 x-code 在跑则直接复用，不重复拉进程。
+
+> 已从 Electron 迁移到 Tauri（安装包从 ~133MB 降到 ~28MB）。Electron 相关的
+> `electron/`、`node_modules`、`package.json` 保留但不再参与打包，后续可清理。
 
 ## 端口自动避让
 
@@ -31,14 +33,19 @@ build-exe.cmd
 
 会话记录、多 agent 存档同样存于 `~/.x-code\`，与 exe 安装位置无关，升级覆盖安装不丢数据。
 
+**运行前提**：Windows 10/11 自带 WebView2 运行时（Tauri 渲染层）。极少数精简系统
+可能没有，安装包会引导安装，或从微软官网下载 WebView2 Runtime。
+
 ## 各部分职责
 
 | 文件 | 作用 |
 |---|---|
-| `build-exe.cmd` | 一键打包入口：装 PyInstaller → 冻结后端 → npm install → electron-builder |
+| `build-exe.cmd` | 一键打包入口：装 PyInstaller → 冻结后端 → cargo tauri build |
 | `build/server/x-code-server.exe` | PyInstaller 产物（中间产物），`static/` 已打入 exe 内部 |
-| `package.json` → `build` | electron-builder 配置：后端 exe 经 `extraResources` 进安装包，窗口图标 `build/icon.ico` |
-| `electron/main.js` | `app.isPackaged` 时自动改拉冻结后端，cwd 指向 `~/.x-code`；开发态仍用 `.venv` 的 `python server.py` |
+| `src-tauri/tauri.conf.json` | Tauri 配置：窗口、NSIS 打包、后端 exe 经 `bundle.resources` 进安装包 |
+| `src-tauri/src/main.rs` | 桌面壳主体：探活/拉后端/整树杀、令牌门禁、单实例、外部链接转系统浏览器 |
+| `src-tauri/icons/icon.ico` | 应用图标（由 `static/icon.png` 转制，256px PNG 直嵌 ICO） |
+| `src-tauri/server/x-code-server.exe` | 打包前从 `build/server/` 复制来的后端（打包脚本自动做） |
 
 ## 常见问题
 
@@ -47,5 +54,5 @@ build-exe.cmd
 - **端口**：默认 8000，被占自动避让 8010–8019（实际端口见 `~/.x-code/port`）；
   可用 `--port` 参数或 `XCODE_PORT` 环境变量固定。
 - **杀毒软件误报**：PyInstaller onefile 常见误报，可换 onedir（去掉 `--onefile`，并把
-  `extraResources` 的 filter 放行目录）或对 exe 做签名。
+  tauri.conf.json 的 resources 放行目录）或对 exe 做签名。
 - **改了前端代码要重新打包吗**：要。`static/` 是打进展物内部的，不是运行时从磁盘读的。

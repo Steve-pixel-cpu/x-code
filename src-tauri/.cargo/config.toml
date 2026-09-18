@@ -1,0 +1,3 @@
+[build]
+# 用户级 ~/.cargo/config.toml 的 target-dir 是相对路径, 会随 cwd 漂移; 这里固定到项目内
+target-dir = "target"

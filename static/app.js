@@ -42,15 +42,19 @@ function runOf(id) {
       queued: false,          // 在全局并发队列中等待槽位
       pendingPerm: null,      // 待审批的 permission_request
       activeToolCard: null,   // 当前流式中的工具卡片（配对 tool_result）
+      liveToolCards: {},      // 流式中全部待完成工具卡: tool_use id → 卡片（防乱序/丢事件漏配）
       curBubble: null,        // 当前流式中的正文气泡
       curThinking: null,      // 当前流式中的思考行 { el, t0 }
       toolResultIndex: {},    // 历史回放: tool_use id → 卡片（等结果块配对）
+      reconnectTimer: null,   // WS 断线重连定时器
+      reconnectAttempts: 0,   // 连续重连次数（成功后归零）
       currentWorkdir: null,   // 该会话的工作目录（messages 接口返回）
       pendingSends: [],       // WS 建立期间待发的消息（onopen 后冲刷）
       queue: [],              // 待发送消息（本轮进行中追加, 停在输入框上方卡片）
       unread: 0,              // 后台完成/待审批的未读计数
       loaded: false,          // 历史是否已加载过（首次切入必拉）
       loading: false,         // 历史加载进行中（防并发重复拉取）
+      everConnected: false,   // 该会话 WS 是否成功连过（区分首次连接与断线重连）
     };
   }
   return state.runs[id];
@@ -711,6 +715,44 @@ $("doc-title").onclick = () => {
 /* ============================================================
  * 会话切换 / 新建 / 历史回放
  * ============================================================ */
+/* 拉取并渲染会话历史。首次切入与断线重同步共用:
+ * 重同步会替换整列 DOM, 旧的流式指针一并作废——
+ * 断连窗口内丢掉的事件以服务端落盘的历史为准。 */
+async function loadSessionHistory(id) {
+  const run = runOf(id), col = colOf(id);
+  run.loading = true;
+  col.innerHTML = '<div class="empty-state"><h2>加载中…</h2></div>';
+  run.toolResultIndex = {};
+  try {
+    const r = await fetch(`/api/sessions/${id}/messages`);
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const data = await r.json();
+    run.currentWorkdir = data.workdir || null;
+    flushAssistantBubble(run);
+    run.curBubble = null;
+    run.curThinking = null;
+    run.activeToolCard = null;
+    run.liveToolCards = {};
+    pinnedCol = col; pinnedRun = run;
+    col.innerHTML = "";
+    for (const m of data.messages) renderHistoryMessage(m);
+    // 悬空 tool_use 收口: 轮次早已结束的, 结果永远来不了;
+    // 仍在跑的轮次保留"运行中", 等活动流的 tool_result 按 id 配对闭合
+    if (!run.busy) {
+      col.querySelectorAll('.tool-row[data-state="run"]').forEach(el => setToolState(el, "stopped"));
+    }
+    pinnedCol = null; pinnedRun = null;
+    run.loaded = true;
+  } catch (e) {
+    col.innerHTML = "";
+    pinnedCol = col; pinnedRun = run;
+    addNoteBubble("err", "加载历史失败: " + e.message);
+    pinnedCol = null; pinnedRun = null;
+  } finally {
+    run.loading = false;
+  }
+}
+
 async function selectSession(id) {
   saveCurrentInput();           // 切走前保存当前会话的未发送输入
   state.draft = false;
@@ -722,35 +764,11 @@ async function selectSession(id) {
   refreshDocTitle();
   renderSessionList();          // 未读标识切换
   connectWs(id);                // 已有连接则复用; 旧会话的 WS 原样保留, 后台继续跑
-  const col = colOf(id);
+  colOf(id);   // 确保该会话的消息列已创建（惰性建列）
   showCol(id);
   // 历史只在首次切入时拉一次; 之后切换不再重拉——流式 DOM 一直活着,
   // 后台轮次的内容就写在本列里, 切回即所见
-  if (!run.loaded && !run.loading) {
-    run.loading = true;
-    col.innerHTML = '<div class="empty-state"><h2>加载中…</h2></div>';
-    run.toolResultIndex = {};
-    try {
-      const r = await fetch(`/api/sessions/${id}/messages`);
-      if (!r.ok) throw new Error(`HTTP ${r.status}`);
-      const data = await r.json();
-      run.currentWorkdir = data.workdir || null;
-      pinnedCol = col; pinnedRun = run;
-      col.innerHTML = "";
-      for (const m of data.messages) renderHistoryMessage(m);
-      // 历史里的悬空 tool_use（旧打断轮次没写回结果）: 不该永远转圈
-      col.querySelectorAll('.tool-row[data-state="run"]').forEach(el => setToolState(el, "stopped"));
-      pinnedCol = null; pinnedRun = null;
-      run.loaded = true;
-    } catch (e) {
-      col.innerHTML = "";
-      pinnedCol = col; pinnedRun = run;
-      addNoteBubble("err", "加载历史失败: " + e.message);
-      pinnedCol = null; pinnedRun = null;
-    } finally {
-      run.loading = false;
-    }
-  }
+  if (!run.loaded && !run.loading) await loadSessionHistory(id);
   run.unread = 0;               // 回到前台看完了, 未读清零
   renderSessionList();
   refreshWorkdirTag();
@@ -978,14 +996,23 @@ function connectWs(id) {
 
   ws.onopen = () => {
     if (id === state.sessionId) setConn("on", "已连接");
+    run.reconnectAttempts = 0;
     // 首条消息在 WS 建立期间入队，连接好了统一发出
     const pending = run.pendingSends;
     run.pendingSends = [];
     for (const p of pending) ws.send(JSON.stringify(p));
+    // 断线重连后的重同步: 断连窗口内的工具/正文事件已丢,
+    // 重拉历史替换整列, 丢配的卡片不会以"运行中"僵住。
+    // 仅在重连时做——草稿首发是"先画乐观气泡再 connectWs",
+    // 而 turn 落盘只在结束时, 首连就重拉会拿空历史把用户消息抹掉
+    const reconnected = run.everConnected;
+    run.everConnected = true;
+    if (reconnected && run.loaded && !run.loading) loadSessionHistory(id);
   };
   ws.onclose = () => {
     if (id === state.sessionId) setConn("", "已断开");
     if (run.ws === ws) run.ws = null;
+    scheduleReconnect(id);
   };
   ws.onerror = () => { if (id === state.sessionId) setConn("err", "连接错误"); };
   ws.onmessage = ev => {
@@ -997,12 +1024,32 @@ function connectWs(id) {
 
 function closeWs(id) {
   const run = id ? state.runs[id] : null;
-  if (run && run.ws) {
-    const ws = run.ws;
-    run.ws = null;
-    ws.onclose = null;   // 防止触发断连提示
-    ws.close();
+  if (run) {
+    if (run.reconnectTimer) { clearTimeout(run.reconnectTimer); run.reconnectTimer = null; }
+    if (run.ws) {
+      const ws = run.ws;
+      run.ws = null;
+      ws.onclose = null;   // 防止触发断连提示
+      ws.close();
+    }
   }
+}
+
+/* 断线自动重连（服务重启 / 网络闪断）: 指数退避至 10s, 最多 40 次。
+ * 恢复后的历史对齐在 ws.onopen 里做——丢掉的事件以落盘历史为准。 */
+function scheduleReconnect(id) {
+  const run = runOf(id);
+  if (run.reconnectTimer) return;
+  if (++run.reconnectAttempts > 40) {
+    if (id === state.sessionId) setConn("err", "重连失败, 切换会话可重试");
+    return;
+  }
+  const delay = Math.min(2500 * run.reconnectAttempts, 10000);
+  run.reconnectTimer = setTimeout(() => {
+    run.reconnectTimer = null;
+    if (run.ws) return;   // 已被 selectSession / 手动重连抢先
+    connectWs(id);
+  }, delay);
 }
 
 /* ============================================================
@@ -1027,10 +1074,7 @@ function handleServerMessage(msg, sid) {
       run.queued = false;
       run.pendingPerm = null;
       // 轮次收口: 悬空工具行标"已中断", 清掉流式指针
-      if (run.activeToolCard && run.activeToolCard.dataset.state === "run") {
-        setToolState(run.activeToolCard, "stopped");
-      }
-      run.activeToolCard = null;
+      sweepPendingToolCards(run);
       run.curBubble = null;
       run.curThinking = null;
     } else if (msg.type === "turn_started") {
@@ -1206,20 +1250,42 @@ function onToolUse(msg, sid) {
   const active = sid === state.sessionId;
   if (active) $("thinking").style.display = "none";
   flushAssistantBubble(run);   // 工具前先收掉流式中的正文气泡
-  run.activeToolCard = addToolCard({ id: msg.id, name: msg.name, input: msg.input }, colOf(sid));
+  const card = addToolCard({ id: msg.id, name: msg.name, input: msg.input }, colOf(sid));
+  if (msg.id) run.liveToolCards[msg.id] = card;   // 按 id 登记, 结果精确配对
+  run.activeToolCard = card;
 }
 
 function onToolResult(msg, sid) {
   const run = runOf(sid);
   flushAssistantBubble(run);
-  // 优先配对流式卡片；配不上（历史遗留）就新开卡片兜底
-  const card = run.activeToolCard;
+  // 配对优先级: 流式卡片(按 id) → 历史回放登记的卡片(断线重同步接缝) →
+  // 旧单槽位 → 都配不上(旧数据)才新开兜底卡片
+  let card = null;
+  if (msg.id && run.liveToolCards[msg.id]) {
+    card = run.liveToolCards[msg.id];
+    delete run.liveToolCards[msg.id];
+  }
+  if (!card && msg.id && run.toolResultIndex[msg.id]) {
+    card = run.toolResultIndex[msg.id];
+    delete run.toolResultIndex[msg.id];
+  }
+  if (!card && run.activeToolCard) card = run.activeToolCard;
   if (card) {
     completeToolCard(card, msg);
   } else {
-    const fallback = addToolCard({ id: msg.id, name: msg.name, input: msg.input }, colOf(sid));
-    completeToolCard(fallback, msg);
+    completeToolCard(addToolCard({ id: msg.id, name: msg.name, input: msg.input }, colOf(sid)), msg);
   }
+  if (run.activeToolCard === card) run.activeToolCard = null;
+}
+
+/* 轮次收口: 把该会话所有还挂在"运行中"的工具卡统一闭合为"已中断"
+ * （被打断/异常/断连丢事件, 结果永远来不了）。 */
+function sweepPendingToolCards(run) {
+  const sweep = c => { if (c && c.dataset.state === "run") setToolState(c, "stopped"); };
+  Object.values(run.liveToolCards || {}).forEach(sweep);
+  Object.values(run.toolResultIndex || {}).forEach(sweep);
+  run.liveToolCards = {};
+  run.toolResultIndex = {};
   run.activeToolCard = null;
 }
 
@@ -1267,10 +1333,7 @@ function endTurnUiReset() {
     run.unread = 0;             // 前台亲眼看完了, 未读清零
     flushAssistantBubble(run);
     // 轮次结束还有工具行停在"运行中"（被打断/异常, 结果永远来不了）: 收口
-    if (run.activeToolCard && run.activeToolCard.dataset.state === "run") {
-      setToolState(run.activeToolCard, "stopped");
-    }
-    run.activeToolCard = null;
+    sweepPendingToolCards(run);
     if (run.curThinking) onThinkingEnd({}, state.sessionId);   // 思考行兜底收口（客户端计时）
   }
   $("thinking").style.display = "none";

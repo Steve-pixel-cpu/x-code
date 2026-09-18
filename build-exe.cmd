@@ -1,12 +1,12 @@
 @echo off
 REM ============================================================
-REM x-code one-click packaging:
+REM x-code one-click packaging (Tauri):
 REM   [1/4] install PyInstaller into the project venv
 REM   [2/4] freeze server.py into build\server\x-code-server.exe
-REM   [3/4] npm install (electron + electron-builder)
-REM   [4/4] electron-builder --win -> NSIS installer + portable exe
-REM Output: dist\x-code Setup <ver>.exe and dist\x-code <ver>.exe
-REM Requirements: uv, Node.js/npm, project .venv ready
+REM   [3/4] copy backend exe into src-tauri\server (bundle resource)
+REM   [4/4] cargo tauri build -> NSIS installer
+REM Output: dist\x-code_<ver>_x64-setup.exe
+REM Requirements: uv, Rust toolchain (rustup), Node.js (tauri-cli via npm)
 REM ============================================================
 setlocal
 cd /d %~dp0
@@ -38,13 +38,14 @@ if not exist build\server mkdir build\server
 if errorlevel 1 exit /b 1
 
 echo.
-echo [3/4] Installing npm dependencies (electron-builder)...
-call npm install
+echo [3/4] Copying backend exe into src-tauri\server ...
+if not exist src-tauri\server mkdir src-tauri\server
+copy /y build\server\x-code-server.exe src-tauri\server\
 if errorlevel 1 exit /b 1
 
 echo.
-echo [4/4] Building desktop app (NSIS installer + portable)...
-call npx electron-builder --win
+echo [4/4] Building desktop app (Tauri, NSIS installer)...
+call npx tauri build
 if errorlevel 1 exit /b 1
 
 echo.

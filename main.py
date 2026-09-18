@@ -314,7 +314,7 @@ class CliToolExecutor:
     def __init__(self, registry: ToolRegistry):
         self.registry = registry
 
-    def execute(self, tool_name: str, input: str) -> str:
+    def execute(self, tool_name: str, input: str, tool_use_id: str | None = None) -> str:
         desc = describe_tool_input(input)
         print()
         print(c_cyan(f"⚙ 工具 {tool_name}" + (f"  {desc}" if desc else "")))

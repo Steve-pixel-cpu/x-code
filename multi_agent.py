@@ -72,7 +72,7 @@ class SilentToolExecutor:
     def __init__(self, registry: ToolRegistry):
         self.registry = registry
 
-    def execute(self, tool_name: str, input: str) -> str:
+    def execute(self, tool_name: str, input: str, tool_use_id: str | None = None) -> str:
         return self.registry.execute(tool_name, input)
 
 

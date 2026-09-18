@@ -1,15 +1,20 @@
 from typing import Protocol, Optional, List
+from concurrent.futures import ThreadPoolExecutor
+import contextvars
 
 from pydantic import BaseModel
 
 from api_client import AssistantEvent, TextDeltaEvent, ToolUseEvent, MessageStopEvent, ApiClient
 from compact import compact_session, CompactionConfig
-from hooks import HookRunner
+from hooks import HookRunner, HookResult
 from models import Message, TextContentBlock, AnyContentBlock, ToolContentBlock, Session
 from permissions import PermissionMode, PermissionPolicy, PermissionPrompter, PermissionDecision
 
 DEFAULT_MAX_ITERATIONS = 128
-DEFAULT_AUTO_COMPACT_THRESHOLD =  200_000
+# auto-compact 触发阈值: 必须明显低于模型真实上下文窗口——一次请求还要
+# 装 max_tokens=32768 的输出位, 阈值若贴着窗口设, 永远轮不到它触发,
+# 只会等 API 报 context length 而整轮炸掉。取 128k 窗口的 ~75%。
+DEFAULT_AUTO_COMPACT_THRESHOLD = 100_000
 # 单轮输出预算（output_tokens 含思考）。正常单次调用被服务端 max_tokens=32768
 # 硬顶，取两倍意味着只有"失控轮"（超长思考连环调用）会被拦下。
 DEFAULT_TURN_OUTPUT_BUDGET = 65_536
@@ -23,6 +28,13 @@ class TokenUsage(BaseModel):
 
     def total_tokens(self) -> int:
         return self.input_tokens + self.output_tokens + self.cache_creation_input_tokens + self.cache_read_input_tokens
+
+    def context_tokens(self) -> int:
+        """真实上下文占用: input + 缓存写入 + 缓存读。开 prompt caching 后
+        input_tokens 只计未命中部分, 单看它会严重低估。"""
+        return (self.input_tokens
+                + self.cache_creation_input_tokens
+                + self.cache_read_input_tokens)
 
 
 
@@ -58,7 +70,10 @@ class ToolError(Exception):
     ...
 
 class ToolExecutor(Protocol):
-    def execute(self, tool_name: str, input: str) -> str: ...
+    # tool_use_id: 事件镜像方（如 Web 端）靠它把结果配回工具卡;
+    # 并行执行后结果按完成序到达, 不能再靠 FIFO 猜配对
+    def execute(self, tool_name: str, input: str,
+                tool_use_id: Optional[str] = None) -> str: ...
     # 成功返回字符串，失败抛 ToolError
 
 
@@ -144,6 +159,8 @@ class TurnSummary(BaseModel):
     tool_results: list[Message]
     iterations: int
     usage: TokenUsage
+    # 语义 = "实际压缩了"（过阈值且确有消息被压掉）;
+    # 过阈值但消息数 <= preserve_recent 无东西可压时为 False
     auto_compacted: bool
     budget_exhausted: bool = False
     iterations_exhausted: bool = False
@@ -202,8 +219,12 @@ class ConversationRuntime:
     def set_thinking_level(self, level: str) -> None:
         self._thinking_level = level
 
-    def _process_tool_use(self, tool_block: ToolContentBlock, prompter: Optional[PermissionPrompter]=None)-> Message | None:
-
+    def _authorize_tool_use(self, tool_block: ToolContentBlock,
+                            prompter: Optional[PermissionPrompter]=None
+                            ) -> tuple[Optional[Message], Optional[HookResult]]:
+        """授权 + PreToolUse hook。必须串行: 交互式 prompter 要逐个弹问,
+        并发授权会串位。返回 (Message, None) = 已终局（拒绝/hook 拦下）;
+        返回 (None, pre_res) = 放行, 交执行管线。"""
         result = self._permission_policy.authorize(
             tool_name=tool_block.name,
             input=tool_block.input,
@@ -215,87 +236,102 @@ class ConversationRuntime:
                 name = tool_block.name,
                 output= result.reason,
                 is_error = True,
-            )
-        elif result.decision == PermissionDecision.ALLOW:
-            pre_res = self._hook_runner.run_pre_tool_use(
-                tool_name=tool_block.name,
-                tool_input=tool_block.input,
-            )
-            if pre_res.denied:
-                if pre_res.messages:
-                    pre_output = ("\n").join(pre_res.messages)
-                else:
-                    pre_output = f"PreToolUse hook denied tool {tool_block.name}."
-                return Message.tool_result(
-                    id = tool_block.id,
-                    name = tool_block.name,
-                    output = pre_output,
-                    is_error = True,
-                )
+            ), None
 
-            is_tool_error = False
-            try:
-                output = self._tool_executor.execute(
-                    tool_name=tool_block.name,
-                    input=tool_block.input,
-                )
-            except Exception as e:
-                output = str(e)
-                is_tool_error = True
-
-            tool_output = output
-            output = merge_hook_feedback(messages=pre_res.messages, output=output, denied=False)
-            post_res = self._hook_runner.run_post_tool_use(
-                tool_name=tool_block.name,
-                tool_input=tool_block.input,
-                tool_output=tool_output,
-                is_error= is_tool_error,
-            )
-            output = merge_hook_feedback(messages=post_res.messages, output=output, denied=post_res.denied)
-
+        pre_res = self._hook_runner.run_pre_tool_use(
+            tool_name=tool_block.name,
+            tool_input=tool_block.input,
+        )
+        if pre_res.denied:
+            if pre_res.messages:
+                pre_output = ("\n").join(pre_res.messages)
+            else:
+                pre_output = f"PreToolUse hook denied tool {tool_block.name}."
             return Message.tool_result(
                 id = tool_block.id,
                 name = tool_block.name,
-                output = output,
-                is_error = is_tool_error or post_res.denied,
+                output = pre_output,
+                is_error = True,
+            ), None
+        return None, pre_res
+
+    def _execute_tool(self, tool_block: ToolContentBlock, pre_res: HookResult) -> Message:
+        """执行管线: 工具本体 + Pre/Post hook 反馈合并。无共享可变状态,
+        同一条消息里相互独立的 tool_use 可由 run_turn 并发调度。"""
+        is_tool_error = False
+        try:
+            output = self._tool_executor.execute(
+                tool_name=tool_block.name,
+                input=tool_block.input,
+                tool_use_id=tool_block.id,
             )
+        except Exception as e:
+            output = str(e)
+            is_tool_error = True
+
+        tool_output = output
+        output = merge_hook_feedback(messages=pre_res.messages, output=output, denied=False)
+        post_res = self._hook_runner.run_post_tool_use(
+            tool_name=tool_block.name,
+            tool_input=tool_block.input,
+            tool_output=tool_output,
+            is_error= is_tool_error,
+        )
+        output = merge_hook_feedback(messages=post_res.messages, output=output, denied=post_res.denied)
+
+        return Message.tool_result(
+            id = tool_block.id,
+            name = tool_block.name,
+            output = output,
+            is_error = is_tool_error or post_res.denied,
+        )
+
+    def _process_tool_use(self, tool_block: ToolContentBlock, prompter: Optional[PermissionPrompter]=None)-> Message | None:
+        """单工具全流程（授权串行 → 执行）。串行路径的便捷入口。"""
+        finalized, pre_res = self._authorize_tool_use(tool_block, prompter)
+        if finalized is not None:
+            return finalized
+        return self._execute_tool(tool_block, pre_res)
     def compact(self)->  str:
         curr_session = self._session
         # 手动压缩: 0 让估算闸门恒过, 无条件压到 preserve_recent
-        compact_reslut = compact_session(
+        compact_result = compact_session(
             messages=curr_session.messages,
             config=CompactionConfig(
                 max_estimated_tokens=0
             ),
         )
-        if compact_reslut.removed_count == 0:
+        if compact_result.removed_count == 0:
             return "Nothing to compact!"
 
-        curr_session.messages = compact_reslut.compacted_messages
-        return f"Compact sussess! Remove count = {compact_reslut.removed_count}."
+        curr_session.messages = compact_result.compacted_messages
+        return f"Compact success! Remove count = {compact_result.removed_count}."
 
     def _maybe_auto_compact(self)-> bool:
-        # 信号: 最近一次调用的 input_tokens ≈ 当前上下文占用。
-        # 旧实现用累计 input（计费口径，单调涨），和上下文大小无关。
+        # 信号: 最近一次调用的真实上下文占用（input + 缓存读写, 见
+        # TokenUsage.context_tokens）。开缓存后 input_tokens 只算未命中
+        # 部分, 不能单看。传 max_estimated_tokens=0 是有意的——阈值已过
+        # 就让估算恒过闸, 无条件压到 preserve_recent, 并非"消息多就每轮压缩"
+        if not self._context_over_compact_threshold():
+            return False
+        curr_session = self._session
+        compact_result = compact_session(
+            messages=curr_session.messages,
+            config=CompactionConfig(
+                max_estimated_tokens = 0
+            ),
+        )
+        # 语义: auto_compacted = "实际压缩了"。过阈值但没东西可压
+        # （消息数 <= preserve_recent, 如单条超大粘贴）时不亮信号
+        if compact_result.removed_count == 0:
+            return False
+        curr_session.messages = compact_result.compacted_messages
+
+        return True
+
+    def _context_over_compact_threshold(self) -> bool:
         latest = self.usage().current_turn_usage()
-        # 真正的闸门是下面这个真实用量阈值; 传 max_estimated_tokens=0 是
-        # 有意的——阈值已过就让估算恒过闸, 无条件压到 preserve_recent,
-        # 并非"消息多就每轮压缩"
-        if latest.input_tokens >= self._auto_compact_threshold:
-            curr_session = self._session
-            compact_reslut = compact_session(
-                messages=curr_session.messages,
-                config=CompactionConfig(
-                    max_estimated_tokens = 0
-                ),
-            )
-            if compact_reslut.removed_count == 0:
-                return True
-            curr_session.messages = compact_reslut.compacted_messages
-
-            return True
-
-        return False
+        return latest.context_tokens() >= self._auto_compact_threshold
 
 
 
@@ -307,6 +343,7 @@ class ConversationRuntime:
         turn_output_tokens = 0       # 本轮累计输出（含思考），循环层预算的计量
         budget_exhausted = False
         iterations_exhausted = False
+        auto_compacted = False
 
         curr_session.messages.append(Message.user_text(user_input))
         while True:
@@ -319,6 +356,11 @@ class ConversationRuntime:
             if iterations >= self._max_iterations:
                 iterations_exhausted = True
                 break
+            # 压缩检查点与预算检查同位置: 此刻历史一致, 压缩不会产生悬空
+            # tool_use。挪进循环让超限发生在单轮中途也能就地降载——在请求
+            # 还能成功时压缩, 而不是等上下文撑爆 API 报 400 掀翻整轮。
+            if self._maybe_auto_compact():
+                auto_compacted = True
 
             iterations += 1
             events = self._api_client.stream(
@@ -341,13 +383,40 @@ class ConversationRuntime:
             if not tool_use_blocks:
                 break
 
-            for block in tool_use_blocks:
-                tool_result_msg = self._process_tool_use(block,prompter)
+            # 授权串行（交互式 prompter 逐个弹问）, 执行并行: 同一条消息里
+            # 的多个 tool_use 本就不依赖彼此结果, 并行省掉逐个冷启动子进程
+            # 的串行等待。结果按原位回填, 历史顺序与串行完全一致。
+            finalized: list[Optional[Message]] = [None] * len(tool_use_blocks)
+            pending: list[tuple[int, ToolContentBlock, HookResult]] = []
+            for i, block in enumerate(tool_use_blocks):
+                done, pre_res = self._authorize_tool_use(block, prompter)
+                if done is not None:
+                    finalized[i] = done
+                else:
+                    pending.append((i, block, pre_res))
+
+            if len(pending) > 1:
+                # 池线程必须能看到本轮绑定（Web 端 emit/workdir 按 contextvars
+                # 路由）: 每个任务各自 copy_context()。不能共享同一份快照——
+                # Context 同一时刻只允许被一个线程进入, 并发 ctx.run 会炸出
+                # "cannot enter context: already entered"。
+                with ThreadPoolExecutor(max_workers=min(4, len(pending))) as pool:
+                    futures = [pool.submit(contextvars.copy_context().run,
+                                           self._execute_tool, b, pre)
+                               for _, b, pre in pending]
+                    for (i, _, _), fut in zip(pending, futures):
+                        finalized[i] = fut.result()
+            else:
+                for i, block, pre_res in pending:
+                    finalized[i] = self._execute_tool(block, pre_res)
+
+            for tool_result_msg in finalized:
                 if tool_result_msg:
                     curr_session.messages.append(tool_result_msg)
                     tool_results.append(tool_result_msg)
 
-        auto_compacted = self._maybe_auto_compact()
+        if self._maybe_auto_compact():
+            auto_compacted = True
 
         return TurnSummary(
             assistant_messages=assistant_messages,

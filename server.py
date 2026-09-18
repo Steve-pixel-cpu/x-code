@@ -27,6 +27,8 @@ import sys
 import threading
 import time
 from contextlib import suppress
+from contextvars import ContextVar
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Optional
@@ -158,47 +160,53 @@ _CANCEL_SENTINEL = "__cancelled__"
 # 按线程路由事件: 内核挂点 → 当前会话的 emit
 # ============================================================================
 
+@dataclass
+class _TurnBinding:
+    """一轮对话挂在工作线程上的三件套。"""
+    emit: Callable
+    workdir: Optional[str] = None
+    should_stop: Optional[Callable[[], bool]] = None
+
+
+_binding_var: ContextVar[Optional[_TurnBinding]] = ContextVar(
+    "xcode_turn_binding", default=None)
+
+
 class TurnDispatch:
-    """按线程号路由事件。
+    """按上下文路由事件。
 
     工作线程开跑一轮前 bind(emit)，结束后 unbind()。内核侧三个挂点
     （SSE 流代理 / 工具注册表 / 权限桥）在事件发生时用 current() 拿到
-    本线程绑定的 emit——多个会话各开各的线程，互不串线。
+    本轮绑定的 emit——多个会话各开各的线程，互不串线。
     同时绑定本轮的会话工作目录，工具执行时取 current_workdir()；
     绑定 should_stop 勾子，流式代理逐事件检查以支持即时打断。
-    """
 
-    def __init__(self):
-        self._emit_by_thread: dict[int, Callable] = {}
-        self._workdir_by_thread: dict[int, Optional[str]] = {}
-        self._stop_by_thread: dict[int, Callable[[], bool]] = {}
-        self._lock = threading.Lock()
+    旧实现按线程号存 emit——runtime 串行执行工具时成立；工具并行执行
+    进线程池后，挂点可能运行在池线程上, 线程号字典查不到绑定, tool_result
+    会被静默吞掉。改用 contextvars：runtime 提交并行任务时带 copy_context()
+    快照, 池内线程读到本轮的绑定; turn 工作线程各设各的上下文, 并发轮次
+    依然互不串线。
+    """
 
     def bind(self, emit: Callable, workdir: Optional[str] = None,
              should_stop: Optional[Callable[[], bool]] = None) -> None:
-        with self._lock:
-            self._emit_by_thread[threading.get_ident()] = emit
-            self._workdir_by_thread[threading.get_ident()] = workdir
-            self._stop_by_thread[threading.get_ident()] = should_stop
+        _binding_var.set(_TurnBinding(emit=emit, workdir=workdir,
+                                      should_stop=should_stop))
 
     def unbind(self) -> None:
-        with self._lock:
-            ident = threading.get_ident()
-            self._emit_by_thread.pop(ident, None)
-            self._workdir_by_thread.pop(ident, None)
-            self._stop_by_thread.pop(ident, None)
+        _binding_var.set(None)
 
     def current(self) -> Optional[Callable]:
-        with self._lock:
-            return self._emit_by_thread.get(threading.get_ident())
+        binding = _binding_var.get()
+        return binding.emit if binding else None
 
     def current_workdir(self) -> Optional[str]:
-        with self._lock:
-            return self._workdir_by_thread.get(threading.get_ident())
+        binding = _binding_var.get()
+        return binding.workdir if binding else None
 
     def current_should_stop(self) -> Optional[Callable[[], bool]]:
-        with self._lock:
-            return self._stop_by_thread.get(threading.get_ident())
+        binding = _binding_var.get()
+        return binding.should_stop if binding else None
 
 
 dispatch = TurnDispatch()
@@ -356,30 +364,32 @@ _apply_provider_config(_provider_cfg)
 
 
 class EmittingToolRegistry(ToolRegistry):
-    """委托真实 registry 执行；由工作线程调用时顺带把 tool_result 推给浏览器。
+    """委托真实 registry 执行；执行完把 tool_result 推给浏览器。
 
     被权限拒绝的工具到不了这里（runtime 直接生成 error result），不会产生假结果。
     执行时从 dispatch 取本轮绑定的会话工作目录注入工具（bash 的 cwd、
-    读写文件的相对路径解析基点）。
+    读写文件的相对路径解析基点）。并行执行时本方法跑在池线程上, 依靠
+    runtime 提交任务时的 contextvars 快照拿到本轮绑定。
     """
 
     def __init__(self, inner: ToolRegistry):
         super().__init__()
         self._inner = inner
 
-    def execute(self, name: str, tool_input_json: str) -> str:
+    def execute(self, name: str, tool_input_json: str,
+                tool_use_id: Optional[str] = None) -> str:
         emit = dispatch.current()
         try:
             result = self._inner.execute(
                 name, tool_input_json, workdir=dispatch.current_workdir())
         except Exception as e:
             if emit:
-                emit({"type": "tool_result", "name": name, "input": tool_input_json,
-                      "output": str(e), "is_error": True})
+                emit({"type": "tool_result", "id": tool_use_id, "name": name,
+                      "input": tool_input_json, "output": str(e), "is_error": True})
             raise
         if emit:
-            emit({"type": "tool_result", "name": name, "input": tool_input_json,
-                  "output": result, "is_error": False})
+            emit({"type": "tool_result", "id": tool_use_id, "name": name,
+                  "input": tool_input_json, "output": result, "is_error": False})
         return result
 
 
@@ -393,9 +403,9 @@ registry = EmittingToolRegistry(build_registry())
 class TurnEmitter:
     """每轮事件出口: 线程安全转发 + 补齐 tool_use/tool_result 的配对 id。
 
-    runtime 串行处理 tool_use（逐个授权→执行），tool_result 与 tool_use
-    严格 FIFO 对应——开工具卡时记下 id，结果到达时弹出最老的一个补进去，
-    前端就能按 id 精确配对卡片。
+    runtime 直传 tool_use_id 时（并行执行后结果按完成序到达, FIFO 不可靠）
+    按显式 id 配对并从待配队列摘除; 旧式无 id 的事件（权限拒绝路径）退回
+    FIFO——弹出最老的一个补进去, 前端按 id 精确配对卡片。
     """
 
     def __init__(self, sink: Callable):
@@ -408,9 +418,14 @@ class TurnEmitter:
             if payload.get("id"):
                 self._pending_tool_ids.append(payload["id"])
         elif ptype == "tool_result":
-            payload["id"] = (
-                self._pending_tool_ids.pop(0) if self._pending_tool_ids else None
-            )
+            if payload.get("id"):
+                # 并行下结果乱序到达: 按真实 id 摘除, 不按到达序猜
+                if payload["id"] in self._pending_tool_ids:
+                    self._pending_tool_ids.remove(payload["id"])
+            else:
+                payload["id"] = (
+                    self._pending_tool_ids.pop(0) if self._pending_tool_ids else None
+                )
         self._sink(payload)
 
 
@@ -502,6 +517,10 @@ class WebSession:
         self.persisted_count = 0       # 已落盘的消息条数（本轮从这之后保存）
         self.busy = False              # 并发守卫: 一轮对话进行中
         self.stop_requested = False
+        # 插队抢占标记: queue_promote 置位, worker 收尾时消费——被抢占任务
+        # 合成接力消息回队尾, 默认不遗弃; 手动停止会清除（叫停 = 彻底停）
+        self.preempted = False
+        self.current_text: Optional[str] = None  # 当前轮的用户消息原文（抢占接力用）
         self.titled = store.get_title(session_id) is not None  # 自动命名一次
         self.workdir = store.get_workdir(session_id)  # 会话工作目录（项目）
         # 会话级思考等级: 初值取全局默认; 切换只影响本会话（runtime 注入）
@@ -653,6 +672,8 @@ def _start_turn(web_session: WebSession, text: str, emit: Callable) -> None:
     """
     web_session.busy = True
     web_session.stop_requested = False
+    web_session.preempted = False
+    web_session.current_text = text   # 插队接力时引用原文用
     web_session.persisted_count = len(web_session.runtime.session().messages)
     emitter = TurnEmitter(emit)
     prompter = WebPermissionPrompter(emitter)
@@ -684,6 +705,9 @@ def _spawn_turn_thread(web_session: WebSession, text: str,
             # 用户主动打断: 修补悬空 tool_use 后照常落盘（朝安全侧, 与 CLI Ctrl+C 同路径）
             repair_interrupted_turn(web_session.runtime.session())
             persist_turn(web_session)
+            # 插队抢占（区别于手动停止）: 被打断的任务合成接力消息回队尾,
+            # 默认不遗弃——插队只改变先后顺序
+            _schedule_continuation(web_session)
             emitter({"type": "turn_done", "interrupted": True, "iterations": 0,
                      "budget_exhausted": False, "iterations_exhausted": False})
         except Exception as e:
@@ -696,6 +720,8 @@ def _spawn_turn_thread(web_session: WebSession, text: str,
                      "budget_exhausted": False, "iterations_exhausted": False})
         else:
             persist_turn(web_session)
+            # 正常跑完（插队请求可能没来得及生效）: 无被遗弃任务, 清掉标记
+            web_session.preempted = False
             needs_title = not web_session.titled
             emitter({
                 "type": "turn_done",
@@ -779,11 +805,54 @@ def request_stop(web_session: WebSession) -> None:
     if not web_session.busy:
         return
     web_session.stop_requested = True
+    # 手动叫停优先于插队续跑: 用户叫停的意图是彻底停下, 被打断的任务不回队
+    web_session.preempted = False
     if web_session.pending:
         web_session.pending.clear()
         web_session.broadcast({"type": "turn_queue_cleared"})
     if web_session.prompter is not None:
         web_session.prompter.cancel()
+
+
+def promote_pending(web_session: WebSession, text: str) -> bool:
+    """「立即」插队: 把待发送区里的这条提到最前并叫停当前轮。
+
+    回落后它作为下一棒立刻接力开跑（朝安全侧, 同 request_stop 但不清空
+    待发送区）。文本不在待发送区时静默忽略（返回 False）——它可能已经
+    开跑, 此刻叫停只会误杀当前轮。被抢占的当前任务由 worker 在收尾时
+    经 _schedule_continuation 回到队尾, 默认不遗弃。
+    """
+    if not (text and web_session.busy and text in web_session.pending):
+        return False
+    web_session.pending.remove(text)
+    web_session.pending.insert(0, text)
+    web_session.preempted = True
+    web_session.stop_requested = True
+    if web_session.prompter is not None:
+        web_session.prompter.cancel()
+    return True
+
+
+def continuation_text(task: str) -> str:
+    """被抢占任务的接力消息: 引用原文, 让模型接着历史里的部分进度做。"""
+    brief = " ".join(task.split())
+    if len(brief) > 60:
+        brief = brief[:60] + "…"
+    return (f"刚才那条「{brief}」被插队打断了, 还没做完, 请继续把它完成。"
+            f"（进度在上方历史里; 若已经完成或无需继续, 直接说明, 不要重做。）")
+
+
+def _schedule_continuation(web_session: WebSession) -> None:
+    """插队抢占生效时: 被打断的任务合成接力消息放回队尾, 默认不遗弃。
+
+    只在插队路径调用（TurnInterrupted 收尾处）; 手动停止已先清掉
+    preempted 标记, 走不到这里。
+    """
+    if not web_session.preempted:
+        return
+    web_session.preempted = False
+    if web_session.current_text:
+        web_session.pending.append(continuation_text(web_session.current_text))
 
 
 # ============================================================================
@@ -1189,16 +1258,10 @@ async def ws_endpoint(websocket: WebSocket, session_id: str):
 
             elif msg_type == "queue_promote":
                 # 「立即」: 把待发送区里的这条提到最前, 并叫停当前轮——
-                # 回落后它作为下一棒立刻接力开跑（朝安全侧, 同 request_stop
-                # 但不清空待发送区）。文本不在待发送区时静默忽略:
-                # 它可能已经开跑, 此刻叫停只会误杀当前轮
+                # 回落后它作为下一棒立刻接力开跑。被抢占的当前任务在
+                # worker 收尾时自动回队尾（默认不遗弃, 见 promote_pending）
                 text = str(raw.get("text") or "").strip()
-                if text and web_session.busy and text in web_session.pending:
-                    web_session.pending.remove(text)
-                    web_session.pending.insert(0, text)
-                    web_session.stop_requested = True
-                    if web_session.prompter is not None:
-                        web_session.prompter.cancel()
+                promote_pending(web_session, text)
 
             elif msg_type == "queue_remove":
                 # 编辑/删除待发送卡片: 从待发送区移除首个匹配文本, 静默无回执

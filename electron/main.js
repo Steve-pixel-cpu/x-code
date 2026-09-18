@@ -68,14 +68,17 @@ function pingServer(port, timeoutMs) {
 
 function startServer() {
   if (app.isPackaged) {
-    // 打包态: 后端是 PyInstaller 冻结的单文件 exe, 随安装包放在资源目录;
+    // 打包态: 后端是 PyInstaller 冻结的单文件二进制, 随安装包放在资源目录
+    // （Windows: x-code-server.exe / macOS·Linux: x-code-server）;
     // cwd 指到用户目录 —— .env 由后端从 ~/.x-code 读取, 会话/配置也在那里
-    const exe = path.join(process.resourcesPath, "server", "x-code-server.exe");
+    const exe = path.join(process.resourcesPath, "server",
+      process.platform === "win32" ? "x-code-server.exe" : "x-code-server");
     const dataDir = path.join(app.getPath("home"), ".x-code");
     fs.mkdirSync(dataDir, { recursive: true });
     const proc = spawn(exe, [], {
       cwd: dataDir,
       windowsHide: true,
+      detached: process.platform !== "win32",   // posix: 独立进程组, 退出时整组杀
       stdio: ["ignore", "pipe", "pipe"],
     });
     proc.stdout.on("data", (d) => process.stdout.write(`[server] ${d}`));
@@ -88,12 +91,15 @@ function startServer() {
     });
     return proc;
   }
-  // 开发态: 优先用项目 venv
-  const pyExe = path.join(ROOT, ".venv", "Scripts", "python.exe");
+  // 开发态: 优先用项目 venv（Windows: Scripts/python.exe, posix: bin/python）
+  const pyExe = process.platform === "win32"
+    ? path.join(ROOT, ".venv", "Scripts", "python.exe")
+    : path.join(ROOT, ".venv", "bin", "python");
   const cmd = fs.existsSync(pyExe) ? pyExe : "python";
   const proc = spawn(cmd, [path.join(ROOT, "server.py")], {
     cwd: ROOT,
     windowsHide: true,
+    detached: process.platform !== "win32",
     stdio: ["ignore", "pipe", "pipe"],
   });
   proc.stdout.on("data", (d) => process.stdout.write(`[server] ${d}`));

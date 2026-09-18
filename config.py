@@ -52,8 +52,14 @@ class RuntimeFeatureConfig(BaseModel):
     # 默认与 runtime.DEFAULT_MAX_ITERATIONS 对齐。10 是历史占位值，
     # 接线前从未生效——真放出来正常任务一轮就会被掐断
     max_iterations: int = 128
-    token_budget: int = 200_000
-    thinking_level: str = "medium"
+    # auto-compact 触发阈值。必须明显低于模型真实上下文窗口（还要给
+    # max_tokens 留位），否则永远轮不到它触发——只会等 API 报 context length。
+    # 取 128k 窗口的 ~75%，上下文过半即压，避免长会话每步拖着巨量历史。
+    token_budget: int = 100_000
+    # 默认 low: GLM 强制思考无法关闭, 输出 tokens 直接决定墙钟时间;
+    # medium/high 在简单步骤上烧 8k+ 思考纯付串行延迟。要深想按项目
+    # 配 thinkingLevel 或 CLAUDE_THINKING_LEVEL 覆盖。
+    thinking_level: str = "low"
     turn_token_budget: int = 65_536
 
 class RuntimeConfig(BaseModel):
@@ -150,7 +156,7 @@ class ConfigLoader:
             permission_mode = mode_map[raw_mode]
 
         # thinking_level: 思考深浅档位，budget 映射见 api_client.THINKING_LEVEL_TO_BUDGET
-        raw_level = merged.get("thinkingLevel", "medium")
+        raw_level = merged.get("thinkingLevel", "low")
         if not isinstance(raw_level, str) or raw_level.strip().lower() not in (
             "low", "medium", "high", "max",
         ):
@@ -163,7 +169,7 @@ class ConfigLoader:
             permission_mode=permission_mode,
             timeout=merged.get("timeout", 30),
             max_iterations=merged.get("maxIterations", 128),
-            token_budget=merged.get("tokenBudget", 200_000),
+            token_budget=merged.get("tokenBudget", 100_000),
             thinking_level=raw_level.strip().lower(),
             turn_token_budget=merged.get("turnTokenBudget", 65_536),
         )
