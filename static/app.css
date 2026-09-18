@@ -27,7 +27,7 @@
     --shadow-lg: 0 12px 40px rgba(0, 0, 0, .42);
     --shadow-pop: 0 4px 14px rgba(0, 0, 0, .26), 0 18px 50px rgba(0, 0, 0, .38);
     --pop-bg: rgba(30, 30, 38, .74);   /* 悬浮层玻璃底: 半透明 + 模糊 */
-    --content-w: min(1500px, calc(100% - 64px));
+    --content-w: min(1000px, calc(100% - 64px));
     --r-sm: 8px; --r-md: 12px; --r-lg: 16px; --r-xl: 20px;
     /* 等宽栈: 拉丁走 mono 字体, 中文回退到雅黑（否则 Windows 下会掉进宋体, 十分难看） */
     --font-mono: "Cascadia Code", "JetBrains Mono", Menlo, Consolas, "Microsoft YaHei", monospace;
@@ -64,7 +64,7 @@
     --shadow-lg: 0 12px 40px rgba(28, 26, 24, .16);
     --shadow-pop: 0 4px 14px rgba(28, 26, 24, .10), 0 18px 50px rgba(28, 26, 24, .18);
     --pop-bg: rgba(255, 255, 255, .78);   /* 悬浮层玻璃底: 半透明 + 模糊 */
-    --content-w: min(1500px, calc(100% - 64px));
+    --content-w: min(1000px, calc(100% - 64px));
     --hl-comment: #9a9ba3; --hl-keyword: #c9422a; --hl-string: #2e7d32;
     --hl-number: #a56211;  --hl-title: #1f6fbf;  --hl-attr: #7c3aad;
     --hl-type: #0e7c8c;    --hl-meta: #5f6068;   --hl-builtin: #0e7c8c;
@@ -379,6 +379,16 @@
   .msg-col { width: var(--content-w); margin: 0 auto; padding: 28px 32px 12px; display: none; }
   .msg-col.on { display: block; }
 
+  /* 欢迎态（新建任务）: 消息区收缩为内容高度, 与输入卡一起在主区垂直居中;
+     上下 auto 外边距均分剩余空间, 空间不足时自动退化为贴顶排列。
+     发出首条消息后移除 empty-view, 布局回到常规（输入卡落回底部） */
+  #pane.empty-view #messages { flex: 0 1 auto; margin-top: auto; overflow-y: hidden; }
+  #pane.empty-view #composer { margin-bottom: auto; padding-top: 26px; }
+  /* 欢迎态输入卡收窄居中, 不随主区拉满宽 */
+  #pane.empty-view #input-card { width: min(680px, 100%); }
+  #pane.empty-view .msg-col.on { padding-top: 10px; padding-bottom: 0; }
+  #pane.empty-view .empty-state { padding-top: 0; }
+
   /* 空状态 */
   .empty-state { text-align: center; padding-top: 12vh; }
   .empty-state .mark {
@@ -396,7 +406,18 @@
     display: block; width: 180px; margin: 0 auto -14px;
     opacity: .08; filter: grayscale(1); user-select: none;
   }
-  .ws-chip-row { display: flex; justify-content: center; margin: 26px 0 6px; }
+  /* 草稿态: 工作区选择条作为输入卡的顶部一条（同宽, 下缘分隔线） */
+  #ws-dock { display: none; }
+  #ws-dock:not(:empty) {
+    display: flex; align-items: center;
+    margin: -13px -14px 11px -17px;   /* 抵消卡片内边距, 顶满卡片上左右三边 */
+    padding: 7px 14px 7px 9px;
+    border-bottom: 1px solid var(--border);
+    background: color-mix(in srgb, var(--text) 3%, transparent);
+    border-radius: calc(var(--r-xl) - 1px) calc(var(--r-xl) - 1px) 0 0;
+  }
+  #ws-dock .ws-chip { border-color: transparent; background: none; }
+  #ws-dock .ws-chip.on { background: var(--surface-2); }
   .ws-chip {
     display: inline-flex; align-items: center; gap: 7px; max-width: 340px;
     padding: 5px 12px; border-radius: 999px;
@@ -436,7 +457,12 @@
   #ws-pop .ws-item .ws-check { flex: none; color: var(--accent); font-weight: 700; }
   #ws-pop .ws-item svg { flex: none; color: var(--text-3); }
   #ws-pop .ws-act { border-top: 1px solid var(--border); border-radius: 0; }
-  .sug-row { display: flex; gap: 10px; justify-content: center; flex-wrap: wrap; }
+  /* 草稿态: 建议 chips 挂在输入卡下方居中 */
+  #sug-dock { display: none; }
+  #sug-dock:not(:empty) {
+    display: flex; gap: 10px; justify-content: center; flex-wrap: wrap;
+    margin-top: 14px;
+  }
   .sug-chip {
     padding: 10px 16px; border: 1px solid var(--border-strong); border-radius: var(--r-md);
     background: var(--surface); color: var(--text-2); font-size: 13px;
@@ -690,7 +716,7 @@
   #input {
     width: 100%; resize: none; border: none; background: none;
     color: var(--text); font-family: inherit; font-size: 14px;
-    line-height: 1.55; max-height: 160px; padding: 2px 0 10px;
+    line-height: 1.55; max-height: 160px; min-height: 56px; padding: 2px 0 10px;
     display: block;
   }
   #input:focus { outline: none; }
@@ -709,6 +735,48 @@
     position: relative; z-index: 1;
   }
   #pane[data-view="settings"] > #settings-page { display: flex; }
+
+  /* ============ 初始化引导页: 未配置供应商时接管主区 ============ */
+  #pane[data-view="onboarding"] > #doc-header,
+  #pane[data-view="onboarding"] > #messages,
+  #pane[data-view="onboarding"] > #scroll-btn,
+  #pane[data-view="onboarding"] > #composer { display: none; }
+  #onboarding-page {
+    display: none; flex: 1; align-items: center; justify-content: center;
+    min-width: 0; min-height: 0; background: var(--bg);
+    position: relative; z-index: 1;
+  }
+  #pane[data-view="onboarding"] > #onboarding-page { display: flex; }
+  .ob-card {
+    width: min(460px, calc(100% - 48px));
+    border: 1px solid var(--border); border-radius: var(--r-xl);
+    background: var(--surface); box-shadow: var(--shadow-lg);
+    padding: 34px 38px 30px; text-align: center;
+  }
+  .ob-logo { width: 56px; height: 56px; border-radius: 16px; object-fit: cover; }
+  .ob-card h2 { font-size: 20px; font-weight: 700; margin: 14px 0 8px; }
+  .ob-desc { font-size: 13px; color: var(--text-2); line-height: 1.65; margin: 0 0 22px; }
+  .ob-field { margin-bottom: 14px; text-align: left; }
+  .ob-field label {
+    display: block; font-size: 12px; font-weight: 600;
+    color: var(--text-2); margin-bottom: 5px;
+  }
+  .ob-field .ob-opt { font-weight: 400; color: var(--text-3); }
+  .ob-field input {
+    width: 100%; box-sizing: border-box; font-family: inherit;
+    font-size: 13px; color: var(--text);
+    border: 1px solid var(--border-strong); border-radius: 8px;
+    background: var(--bg); padding: 8px 11px; transition: border-color .15s;
+  }
+  .ob-field input:focus { outline: none; border-color: var(--accent-border); }
+  .ob-err { font-size: 12.5px; color: var(--err); text-align: left; min-height: 18px; margin: 2px 0 6px; }
+  #ob-save {
+    width: 100%; padding: 9px 0; border: none; border-radius: 10px;
+    background: var(--accent); color: #fff; font-size: 13.5px; font-weight: 600;
+    font-family: inherit; cursor: pointer; transition: filter .15s;
+  }
+  #ob-save:hover { filter: brightness(1.08); }
+  #ob-save:disabled { filter: grayscale(.4) brightness(.9); cursor: default; }
   .sp-header {
     flex: none; display: flex; align-items: center; gap: 10px;
     height: 56px; padding: 0 22px; border-bottom: 1px solid var(--border);
@@ -870,6 +938,18 @@
   }
   .hex-input:focus { outline: none; border-color: var(--accent-border); }
   .hex-input.invalid { border-color: var(--err); }
+  /* 强调色预览块: 实时反映当前生效的 --accent, 点击调出系统取色器 */
+  .accent-swatch {
+    flex: none; width: 30px; height: 30px; padding: 0;
+    border: 1px solid var(--border-strong); border-radius: 7px;
+    background: var(--accent); cursor: pointer;
+    transition: transform .12s, border-color .15s, box-shadow .15s;
+  }
+  .accent-swatch:hover {
+    transform: scale(1.08);
+    border-color: var(--accent-border);
+    box-shadow: 0 0 0 3px var(--accent-soft);
+  }
 
   /* 设置页时侧栏切换为设置导航 */
   #sidebar.settings-view #side-chat { display: none; }

@@ -25,4 +25,5 @@ prompt_dev
 # Electron / Node
 node_modules/
 dist/
+build/
 

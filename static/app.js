@@ -695,6 +695,8 @@ async function selectSession(id) {
   saveCurrentInput();           // 切走前保存当前会话的未发送输入
   state.draft = false;
   state.sessionId = id;
+  $("pane").classList.remove("empty-view");   // 真实会话: 输入卡回到常规底部布局
+  renderDraftChrome();                        // 顺带清掉草稿态的工作区条/建议 chips
   const run = runOf(id);
   markActiveSession();
   refreshDocTitle();
@@ -747,22 +749,30 @@ const SUGGESTIONS = [
 ];
 
 function showEmptyState() {
+  $("pane").classList.add("empty-view");   // 欢迎态: 输入卡随欢迎内容垂直居中
   const col = msgCol();
   const h = new Date().getHours();
   const greet = h < 6 ? "夜深了" : h < 12 ? "上午好" : h < 14 ? "中午好" : h < 18 ? "下午好" : "晚上好";
-  const wsRow = state.draft
-    ? "<div class='ws-chip-row'><button class='ws-chip' id='ws-chip'></button></div>"
-    : "";
   col.innerHTML =
     "<div class='empty-state welcome'>" +
     "<img class='watermark' src='" + iconUrl() + "' alt=''>" +
     "<h2>" + greet + "呀，有什么想让我帮忙的吗</h2>" +
-    wsRow +
-    "<div class='sug-row'>" +
-    SUGGESTIONS.map(s => `<button class='sug-chip'>${escapeHtml(s)}</button>`).join("") +
-    "</div></div>";
+    "</div>";
+  renderDraftChrome();   // 工作区条/建议 chips 挂在输入卡上下, 不随消息列重绘
+}
+
+/* 草稿态: 工作区选择条贴输入卡顶部, 建议 chips 挂输入卡下方; 非草稿态清空 */
+function renderDraftChrome() {
+  const dock = $("ws-dock"), sug = $("sug-dock");
+  if (!state.draft) {
+    dock.innerHTML = "";
+    sug.innerHTML = "";
+    return;
+  }
+  dock.innerHTML = "<button class='ws-chip' id='ws-chip'></button>";
   renderWsChip();
-  col.querySelectorAll(".sug-chip").forEach(chip => {
+  sug.innerHTML = SUGGESTIONS.map(s => `<button class='sug-chip'>${escapeHtml(s)}</button>`).join("");
+  sug.querySelectorAll(".sug-chip").forEach(chip => {
     chip.onclick = () => {
       $("input").value = chip.textContent;
       autoGrow($("input"));
@@ -1490,6 +1500,9 @@ async function sendCurrent() {
     }
   }
   msgCol().querySelector(".empty-state")?.remove();
+  $("pane").classList.remove("empty-view");   // 有内容了: 输入卡落回底部
+  $("ws-dock").innerHTML = "";                // 草稿态的工作区条/建议 chips 一并撤下
+  $("sug-dock").innerHTML = "";
   nearBottom = true;
   scrollToBottom(true);   // 发送是用户主动行为: 无论滚到哪里, 立刻回到底部看最新消息
   // 本轮在跑: 消息进入输入框上方的待发送卡片, 轮到它时才出现在消息列
@@ -1826,6 +1839,8 @@ async function loadSettings() {
     thinkDd.setValue(s.thinking_level);
     if (s.workspace) $("ws-tag-text").textContent = s.workspace;
     state.serverWorkspace = s.workspace || null;
+    state.configured = s.configured !== false;   // 旧服务端无此字段时视为已配置
+    state.defaultModel = s.model || null;
     refreshWorkdirTag();
     if (s.icon_ver) { iconVer = s.icon_ver; applyIconEverywhere(iconUrl()); }
   } catch (e) { console.error("加载设置失败", e); }
@@ -2166,7 +2181,31 @@ function syncAccentInput() {
     inp.value = a ? (document.documentElement.dataset.theme === "dark" ? a.dark : a.light) : "";
   }
   inp.classList.remove("invalid");
+  syncAccentSwatch();
 }
+/* 色块预览: 取当前生效的 --accent 计算值（预设主题与自定义色都适用） */
+function syncAccentSwatch() {
+  const sw = $("accent-swatch");
+  if (!sw) return;
+  const c = getComputedStyle(document.documentElement).getPropertyValue("--accent").trim();
+  const hex = /^#[0-9a-fA-F]{6}$/.test(c) ? c.toLowerCase() : "#8b80f9";
+  sw.style.background = hex;
+  sw.dataset.hex = hex;
+}
+$("accent-swatch").addEventListener("click", () => {
+  const picker = $("accent-color-picker");
+  const typed = $("accent-hex-input").value.trim();
+  picker.value = /^#[0-9a-fA-F]{6}$/.test(typed) ? typed
+    : ($("accent-swatch").dataset.hex || "#8b80f9");
+  picker.click();
+});
+$("accent-color-picker").addEventListener("input", ev => {
+  const v = ev.target.value.toLowerCase();
+  localStorage.setItem(ACCENT_CUSTOM_KEY, v);
+  localStorage.setItem(ACCENT_KEY, "custom");
+  applyAccent();
+  syncAccentInput();
+});
 $("accent-hex-input").addEventListener("input", () => {
   const inp = $("accent-hex-input");
   let v = inp.value.trim();
@@ -2176,6 +2215,7 @@ $("accent-hex-input").addEventListener("input", () => {
     localStorage.setItem(ACCENT_CUSTOM_KEY, v.toLowerCase());
     localStorage.setItem(ACCENT_KEY, "custom");
     applyAccent();
+    syncAccentSwatch();
   } else {
     inp.classList.add("invalid");
   }
@@ -2205,6 +2245,64 @@ function closeSettings() {
 }
 document.querySelectorAll(".js-open-settings").forEach(b => { b.onclick = openSettings; });
 $("btn-settings-back").onclick = closeSettings;
+
+/* ============================================================
+ * 初始化引导页: 无可用供应商配置时弹出, 填 API Key 后立即可用
+ * ============================================================ */
+function openOnboarding() {
+  $("ob-model").placeholder = state.defaultModel || "";
+  $("pane").dataset.view = "onboarding";
+  setTimeout(() => $("ob-key").focus(), 50);
+}
+async function saveOnboarding() {
+  const key = $("ob-key").value.trim();
+  const model = $("ob-model").value.trim() || state.defaultModel || "glm-5.3-flash";
+  const err = $("ob-err");
+  err.textContent = "";
+  if (!key) { err.textContent = "请填写 API Key"; return; }
+  const btn = $("ob-save");
+  btn.disabled = true;
+  try {
+    // 合并进现有配置: 只更新/追加 id=default 的供应商, 不动用户已配的其他条目
+    const cfg = state.providerCfg || { providers: [], active: {} };
+    const providers = [...(cfg.providers || [])];
+    let prov = providers.find(p => p.id === "default");
+    if (prov) {
+      prov.api_key = key;
+      prov.enabled = true;
+      if ($("ob-base").value.trim()) prov.base_url = $("ob-base").value.trim();
+      prov.models = prov.models || [];
+      if (!prov.models.some(m => m.id === model)) prov.models.push({ id: model, name: model, tags: [] });
+    } else {
+      providers.push({
+        id: "default", name: "默认供应商",
+        base_url: $("ob-base").value.trim(),
+        api_key: key, enabled: true,
+        models: [{ id: model, name: model, tags: [] }],
+      });
+    }
+    const r = await fetch("/api/providers", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ providers, active: { provider: "default", model } }),
+    });
+    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `HTTP ${r.status}`);
+    state.providerCfg = await r.json();
+    state.configured = true;
+    syncModelDropdown("default", model);
+    $("pane").dataset.view = "chat";
+    startDraft();   // 配置完成: 进入欢迎页
+    $("input").focus();
+  } catch (e) {
+    err.textContent = "保存失败: " + e.message;
+  } finally {
+    btn.disabled = false;
+  }
+}
+$("ob-save").onclick = saveOnboarding;
+$("ob-key").addEventListener("keydown", ev => {
+  ev.stopPropagation();
+  if (ev.key === "Enter") saveOnboarding();
+});
 /* 设置导航项切换（当前只有"外观"一节, 结构预留多节扩展） */
 document.querySelectorAll("#side-settings .nav-item").forEach(b => {
   b.onclick = () => {
@@ -2276,5 +2374,6 @@ document.addEventListener("scroll", tipHide, true);
   const first = state.sessions[0];
   if (first) await selectSession(first.id);
   else startDraft();
+  if (state.configured === false) openOnboarding();   // 首次使用: 先引导配置供应商
   $("input").focus();
 })();

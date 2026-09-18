@@ -11,7 +11,7 @@
 <script src="https://cdn.jsdelivr.net/npm/@highlightjs/cdn-assets@11.9.0/highlight.min.js"></script>
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
 <script src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
-<link rel="stylesheet" href="/static/app.css?v=20260918f">
+<link rel="stylesheet" href="/static/app.css?v=20260918n">
 </head>
 <body>
 
@@ -98,6 +98,7 @@
   <div id="composer">
     <div id="thinking"><span class="spin"></span><span class="t">思考中…</span></div>
     <div id="input-card">
+      <div id="ws-dock"></div>
       <div id="queue-cards"></div>
       <textarea id="input" rows="1" placeholder="提出后续修改要求"></textarea>
       <div class="comp-row">
@@ -129,7 +130,31 @@
         </button>
       </div>
     </div>
+    <div id="sug-dock"></div>
   </div>
+
+    <!-- ============ 初始化引导页（未配置供应商时弹出, 填完即可用） ============ -->
+    <div id="onboarding-page">
+      <div class="ob-card">
+        <img class="ob-logo" src="/static/icon.png" alt="">
+        <h2>欢迎使用 x-code</h2>
+        <p class="ob-desc">首次使用需要先配置一个模型供应商, 填写后立即可用; 之后可随时在「设置 → 模型」里调整或追加。</p>
+        <div class="ob-field">
+          <label>API Key</label>
+          <input id="ob-key" type="password" placeholder="sk-..." spellcheck="false" autocomplete="off">
+        </div>
+        <div class="ob-field">
+          <label>接口地址 Base URL <span class="ob-opt">可选, 留空用官方地址</span></label>
+          <input id="ob-base" placeholder="https://open.bigmodel.cn/api/anthropic" spellcheck="false">
+        </div>
+        <div class="ob-field">
+          <label>默认模型</label>
+          <input id="ob-model" spellcheck="false">
+        </div>
+        <div class="ob-err" id="ob-err"></div>
+        <button id="ob-save">保存并开始</button>
+      </div>
+    </div>
 
     <!-- ============ 设置页（独立视图, 便于后续扩展） ============ -->
     <div id="settings-page">
@@ -155,6 +180,8 @@
           <div class="set-name">强调颜色</div>
           <div class="set-desc">填写 16 进制色值（如 #8b80f9），输入即时生效</div>
         </div>
+        <input type="color" id="accent-color-picker" hidden>
+        <button type="button" class="accent-swatch" id="accent-swatch" data-tip="点击选色"></button>
         <input id="accent-hex-input" class="hex-input" spellcheck="false" placeholder="#8b80f9" maxlength="7">
       </div>
       <div class="set-row">
@@ -222,6 +249,6 @@
   </div>
 </div>
 
-<script src="/static/app.js?v=20260918f" defer></script>
+<script src="/static/app.js?v=20260918n" defer></script>
 </body>
 </html>

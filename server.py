@@ -68,12 +68,13 @@ from tools import ToolRegistry
 
 setup_console()  # Windows 控制台 UTF-8 兜底（服务器日志不乱码，与 CLI 同一入口）
 
-# --- 启动检查: .env → API_KEY，缺失直接退出（配置错就别起服务） ---
-load_dotenv()
+# --- 配置装载: .env（项目根 → ~/.x-code）只作兜底, 缺失不退出,
+#     前端检测到未配置(/api/settings.configured=false)会弹初始化页引导填写 ---
+load_dotenv()                                   # 开发态: 项目根 .env
+load_dotenv(Path.home() / ".x-code" / ".env")   # 打包态: 用户目录 .env（不覆盖已加载的）
 API_KEY = os.getenv("API_KEY")
 if API_KEY is None:
-    print("✗ API_KEY not set! (检查 .env)")
-    sys.exit(1)
+    print("ℹ API_KEY 未配置: 等待用户在初始化页填写（或补 .env 后重启）")
 
 # --- 与 CLI 同源的装配: 同一份存储、同一套工具、同一个默认模型 ---
 STORAGE_DIR = Path.home() / ".x-code" / "sessions"
@@ -91,7 +92,7 @@ system_prompt = (
     .build()
 )
 api_client = ClaudeApiClient(
-    api_key=str(API_KEY),
+    api_key=API_KEY or "",   # 未配置时为空串: 服务照常起, 由初始化页引导填写
     model=runtime_config.model() or DEFAULT_MODEL,
     tools=TOOLS,
     emit_output=False,  # Web 模式不打印终端，事件改推给浏览器
@@ -316,14 +317,22 @@ def save_provider_config(cfg: dict) -> None:
         json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+def _provider_ready(cfg: dict) -> bool:
+    """active 指向的供应商是否可用（启用 + 有 key + 有模型）, 即是否已初始化。"""
+    active = cfg.get("active") or {}
+    prov = next((p for p in cfg.get("providers", [])
+                 if p.get("id") == active.get("provider")), None)
+    return bool(prov and prov.get("enabled") and active.get("model") and prov.get("api_key"))
+
+
 def _apply_provider_config(cfg: dict) -> None:
     """把 active 指向的启用供应商应用到 api_client, 并重挂镜像代理与 _real_messages。
     active 缺失/指向不存在或被禁用的供应商时: 回退 .env 默认配置。"""
     global _real_messages
-    active = cfg.get("active") or {}
-    prov = next((p for p in cfg.get("providers", [])
-                 if p.get("id") == active.get("provider")), None)
-    if prov and prov.get("enabled") and active.get("model") and prov.get("api_key"):
+    if _provider_ready(cfg):
+        active = cfg.get("active") or {}
+        prov = next((p for p in cfg.get("providers", [])
+                     if p.get("id") == active.get("provider")), None)
         api_client.configure(
             base_url=prov.get("base_url") or None,
             api_key=prov.get("api_key"),
@@ -962,6 +971,7 @@ async def api_get_settings():
         "model": api_client.model,
         "provider_id": active.get("provider"),
         "model_id": active.get("model"),
+        "configured": _provider_ready(_provider_cfg),   # false → 前端弹初始化页
         "workspace": Path.cwd().name,
         "icon_ver": _icon_ver(),
     }
