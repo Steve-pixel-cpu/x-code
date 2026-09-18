@@ -404,7 +404,7 @@
   .empty-state.welcome h2 { font-size: 22px; margin-top: 4px; }
   .empty-state .watermark {
     display: block; width: 180px; margin: 0 auto -14px;
-    opacity: .08; filter: grayscale(1); user-select: none;
+    user-select: none;
   }
   /* 草稿态: 工作区选择条作为输入卡的顶部一条（同宽, 下缘分隔线） */
   #ws-dock { display: none; }
@@ -736,11 +736,12 @@
   }
   #pane[data-view="settings"] > #settings-page { display: flex; }
 
-  /* ============ 初始化引导页: 未配置供应商时接管主区 ============ */
+  /* ============ 初始化引导页 = 欢迎页: 全屏只显示这张卡片 ============ */
   #pane[data-view="onboarding"] > #doc-header,
   #pane[data-view="onboarding"] > #messages,
   #pane[data-view="onboarding"] > #scroll-btn,
   #pane[data-view="onboarding"] > #composer { display: none; }
+  body:has(#pane[data-view="onboarding"]) > #sidebar { display: none; }
   #onboarding-page {
     display: none; flex: 1; align-items: center; justify-content: center;
     min-width: 0; min-height: 0; background: var(--bg);
@@ -748,30 +749,37 @@
   }
   #pane[data-view="onboarding"] > #onboarding-page { display: flex; }
   .ob-card {
-    width: min(460px, calc(100% - 48px));
+    width: min(430px, calc(100% - 56px));
     border: 1px solid var(--border); border-radius: var(--r-xl);
     background: var(--surface); box-shadow: var(--shadow-lg);
-    padding: 34px 38px 30px; text-align: center;
+    padding: 38px 38px 30px; text-align: center;
   }
-  .ob-logo { width: 56px; height: 56px; border-radius: 16px; object-fit: cover; }
-  .ob-card h2 { font-size: 20px; font-weight: 700; margin: 14px 0 8px; }
-  .ob-desc { font-size: 13px; color: var(--text-2); line-height: 1.65; margin: 0 0 22px; }
-  .ob-field { margin-bottom: 14px; text-align: left; }
+  .ob-logo {
+    width: 56px; height: 56px; border-radius: 16px; object-fit: cover;
+    background: #f6f7f9; margin: 0 auto 18px;
+  }
+  .ob-card h2 { font-size: 20px; font-weight: 700; margin: 0 0 10px; }
+  .ob-desc {
+    font-size: 12.5px; color: var(--text-3); line-height: 1.7;
+    max-width: 330px; margin: 0 auto 28px;
+  }
+  .ob-field { margin-bottom: 18px; text-align: left; }
   .ob-field label {
     display: block; font-size: 12px; font-weight: 600;
-    color: var(--text-2); margin-bottom: 5px;
+    color: var(--text-2); margin-bottom: 7px;
   }
   .ob-field .ob-opt { font-weight: 400; color: var(--text-3); }
-  .ob-field input {
+  #onboarding-page input {
     width: 100%; box-sizing: border-box; font-family: inherit;
     font-size: 13px; color: var(--text);
-    border: 1px solid var(--border-strong); border-radius: 8px;
-    background: var(--bg); padding: 8px 11px; transition: border-color .15s;
+    border: 1px solid var(--border-strong); border-radius: 9px;
+    background: var(--bg); padding: 11px 14px; transition: border-color .15s;
   }
-  .ob-field input:focus { outline: none; border-color: var(--accent-border); }
-  .ob-err { font-size: 12.5px; color: var(--err); text-align: left; min-height: 18px; margin: 2px 0 6px; }
+  #onboarding-page input:focus { outline: none; border-color: var(--accent-border); }
+  #onboarding-page input::placeholder { color: var(--text-3); }
+  .ob-err { font-size: 12.5px; color: var(--err); text-align: left; min-height: 18px; margin: 2px 0 10px; }
   #ob-save {
-    width: 100%; padding: 9px 0; border: none; border-radius: 10px;
+    width: 100%; padding: 11px 0; border: none; border-radius: 9px;
     background: var(--accent); color: #fff; font-size: 13.5px; font-weight: 600;
     font-family: inherit; cursor: pointer; transition: filter .15s;
   }
@@ -949,6 +957,12 @@
     transform: scale(1.08);
     border-color: var(--accent-border);
     box-shadow: 0 0 0 3px var(--accent-soft);
+  }
+  /* 隐藏的真实取色 input: 0 尺寸透明, 由 JS 定位到色块旁
+     （不能用 hidden——display:none 会让 Chrome 取色弹层锚到页面 0,0） */
+  #accent-color-picker {
+    position: fixed; width: 0; height: 0; opacity: 0;
+    border: none; padding: 0; pointer-events: none;
   }
 
   /* 设置页时侧栏切换为设置导航 */

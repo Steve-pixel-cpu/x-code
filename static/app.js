@@ -1,5 +1,22 @@
 "use strict";
 /* ============================================================
+ * 入口守卫: 网页入口已关闭, 仅允许 x-code 桌面壳打开
+ * （桌面壳的 preload 会注入 window.xcodeDesktop 标记;
+ *   浏览器直接访问 127.0.0.1:8000 只会看到提示, 应用不初始化）
+ * ============================================================ */
+if (!window.xcodeDesktop) {
+  document.documentElement.innerHTML =
+    '<head><meta charset="UTF-8"><title>x-code</title></head>' +
+    '<body style="margin:0;background:#101014">' +
+    '<div style="height:100vh;display:flex;flex-direction:column;gap:10px;' +
+    'align-items:center;justify-content:center;font-family:system-ui,' +
+    '"Microsoft YaHei",sans-serif;color:#a0a1ab;font-size:15px">' +
+    '<img src="/static/icon.png" alt="" style="width:56px;height:56px;' +
+    'border-radius:14px;object-fit:cover">' +
+    "<div>请通过 x-code 桌面应用打开</div></div></body>";
+  throw new Error("x-code: 网页入口已关闭, 请使用桌面应用");
+}
+/* ============================================================
  * 状态
  * ============================================================ */
 const $ = id => document.getElementById(id);
@@ -590,10 +607,13 @@ function refreshDocTitle() {
 function dirName(p) { return p ? p.split(/[\\/]/).filter(Boolean).pop() : null; }
 
 function refreshWorkdirTag() {
-  // 顶栏标签: 草稿 → 预选项目; 会话 → 其运行态里的工作目录; 兜底 → 服务进程工作区名
+  // 顶栏标签: 草稿 → 预选项目; 会话 → 其运行态里的工作目录。
+  // 任务类会话（无工作目录）不显示标签——服务进程的目录名与会话无关
   const wd = state.draft ? state.draftDir
     : (curRun() ? curRun().currentWorkdir : null);
-  $("ws-tag-text").textContent = dirName(wd) || state.serverWorkspace || "workplace";
+  const name = dirName(wd);
+  $("ws-tag").style.display = name ? "" : "none";
+  if (name) $("ws-tag-text").textContent = name;
 }
 
 const dirPop = $("dir-pop");
@@ -2062,8 +2082,24 @@ $("btn-icon-reset").onclick = async () => {
     toast("已恢复默认图标");
   } catch (e) { toast("恢复失败: " + e.message); }
 };
+
+/* ---------- 设置 → 配置文件: 用系统默认编辑器打开 settings.json ---------- */
+$("btn-open-config").onclick = async () => {
+  try {
+    const r = await fetch("/api/open-config", { method: "POST" });
+    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || "HTTP " + r.status);
+    toast("已打开配置文件");
+  } catch (e) { toast("打开失败: " + e.message); }
+};
 $("btn-save-providers").onclick = saveProviders;
 async function saveProviders() {
+  // 接口地址必填: 留空会回退到错误的服务端点, 是 403 类问题的根源
+  for (const p of (state.providerCfg?.providers || [])) {
+    if (p.enabled !== false && !(p.base_url || "").trim()) {
+      toast(`供应商「${p.name}」缺少接口地址 Base URL`);
+      return;
+    }
+  }
   try {
     const r = await fetch("/api/providers", {
       method: "POST",
@@ -2194,9 +2230,14 @@ function syncAccentSwatch() {
 }
 $("accent-swatch").addEventListener("click", () => {
   const picker = $("accent-color-picker");
+  const sw = $("accent-swatch");
+  // Chrome 的取色弹层锚定在 input 自身位置: 先把它挪到色块旁, 否则会飞到页面左上角
+  const r = sw.getBoundingClientRect();
+  picker.style.left = r.left + "px";
+  picker.style.top = (r.bottom + 6) + "px";
   const typed = $("accent-hex-input").value.trim();
   picker.value = /^#[0-9a-fA-F]{6}$/.test(typed) ? typed
-    : ($("accent-swatch").dataset.hex || "#8b80f9");
+    : (sw.dataset.hex || "#8b80f9");
   picker.click();
 });
 $("accent-color-picker").addEventListener("input", ev => {
@@ -2250,16 +2291,18 @@ $("btn-settings-back").onclick = closeSettings;
  * 初始化引导页: 无可用供应商配置时弹出, 填 API Key 后立即可用
  * ============================================================ */
 function openOnboarding() {
-  $("ob-model").placeholder = state.defaultModel || "";
   $("pane").dataset.view = "onboarding";
   setTimeout(() => $("ob-key").focus(), 50);
 }
 async function saveOnboarding() {
   const key = $("ob-key").value.trim();
-  const model = $("ob-model").value.trim() || state.defaultModel || "glm-5.3-flash";
+  const base = $("ob-base").value.trim();
+  const model = $("ob-model").value.trim();
   const err = $("ob-err");
   err.textContent = "";
   if (!key) { err.textContent = "请填写 API Key"; return; }
+  if (!base) { err.textContent = "请填写接口地址 Base URL"; return; }
+  if (!model) { err.textContent = "请填写默认模型"; return; }   // 不发明默认值
   const btn = $("ob-save");
   btn.disabled = true;
   try {
@@ -2270,14 +2313,13 @@ async function saveOnboarding() {
     if (prov) {
       prov.api_key = key;
       prov.enabled = true;
-      if ($("ob-base").value.trim()) prov.base_url = $("ob-base").value.trim();
+      if (base) prov.base_url = base;
       prov.models = prov.models || [];
       if (!prov.models.some(m => m.id === model)) prov.models.push({ id: model, name: model, tags: [] });
     } else {
       providers.push({
         id: "default", name: "默认供应商",
-        base_url: $("ob-base").value.trim(),
-        api_key: key, enabled: true,
+        base_url: base, api_key: key, enabled: true,
         models: [{ id: model, name: model, tags: [] }],
       });
     }
@@ -2290,7 +2332,7 @@ async function saveOnboarding() {
     state.configured = true;
     syncModelDropdown("default", model);
     $("pane").dataset.view = "chat";
-    startDraft();   // 配置完成: 进入欢迎页
+    startDraft();   // 配置完成: 跳转新任务欢迎页
     $("input").focus();
   } catch (e) {
     err.textContent = "保存失败: " + e.message;

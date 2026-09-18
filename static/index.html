@@ -6,6 +6,7 @@
 <meta name="color-scheme" content="dark light">
 <title>x-code</title>
 <link rel="icon" type="image/png" href="/static/icon.png">
+<script>/* 桌面壳经 ?token= 打开页面: 把令牌种成 cookie, 后续 API/静态资源请求自动携带 */ (function(){try{var t=new URLSearchParams(location.search).get("token");if(t)document.cookie="xcode_token="+encodeURIComponent(t)+"; path=/; max-age=31536000; SameSite=Strict";}catch(e){}})();</script>
 <script>/* 主题与强调色在绘制前应用，避免闪白 (dark | light | system) */ (function(){var p=localStorage.getItem("xc-theme")||"system";var d=p==="dark"||(p==="system"&&window.matchMedia("(prefers-color-scheme: dark)").matches);document.documentElement.dataset.theme=d?"dark":"light";var a=localStorage.getItem("xc-accent");if(a&&a!=="gray")document.documentElement.dataset.accent=a;})();</script>
 <script src="https://cdn.jsdelivr.net/npm/marked@12.0.2/lib/marked.umd.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@highlightjs/cdn-assets@11.9.0/highlight.min.js"></script>
@@ -64,6 +65,10 @@
     <button class="menu-item nav-item" data-section="models">
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="16" rx="3"/><path d="M9 4v16M4 9h16M4 15h16M15 4v16"/></svg>
       模型
+    </button>
+    <button class="menu-item nav-item" data-section="config">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><path d="M14 2v6h6M9 13h6M9 17h6"/></svg>
+      配置
     </button>
   </div>
 
@@ -133,7 +138,7 @@
     <div id="sug-dock"></div>
   </div>
 
-    <!-- ============ 初始化引导页（未配置供应商时弹出, 填完即可用） ============ -->
+    <!-- ============ 初始化引导页 = 欢迎页: 全屏只显示这张卡片 ============ -->
     <div id="onboarding-page">
       <div class="ob-card">
         <img class="ob-logo" src="/static/icon.png" alt="">
@@ -144,12 +149,12 @@
           <input id="ob-key" type="password" placeholder="sk-..." spellcheck="false" autocomplete="off">
         </div>
         <div class="ob-field">
-          <label>接口地址 Base URL <span class="ob-opt">可选, 留空用官方地址</span></label>
-          <input id="ob-base" placeholder="https://open.bigmodel.cn/api/anthropic" spellcheck="false">
+          <label>接口地址 Base URL</label>
+          <input id="ob-base" value="https://open.bigmodel.cn/api/anthropic" spellcheck="false">
         </div>
         <div class="ob-field">
           <label>默认模型</label>
-          <input id="ob-model" spellcheck="false">
+          <input id="ob-model" placeholder="如 glm-5.3-flash" spellcheck="false">
         </div>
         <div class="ob-err" id="ob-err"></div>
         <button id="ob-save">保存并开始</button>
@@ -180,7 +185,7 @@
           <div class="set-name">强调颜色</div>
           <div class="set-desc">填写 16 进制色值（如 #8b80f9），输入即时生效</div>
         </div>
-        <input type="color" id="accent-color-picker" hidden>
+        <input type="color" id="accent-color-picker">
         <button type="button" class="accent-swatch" id="accent-swatch" data-tip="点击选色"></button>
         <input id="accent-hex-input" class="hex-input" spellcheck="false" placeholder="#8b80f9" maxlength="7">
       </div>
@@ -202,6 +207,17 @@
         <div class="prov-actions">
           <button type="button" id="btn-add-provider" class="prov-ghost">+ 添加供应商</button>
           <button type="button" id="btn-save-providers" class="prov-primary">保存模型配置</button>
+        </div>
+      </div>
+      <div class="sp-section-body" data-section="config" style="display:none">
+        <div class="sp-section">配置文件</div>
+        <div class="sp-section-desc">所有用户级设置都存在这一个文件里（含模型供应商）；手动修改后需重启服务生效</div>
+        <div class="set-row">
+          <div class="set-info">
+            <div class="set-name">settings.json</div>
+            <div class="set-desc">路径 ~/.x-code/settings.json</div>
+          </div>
+          <button type="button" class="icon-act" id="btn-open-config">打开文件</button>
         </div>
       </div>
         </div>
@@ -249,6 +265,6 @@
   </div>
 </div>
 
-<script src="/static/app.js?v=20260918n" defer></script>
+<script src="/static/app.js?v=20260918o" defer></script>
 </body>
 </html>

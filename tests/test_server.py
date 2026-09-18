@@ -342,3 +342,37 @@ def test_turn_emitter_pairs_tool_ids():
     emitter2({"type": "tool_result", "name": "bash", "input": "{}"})
     emitter2({"type": "tool_result", "name": "read_file", "input": "{}"})
     assert [p["id"] for p in out if p["type"] == "tool_result"] == ["a", "b"]
+
+
+# ------------------------------------------------------------
+# 连接门禁（token gate）
+# ------------------------------------------------------------
+
+def test_token_gate_blocks_and_allows(client, monkeypatch):
+    """门禁开启时: 无令牌 403, 带令牌放行; 门禁关闭(API_TOKEN="")时全放行。"""
+    monkeypatch.setattr(server, "API_TOKEN", "secret-token")
+    # 无令牌 -> 403
+    r = client.get("/api/settings")
+    assert r.status_code == 403
+    # 错误令牌 -> 403
+    r = client.get("/api/settings", headers={"x-xcode-token": "wrong"})
+    assert r.status_code == 403
+    # 正确令牌 -> 放行
+    r = client.get("/api/settings", headers={"x-xcode-token": "secret-token"})
+    assert r.status_code == 200
+    # query/cookie 亦可
+    assert client.get("/api/settings?token=secret-token").status_code == 200
+    client.cookies.set("xcode_token", "secret-token")
+    assert client.get("/api/settings").status_code == 200
+
+
+def test_token_gate_disabled_when_empty(client, monkeypatch):
+    monkeypatch.setattr(server, "API_TOKEN", "")
+    assert client.get("/api/settings").status_code == 200
+
+
+def test_ping_identifies_backend(client):
+    """探测端点: 桌面壳靠它区分 x-code 后端和抢占 8000 的其他程序。"""
+    r = client.get("/api/ping")
+    assert r.status_code == 200
+    assert r.json() == {"app": "x-code"}

@@ -12,7 +12,7 @@ from typing import Optional
 from dotenv import load_dotenv
 
 from api_client import ApiClient, ClaudeApiClient, THINKING_LEVELS
-from config import RuntimeConfig, ConfigLoader
+from config import RuntimeConfig, ConfigLoader, USER_DIR
 from hooks import HookRunner
 from models import Message, Session, TextContentBlock, ToolContentBlock
 from permissions import (
@@ -649,7 +649,7 @@ def start(session_store:SessionStore,session_id:str):
 
     config_loader = ConfigLoader(
         cwd=Path.cwd(),
-        config_home=Path.home(),
+        config_home=USER_DIR,   # x-code 自己的用户配置目录
     )
     system_prompt = SystemPromptBuilder().with_os(platform.system(), platform.release()).build()
     runtime_config = config_loader.load()
@@ -688,7 +688,7 @@ def usage() -> None:
 def main():
     setup_console()
     session_store = SessionStore(
-        storage_dir=Path.home() / ".x-code" / "sessions",
+        storage_dir=USER_DIR / "sessions",
     )
     session_id = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
     args = sys.argv[1:]

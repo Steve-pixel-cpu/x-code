@@ -20,7 +20,9 @@ import os
 import platform
 import queue
 import re
+import secrets
 import shutil
+import subprocess
 import sys
 import threading
 import time
@@ -29,16 +31,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Optional
 
-from dotenv import load_dotenv
 from fastapi import Body, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from api_client import ClaudeApiClient, THINKING_LEVELS
 import anthropic
-from config import ConfigLoader, RuntimeConfig
+from config import USER_DIR, SETTINGS_FILE, ConfigLoader, RuntimeConfig, load_providers, save_providers
 from main import (
-    DEFAULT_MODEL,
     TOOLS,
     build_registry,
     build_runtime,
@@ -68,16 +68,13 @@ from tools import ToolRegistry
 
 setup_console()  # Windows 控制台 UTF-8 兜底（服务器日志不乱码，与 CLI 同一入口）
 
-# --- 配置装载: .env（项目根 → ~/.x-code）只作兜底, 缺失不退出,
-#     前端检测到未配置(/api/settings.configured=false)会弹初始化页引导填写 ---
-load_dotenv()                                   # 开发态: 项目根 .env
-load_dotenv(Path.home() / ".x-code" / ".env")   # 打包态: 用户目录 .env（不覆盖已加载的）
-API_KEY = os.getenv("API_KEY")
-if API_KEY is None:
-    print("ℹ API_KEY 未配置: 等待用户在初始化页填写（或补 .env 后重启）")
+# --- 配置来源: 只有 ~/.x-code/settings.json 的 providers/activeProvider
+#     （设置页/初始化页写入, 读写逻辑在 config.py）。
+#     没有 .env 兜底——未配置时 api_key 为空串照常起服务,
+#     前端检测到(/api/settings.configured=false)会弹初始化页引导填写 ---
 
 # --- 与 CLI 同源的装配: 同一份存储、同一套工具、同一个默认模型 ---
-STORAGE_DIR = Path.home() / ".x-code" / "sessions"
+STORAGE_DIR = USER_DIR / "sessions"
 store = SessionStore(storage_dir=STORAGE_DIR)
 
 # 已创建但尚未落盘的会话 id: POST /api/sessions 只生成 id，首条消息落盘才建
@@ -85,21 +82,59 @@ store = SessionStore(storage_dir=STORAGE_DIR)
 # 不出现、历史接口 404，前端渲染成空白。
 _pending_sessions: set[str] = set()
 
-runtime_config: RuntimeConfig = ConfigLoader(cwd=Path.cwd(), config_home=Path.home()).load()
+runtime_config: RuntimeConfig = ConfigLoader(
+    cwd=Path.cwd(), config_home=USER_DIR   # x-code 自己的用户配置目录
+).load()
+
+# --- 连接门禁: 桌面壳与后端共享 ~/.x-code/token 里的随机令牌 ---
+# 所有请求必须携带 x-xcode-token 头 / cookie / query 之一, 否则 403 拒绝——
+# 浏览器直接访问 127.0.0.1:8000 因此被挡在门外, 只有桌面壳能进来
+_TOKEN_FILE = USER_DIR / "token"
+
+
+def _ensure_api_token() -> str:
+    _TOKEN_FILE.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        t = _TOKEN_FILE.read_text(encoding="utf-8").strip()
+        if t:
+            return t
+    except OSError:
+        pass
+    t = secrets.token_hex(32)
+    _TOKEN_FILE.write_text(t, encoding="utf-8")
+    return t
+
+
+API_TOKEN = _ensure_api_token()
 system_prompt = (
     SystemPromptBuilder()
     .with_os(platform.system(), platform.release())
     .build()
 )
 api_client = ClaudeApiClient(
-    api_key=API_KEY or "",   # 未配置时为空串: 服务照常起, 由初始化页引导填写
-    model=runtime_config.model() or DEFAULT_MODEL,
+    api_key="",   # 未配置时为空串: 服务照常起, 由初始化页引导填写
+    model=runtime_config.model() or "",   # 不设默认模型: 由用户显式添加
     tools=TOOLS,
     emit_output=False,  # Web 模式不打印终端，事件改推给浏览器
     thinking_level=runtime_config.thinking_level(),
 )
 
 app = FastAPI(title="x-code web")
+
+
+@app.middleware("http")
+async def _token_gate(request: Request, call_next):
+    """连接门禁: 缺少有效令牌的请求一律 403（API_TOKEN 为空 = 门禁关闭, 供测试）。"""
+    if API_TOKEN:
+        provided = (request.headers.get("x-xcode-token")
+                    or request.cookies.get("xcode_token")
+                    or request.query_params.get("token"))
+        if provided != API_TOKEN:
+            return JSONResponse(
+                status_code=403,
+                content={"detail": "请通过 x-code 桌面应用打开"},
+            )
+    return await call_next(request)
 STATIC_DIR = Path(__file__).parent / "static"
 # 静态资源 (app.css / app.js): index.html 拆分后由这里托管
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
@@ -281,53 +316,25 @@ api_client.client = _LiveClientProxy(api_client.client)
 
 
 # ============================================================================
-# 模型供应商配置: ~/.x-code/providers.json, 设置页"模型"分区读写
+# 模型供应商配置: 读写归口 config.py（~/.x-code/settings.json 的
+# providers / activeProvider 两个 key）, 这里只保留运行态副本
 # ============================================================================
-
-PROVIDERS_FILE = Path.home() / ".x-code" / "providers.json"
-
-
-def load_provider_config() -> dict:
-    """读取供应商配置; 无文件/损坏时返回基于 .env 的默认配置（不写盘,
-    避免测试导入等意外场景污染真实配置; 用户在设置页保存时才落盘）。"""
-    if PROVIDERS_FILE.exists():
-        try:
-            cfg = json.loads(PROVIDERS_FILE.read_text(encoding="utf-8"))
-            if isinstance(cfg, dict) and isinstance(cfg.get("providers"), list):
-                return cfg
-        except Exception:
-            pass
-    cfg = {
-        "active": {"provider": "default", "model": api_client.model},
-        "providers": [{
-            "id": "default",
-            "name": "智谱 BigModel",
-            "base_url": os.getenv("ANTHROPIC_BASE_URL") or "https://open.bigmodel.cn/api/anthropic",
-            "api_key": API_KEY or "",
-            "enabled": True,
-            "models": [{"id": api_client.model, "name": api_client.model, "tags": []}],
-        }],
-    }
-    return cfg
-
-
-def save_provider_config(cfg: dict) -> None:
-    PROVIDERS_FILE.parent.mkdir(parents=True, exist_ok=True)
-    PROVIDERS_FILE.write_text(
-        json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def _provider_ready(cfg: dict) -> bool:
-    """active 指向的供应商是否可用（启用 + 有 key + 有模型）, 即是否已初始化。"""
+    """active 指向的供应商是否可用（启用 + 有接口地址 + 有 key）, 即是否已初始化。
+    模型不作为就绪条件: 由用户在「设置 → 模型」里显式添加, 不设默认值。"""
     active = cfg.get("active") or {}
     prov = next((p for p in cfg.get("providers", [])
                  if p.get("id") == active.get("provider")), None)
-    return bool(prov and prov.get("enabled") and active.get("model") and prov.get("api_key"))
+    return bool(prov and prov.get("enabled") and prov.get("api_key")
+                and str(prov.get("base_url") or "").strip())
 
 
 def _apply_provider_config(cfg: dict) -> None:
     """把 active 指向的启用供应商应用到 api_client, 并重挂镜像代理与 _real_messages。
-    active 缺失/指向不存在或被禁用的供应商时: 回退 .env 默认配置。"""
+    active 缺失/指向不存在或被禁用的供应商时: 保持未配置空 key（初始化页接管）。
+    active 无 model: 只应用连接信息, 模型留待用户显式添加。"""
     global _real_messages
     if _provider_ready(cfg):
         active = cfg.get("active") or {}
@@ -336,17 +343,15 @@ def _apply_provider_config(cfg: dict) -> None:
         api_client.configure(
             base_url=prov.get("base_url") or None,
             api_key=prov.get("api_key"),
-            model=active["model"],
+            model=active.get("model"),   # None/缺失 = 保持当前模型
         )
     else:
-        # 回退 .env 默认配置
-        api_client.reset_to(api_key=API_KEY or "", model=DEFAULT_MODEL,
-                            base_url=os.getenv("ANTHROPIC_BASE_URL"))
+        api_client.reset_to(api_key="", model="", base_url=None)
     api_client.client = _LiveClientProxy(api_client.raw_client)
     _real_messages = api_client.raw_client.messages
 
 
-_provider_cfg = load_provider_config()
+_provider_cfg = load_providers()
 _apply_provider_config(_provider_cfg)
 
 
@@ -960,6 +965,13 @@ async def api_get_messages(session_id: str):
 # REST: 设置（思考等级 + 权限模式 + 激活模型）
 # ============================================================================
 
+@app.get("/api/ping")
+async def api_ping():
+    """探测端点: 桌面壳用它确认"这是 x-code 后端"。
+    8000 端口可能被 C-Lodop 打印服务等程序抢占, 不能只看 200 就当作就绪。"""
+    return {"app": "x-code"}
+
+
 @app.get("/api/settings")
 async def api_get_settings():
     active = _provider_cfg.get("active") or {}
@@ -1013,7 +1025,7 @@ async def api_post_settings(request: dict):
     model_id = request.get("model_id")
     if provider_id is not None and model_id is not None:
         _provider_cfg["active"] = {"provider": str(provider_id), "model": str(model_id)}
-        save_provider_config(_provider_cfg)
+        save_providers(_provider_cfg)
         _apply_provider_config(_provider_cfg)
 
     return await api_get_settings()
@@ -1042,13 +1054,19 @@ async def api_save_providers(request: dict):
             raise HTTPException(status_code=400, detail="供应商缺少 id 或名称")
         if not isinstance(p.get("models"), list):
             raise HTTPException(status_code=400, detail=f"供应商 {p.get('name')} 缺少模型列表")
+        # 接口地址必填: 留空会让 SDK 回退到 Anthropic 官方地址, 智谱 key 必被 403
+        if p.get("enabled") is not False and not str(p.get("base_url") or "").strip():
+            raise HTTPException(
+                status_code=400,
+                detail=f"供应商 {p.get('name')} 缺少接口地址 Base URL",
+            )
     cfg = {"active": active if isinstance(active, dict) else _provider_cfg.get("active"),
            "providers": providers}
     if not isinstance(cfg["active"], dict):
         cfg["active"] = {}
     _provider_cfg.clear()
     _provider_cfg.update(cfg)
-    save_provider_config(_provider_cfg)
+    save_providers(_provider_cfg)
     _apply_provider_config(_provider_cfg)
     return _provider_cfg
 
@@ -1073,12 +1091,38 @@ async def api_test_provider(request: dict):
         return {"ok": False, "detail": str(e)[:200]}
 
 
+@app.post("/api/open-config")
+async def api_open_config():
+    """设置页「打开配置文件」: 用系统默认程序打开 ~/.x-code/settings.json。
+    文件不存在时先创建空配置, 保证每次都能打开。"""
+    path = SETTINGS_FILE
+    if not path.exists():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("{}", encoding="utf-8")
+    try:
+        if sys.platform == "win32":
+            os.startfile(str(path))
+        elif sys.platform == "darwin":
+            subprocess.Popen(["open", str(path)])
+        else:
+            subprocess.Popen(["xdg-open", str(path)])
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"打开失败: {e}")
+    return {"ok": True}
+
+
 # ============================================================================
 # WebSocket: 双向通道（服务端推事件 + 浏览器回审批/停止）
 # ============================================================================
 
 @app.websocket("/ws/{session_id}")
 async def ws_endpoint(websocket: WebSocket, session_id: str):
+    # WS 握手同样过门禁: 令牌可在 query 或 cookie（页面已种入）
+    provided = (websocket.query_params.get("token")
+                or websocket.cookies.get("xcode_token"))
+    if API_TOKEN and provided != API_TOKEN:
+        await websocket.close(code=1008)
+        return
     await websocket.accept()
     web_session = get_or_create_web_session(session_id)
     loop = asyncio.get_running_loop()
@@ -1186,6 +1230,26 @@ async def ws_endpoint(websocket: WebSocket, session_id: str):
 
 
 if __name__ == "__main__":
+    import socket
     import uvicorn
 
-    uvicorn.run(app, host="127.0.0.1", port=8000)
+    args = sys.argv[1:]
+    port = int(args[args.index("--port") + 1]) if "--port" in args \
+        else int(os.getenv("XCODE_PORT") or 8000)
+
+    def _port_free(p: int) -> bool:
+        # connect_ex 探测: 已有进程监听时返回 0
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            return s.connect_ex(("127.0.0.1", p)) != 0
+
+    # C-Lodop 等程序会抢占 8000: 被占则自动向后避让（8010–8019）,
+    # 实际端口写 ~/.x-code/port, 桌面壳由此得知该访问哪个端口
+    candidates = [port] + [q for q in range(8010, 8020) if q != port]
+    chosen = next((q for q in candidates if _port_free(q)), None)
+    if chosen is None:
+        print("✗ 8000–8019 端口全部被占用（如 C-Lodop 打印服务）, 请释放后重试")
+        sys.exit(1)
+    USER_DIR.mkdir(parents=True, exist_ok=True)
+    (USER_DIR / "port").write_text(str(chosen), encoding="utf-8")
+    print(f"✓ x-code 服务: http://127.0.0.1:{chosen}")
+    uvicorn.run(app, host="127.0.0.1", port=chosen)

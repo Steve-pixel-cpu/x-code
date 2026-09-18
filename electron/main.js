@@ -2,25 +2,64 @@
 //   - 端口 8000 上已有 x-code 服务在跑 → 直接复用, 不拉进程、退出时不杀
 //   - 否则拉起 .venv 里的 python server.py 作为子进程, 退出时整树杀掉
 //   - 窗口只加载本地服务; 外部链接一律转交系统浏览器, 防止窗口被带跑
-const { app, BrowserWindow, shell, dialog, Menu, ipcMain } = require("electron");
+const { app, BrowserWindow, shell, dialog, Menu, ipcMain, session } = require("electron");
 const { spawn } = require("child_process");
 const path = require("path");
 const fs = require("fs");
+const os = require("os");
 const http = require("http");
+const crypto = require("crypto");
 
-const BASE_URL = "http://127.0.0.1:8000";
+
 const ROOT = path.join(__dirname, "..");
+
+// 连接门禁令牌: 与后端共享 ~/.x-code/token, 桌面壳的所有请求自动携带,
+// 浏览器直接访问 127.0.0.1:8000 会因缺少令牌被后端 403 拒绝
+const TOKEN_FILE = path.join(os.homedir(), ".x-code", "token");
+function ensureToken() {
+  fs.mkdirSync(path.dirname(TOKEN_FILE), { recursive: true });
+  try {
+    const t = fs.readFileSync(TOKEN_FILE, "utf-8").trim();
+    if (t) return t;
+  } catch (e) { /* 不存在: 生成 */ }
+  const t = crypto.randomBytes(32).toString("hex");
+  fs.writeFileSync(TOKEN_FILE, t);
+  return t;
+}
+const API_TOKEN = ensureToken();
+
+// 后端端口: 默认 8000, 被 C-Lodop 等程序占用时后端自动避让（8010–8019）,
+// 实际端口写在 ~/.x-code/port, 这里动态读取
+const PORT_FILE = path.join(os.homedir(), ".x-code", "port");
+function readPort() {
+  try {
+    const p = parseInt(fs.readFileSync(PORT_FILE, "utf-8").trim(), 10);
+    if (p > 0 && p < 65536) return p;
+  } catch (e) { /* 文件不存在: 默认 8000 */ }
+  return 8000;
+}
+let basePort = readPort();
+const baseUrl = () => `http://127.0.0.1:${basePort}`;
 
 let win = null;
 let serverProc = null;   // 本进程拉起的 Python 后端; null = 复用了外部已运行的服务
 let quitting = false;
 
-// 探测后端是否就绪（就绪 = /api/settings 返回 200）
-function probeServer(timeoutMs) {
+// 探测后端是否就绪（就绪 = /api/ping 返回 200 且 app 标识为 x-code; 携带门禁令牌）。
+// 不能只看 200: 8000 可能被 C-Lodop 打印服务等程序抢占, 它们对任何路径都回自己的页面
+function pingServer(port, timeoutMs) {
   return new Promise((resolve) => {
-    const req = http.get(`${BASE_URL}/api/settings`, { timeout: timeoutMs }, (res) => {
-      res.resume();
-      resolve(res.statusCode === 200);
+    const req = http.get(`${baseUrl(port)}/api/ping`, {
+      timeout: timeoutMs,
+      headers: { "x-xcode-token": API_TOKEN },
+    }, (res) => {
+      let body = "";
+      res.on("data", (d) => { body += d; });
+      res.on("end", () => {
+        try {
+          resolve(res.statusCode === 200 && JSON.parse(body).app === "x-code");
+        } catch (e) { resolve(false); }
+      });
     });
     req.on("timeout", () => { req.destroy(); resolve(false); });
     req.on("error", () => resolve(false));
@@ -72,7 +111,8 @@ function startServer() {
 async function waitServer(timeoutMs) {
   const t0 = Date.now();
   while (Date.now() - t0 < timeoutMs) {
-    if (await probeServer(800)) return true;
+    basePort = readPort();   // 后端避让后会把实际端口写进 port 文件, 每轮重读
+    if (await pingServer(basePort, 800)) return true;
     await new Promise((r) => setTimeout(r, 300));
   }
   return false;
@@ -91,17 +131,18 @@ function killServer() {
 }
 
 function isLocal(url) {
-  return url === BASE_URL || url.startsWith(BASE_URL + "/");
+  return url === baseUrl() || url.startsWith(baseUrl() + "/");
 }
 
 async function createWindow() {
   // 端口已被占用（用户手动起的服务/另一个实例）→ 复用, 不再拉自己的后端
-  if (!(await probeServer(1200))) {
+  basePort = readPort();   // 恢复上次会话的实际端口（可能已避让到 8010 等）
+  if (!(await pingServer(basePort, 1200))) {
     serverProc = startServer();
     if (!(await waitServer(30000))) {
       dialog.showErrorBox(
         "x-code 启动失败",
-        "Python 后端在 30 秒内未能就绪（端口 8000）。\n请检查 .venv 环境与 .env 配置后重试。"
+        "Python 后端在 30 秒内未能就绪。\n若 8000–8019 端口被其他程序（如 C-Lodop 打印服务）占用, 请关闭后重试。"
       );
       app.quit();
       return;
@@ -125,7 +166,12 @@ async function createWindow() {
     },
   });
   win.once("ready-to-show", () => win.show());
-  win.loadURL(BASE_URL);
+  // 门禁: 本会话的所有请求（页面/静态/API/WS 握手）自动携带令牌
+  win.webContents.session.webRequest.onBeforeSendHeaders((details, cb) => {
+    details.requestHeaders["x-xcode-token"] = API_TOKEN;
+    cb({ requestHeaders: details.requestHeaders });
+  });
+  win.loadURL(baseUrl() + "/?token=" + encodeURIComponent(API_TOKEN));
 
   // 右键菜单: Electron 默认没有, 手动提供（选中即可复制; 输入框里可全选）
   win.webContents.on("context-menu", (ev, params) => {

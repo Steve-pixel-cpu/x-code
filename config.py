@@ -6,9 +6,14 @@ from typing import Literal, Optional, Any
 
 from pydantic import BaseModel, Field
 
+# 应用名与用户级目录的唯一来源: ~/.x-code（目录名跟 APP_NAME 走, 改名只动这一处）
+APP_NAME = "x-code"
+USER_DIR = Path.home() / ("." + APP_NAME)
+SETTINGS_FILE = USER_DIR / "settings.json"
+
 
 class ConfigSource(Enum):
-    USER = "user"         # 用户全局 (~/.claude/settings.json)
+    USER = "user"         # 用户全局 (~/.x-code/settings.json)
     PROJECT = "project"   # 项目级别 (.claude/settings.json)
     LOCAL = "local"       # 本地个人 (.claude/settings.local.json)
 
@@ -99,7 +104,7 @@ class ConfigLoader:
     """
         参数:
             cwd: 当前工作目录（项目根目录）
-            config_home: 用户配置目录（通常是 ~/.claude）
+            config_home: 用户配置目录（x-code 使用 ~/.x-code）
     """
     def __init__(self, cwd: Path, config_home: Path):
         self.cwd = cwd
@@ -262,3 +267,35 @@ class ConfigLoader:
 
 
 
+# ============================================================================
+# x-code 用户设置: SETTINGS_FILE（~/.x-code/settings.json）
+# 供应商配置的读写归口在此（providers / activeProvider 是其中的普通 key,
+# 其余 key 原样保留——以后的用户级设置也放这个文件, 不再另起文件名）
+# ============================================================================
+def load_providers() -> dict:
+    """读供应商配置; 无文件/损坏/缺 key = 未配置空态（不写盘,
+    由前端初始化页引导填写）。没有 .env 之类的兜底来源。"""
+    try:
+        data = json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {"active": {}, "providers": []}
+    if not isinstance(data, dict) or not isinstance(data.get("providers"), list):
+        return {"active": {}, "providers": []}
+    active = data.get("activeProvider")
+    return {"active": active if isinstance(active, dict) else {},
+            "providers": data["providers"]}
+
+
+def save_providers(cfg: dict) -> None:
+    """写供应商配置: 读-改-写, 文件里其他 key 原样保留。"""
+    try:
+        data = json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            data = {}
+    except (OSError, ValueError):
+        data = {}
+    data["providers"] = cfg.get("providers", [])
+    data["activeProvider"] = cfg.get("active") or {}
+    SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    SETTINGS_FILE.write_text(
+        json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
