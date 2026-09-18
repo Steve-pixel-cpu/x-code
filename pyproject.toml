@@ -8,6 +8,7 @@ dependencies = [
     "python-dotenv>=1.2.3",
     "fastapi>=0.115",
     "uvicorn[standard]>=0.30",
+    "tzdata>=2026.4",
 ]
 
 [dependency-groups]

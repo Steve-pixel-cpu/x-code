@@ -144,16 +144,8 @@
   /* ============ 左侧栏 ============ */
   #sidebar {
     width: 268px; flex: none; display: flex; flex-direction: column;
+    padding-top: 10px;   /* 顶部留白: 窗口标题栏已含应用名, 侧栏不再放品牌行 */
     background: var(--bg-side); border-right: 1px solid var(--border);
-  }
-  .side-logo {
-    display: flex; align-items: center; gap: 10px;
-    padding: 16px 18px 12px; font-weight: 700; font-size: 14.5px; letter-spacing: .01em;
-  }
-  .side-logo .mark {
-    width: 28px; height: 28px; border-radius: 9px; object-fit: cover;
-    background: #f6f7f9;   /* 浅色衬底: 深色主题下黑身企鹅不没入背景 */
-    box-shadow: 0 3px 10px var(--accent-soft);
   }
 
   .menu-item {
@@ -535,7 +527,7 @@
   /* 消息内容可自由选中: 支持右键菜单复制 / Ctrl+C */
   .bubble, .tool-row, .think-row { user-select: text; -webkit-user-select: text; }
   /* 装饰性字形不进选区（拖选正文时不会带上 ✻ 等符号） */
-  .avatar, .empty-state .mark, .side-logo .mark {
+  .avatar, .empty-state .mark {
     user-select: none; -webkit-user-select: none;
   }
 
