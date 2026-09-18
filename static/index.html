@@ -95,8 +95,9 @@
   </button>
 
   <div id="composer">
-    <div id="thinking"><span class="dots"><i></i><i></i><i></i></span><span class="t">思考中…</span></div>
+    <div id="thinking"><span class="spin"></span><span class="t">思考中…</span></div>
     <div id="input-card">
+      <div id="queue-cards"></div>
       <textarea id="input" rows="1" placeholder="提出后续修改要求"></textarea>
       <div class="comp-row">
 
@@ -185,6 +186,8 @@
     </div>
   </div>
 </div>
+
+<!-- 本轮进行中追加的消息直接进入待发送区, 气泡上提供「立即」插队按钮 -->
 
 <div id="toast"></div>
 

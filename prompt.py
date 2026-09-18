@@ -263,6 +263,18 @@ class SystemPromptBuilder:
             "Act economically: when the information you have is sufficient, "
             "act directly instead of gathering more; avoid exhaustive "
             "exploration and redundant verification.",
+            # 结论纪律: 审计/找茬类任务天然偏"宁滥勿缺"，扫读时标记的可疑点
+            # 极易被包装成结论输出。经济性只适用于收集信息；要把一个行为
+            # 称为"bug"或"误配"，必须先走完验证——闸门往往就在调用链上一层
+            "Findings are hypotheses until verified: before reporting a bug or "
+            "misbehavior, read the whole function (not a fragment), check the "
+            "constants and defaults it depends on, and trace its callers — the "
+            "condition that invalidates a suspicion is often one frame up the "
+            "call stack.",
+            "Keep claims honest in your output: separate verified facts from "
+            "untested guesses, label the latter explicitly as hypotheses, and "
+            "state what evidence would confirm or refute each one — never "
+            "package a suspicion as a conclusion.",
         ]
         return "# Doing tasks\n" + "\n".join(f" - {item}" for item in items)
 

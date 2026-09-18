@@ -107,7 +107,7 @@ def test_runtime_thinking_level_isolation():
 # ------------------------------------------------------------
 
 def test_turn_queue_releases_and_starts(clean_slots):
-    """槽位释放后 _drain_queued_turns 唤醒排队轮次; 跳过已叫停项。"""
+    """槽位释放后 _drain_queued_turns 唤醒排队轮次; 叫停项跳过并补发 turn_done 收尾。"""
     acquired = server._turn_slots.acquire(blocking=False)
     assert acquired  # 测试前置: 先占住一个槽位, 模拟"仅剩一个空位"
 
@@ -117,11 +117,12 @@ def test_turn_queue_releases_and_starts(clean_slots):
         ws.busy = True
     ws_stop.stop_requested = True   # 排队期间被叫停 → 应被跳过
 
+    events = []
     server._queued_turns.append(
-        (ws_busy, "hi", None,
+        (ws_busy, "hi", lambda p: None,
          server.WebPermissionPrompter(lambda p: None)))
     server._queued_turns.append(
-        (ws_stop, "nope", None,
+        (ws_stop, "nope", events.append,
          server.WebPermissionPrompter(lambda p: None)))
 
     spawned = []
@@ -135,6 +136,35 @@ def test_turn_queue_releases_and_starts(clean_slots):
     # 队列清空; 正常项被启动, 叫停项被跳过
     assert len(server._queued_turns) == 0
     assert spawned == ["q-busy"]
+    # 叫停项收尾: 忙碌复位 + 补发 turn_done, 前端不悬在忙碌态
+    assert ws_stop.busy is False
+    assert events and events[-1]["type"] == "turn_done"
+    assert events[-1]["interrupted"] is True
+
+
+def test_turn_queue_skip_with_pending_requeues_text(clean_slots):
+    """立即发送插队后原轮次被跳过: 其文本归队 pending 尾部, 不丢失。"""
+    ws = server.get_or_create_web_session("q-jump")
+    ws.busy = True
+    ws.stop_requested = True
+    ws.pending = ["插队消息"]
+    server._queued_turns.append(
+        (ws, "原始消息", lambda p: None,
+         server.WebPermissionPrompter(lambda p: None)))
+
+    def _fail(*_a):
+        raise AssertionError("插队场景跳过时不应直接起线程")
+
+    original = server._spawn_turn_thread
+    server._spawn_turn_thread = _fail
+    try:
+        server._drain_queued_turns()
+    finally:
+        server._spawn_turn_thread = original
+
+    assert server._queued_turns == []
+    assert ws.pending == ["插队消息", "原始消息"]   # 插队消息在前, 原消息不丢
+    assert ws.busy is True   # 接力由事件循环调度, 忙碌态保持到轮次真正开跑
 
 
 def test_queue_fifo_order(clean_slots):

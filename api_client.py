@@ -1,3 +1,4 @@
+import contextlib
 import json
 import subprocess
 from json import JSONDecodeError
@@ -8,6 +9,13 @@ from abc import ABC, abstractmethod
 from typing import List, Literal, Dict, final, Optional
 
 from models import Message, ToolResultContentBlock, ToolContentBlock, TextContentBlock
+from retry import (
+    ApiError as RetryApiError,
+    ConnectionError as RetryConnectionError,
+    AuthError as RetryAuthError,
+    HttpApiError as RetryHttpApiError,
+    send_with_retry,
+)
 
 
 class TextDeltaEvent(BaseModel):
@@ -79,6 +87,19 @@ def _collect_usage(acc: dict, usage) -> None:
         value = getattr(usage, field, None)
         if value is not None:
             acc[field] = value
+
+
+def _map_to_retry_error(e: Exception) -> Optional[RetryApiError]:
+    """anthropic SDK 异常 → retry.ApiError，决定可否重试。None = 非 API 错误, 直接抛。"""
+    if isinstance(e, anthropic.AuthenticationError):
+        return RetryAuthError(str(e))
+    if isinstance(e, anthropic.RateLimitError):
+        return RetryHttpApiError(429, str(e))
+    if isinstance(e, anthropic.APIConnectionError):   # 含 APITimeoutError
+        return RetryConnectionError(str(e))
+    if isinstance(e, anthropic.APIStatusError):
+        return RetryHttpApiError(e.status_code, str(e))
+    return None
 
 
 class ApiClient(ABC):
@@ -158,7 +179,9 @@ class ClaudeApiClient(ApiClient):
         self._base_url = base_url
         # 流式读超时: 两条流式事件之间最大间隔 300s。没有它，一条 stalled 的
         # 连接会让 run_turn 永久挂死（CLI 卡死 / Web 端 busy 永远不解锁）
-        self.raw_client = anthropic.Anthropic(api_key=api_key, base_url=base_url, timeout=300.0)
+        # max_retries=0: SDK 自带重试关闭, 重试策略（退避/上限）统一归 retry.py
+        self.raw_client = anthropic.Anthropic(api_key=api_key, base_url=base_url,
+                                              timeout=300.0, max_retries=0)
         self.client = self.raw_client
 
     def configure(self,
@@ -175,7 +198,8 @@ class ClaudeApiClient(ApiClient):
             self._api_key = new_key
             self._base_url = new_url
             self.raw_client = anthropic.Anthropic(
-                api_key=new_key, base_url=new_url or None, timeout=300.0)
+                api_key=new_key, base_url=new_url or None,
+                timeout=300.0, max_retries=0)
             self.client = self.raw_client
 
     def reset_to(self, api_key: str, model: str, base_url: str | None = None) -> None:
@@ -183,7 +207,8 @@ class ClaudeApiClient(ApiClient):
         self._api_key = api_key
         self._base_url = base_url
         self.model = model
-        self.raw_client = anthropic.Anthropic(api_key=api_key, base_url=base_url, timeout=300.0)
+        self.raw_client = anthropic.Anthropic(api_key=api_key, base_url=base_url,
+                                              timeout=300.0, max_retries=0)
         self.client = self.raw_client
 
     def set_thinking_level(self, level: str) -> None:
@@ -221,7 +246,20 @@ class ClaudeApiClient(ApiClient):
 
         import sys as _sys
         out = _sys.stdout
-        with self.client.messages.stream(**kwargs) as stream:
+        stack = contextlib.ExitStack()
+        try:
+            # 建连阶段（连接失败/超时/429/5xx）经 retry.py 退避重试（默认再试 2 次）;
+            # 一旦开始收事件就不再重试——重放会让内容重复, 流中断直接抛给上层。
+            def _open_stream():
+                try:
+                    # ExitStack 只在进入成功后登记清理: 失败的尝试无残留, 可安全重试
+                    return stack.enter_context(self.client.messages.stream(**kwargs))
+                except Exception as e:
+                    api_err = _map_to_retry_error(e)
+                    if api_err is None:
+                        raise
+                    raise api_err from e
+            stream = send_with_retry(_open_stream)
             blocks = {}
             for event in stream:
                 if event.type == 'content_block_start':
@@ -296,7 +334,8 @@ class ClaudeApiClient(ApiClient):
                         streaming_thinking = _end_thinking_indicator(out, streaming_thinking)
                         streaming_text = _stop_text_line(out, streaming_text)
                     if event.delta.stop_reason == "max_tokens":
-                        out.write("输出被 max_tokens 截断!")
+                        if self.emit_output:
+                            out.write("输出被 max_tokens 截断!")
 
                 elif event.type == 'message_stop':
                     streaming_thinking = _end_thinking_indicator(out, streaming_thinking)
@@ -309,5 +348,7 @@ class ClaudeApiClient(ApiClient):
                     events.append(MessageStopEvent(
                         usage=UsageInfo(**usage_acc) if usage_acc else None,
                     ))
+        finally:
+            stack.close()
 
         return  events

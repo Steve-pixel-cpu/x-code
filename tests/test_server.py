@@ -247,6 +247,63 @@ def test_ws_queues_second_turn_while_busy(client, isolated_store, monkeypatch):
         web_session.busy = False
 
 
+def test_ws_queue_promote_jumps_queue_while_busy(client, isolated_store):
+    """「立即」: busy 会话上 queue_promote 把指定待发送消息提到最前并叫停当前轮, 无回执。"""
+    web_session = server.get_or_create_web_session("s-promote")
+    web_session.busy = True
+    web_session.pending = ["第一条", "第二条"]
+    try:
+        with client.websocket_connect("/ws/s-promote") as ws:
+            ws.send_json({"type": "queue_promote", "text": "第二条"})
+            ws.send_json({"type": "nope"})   # 探测: queue_promote 分支应静默
+            reply = json.loads(ws.receive_text())
+            assert reply["type"] == "error"
+            assert "未知消息类型" in reply["message"]
+            assert web_session.pending == ["第二条", "第一条"]
+            assert web_session.stop_requested is True
+    finally:
+        web_session.busy = False
+        web_session.stop_requested = False
+        web_session.pending = []
+
+
+def test_ws_queue_promote_ignores_unknown_text(client, isolated_store):
+    """queue_promote 的文本不在待发送区（可能已开跑）: 静默忽略, 不误杀当前轮。"""
+    web_session = server.get_or_create_web_session("s-promote2")
+    web_session.busy = True
+    web_session.pending = ["第一条"]
+    try:
+        with client.websocket_connect("/ws/s-promote2") as ws:
+            ws.send_json({"type": "queue_promote", "text": "不存在的消息"})
+            ws.send_json({"type": "nope"})
+            reply = json.loads(ws.receive_text())
+            assert reply["type"] == "error"
+            assert web_session.pending == ["第一条"]
+            assert web_session.stop_requested is False
+    finally:
+        web_session.busy = False
+        web_session.pending = []
+
+
+def test_ws_queue_remove_drops_pending_text(client, isolated_store):
+    """编辑/删除待发送卡片: queue_remove 从待发送区移除首个匹配文本, 不叫停当前轮。"""
+    web_session = server.get_or_create_web_session("s-rm")
+    web_session.busy = True
+    web_session.pending = ["第一条", "第二条", "第一条"]
+    try:
+        with client.websocket_connect("/ws/s-rm") as ws:
+            ws.send_json({"type": "queue_remove", "text": "第一条"})
+            ws.send_json({"type": "nope"})
+            reply = json.loads(ws.receive_text())
+            assert reply["type"] == "error"
+            assert "未知消息类型" in reply["message"]
+            assert web_session.pending == ["第二条", "第一条"]   # 只移除首个匹配
+            assert web_session.stop_requested is False
+    finally:
+        web_session.busy = False
+        web_session.pending = []
+
+
 def test_ws_empty_user_message_is_ignored(client, isolated_store):
     """空文本不回错也不开轮: 服务端静默丢弃（收不到任何回复）。"""
     with client.websocket_connect("/ws/s-empty") as ws:

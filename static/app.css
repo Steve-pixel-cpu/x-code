@@ -29,6 +29,8 @@
     --pop-bg: rgba(30, 30, 38, .74);   /* 悬浮层玻璃底: 半透明 + 模糊 */
     --content-w: min(1500px, calc(100% - 64px));
     --r-sm: 8px; --r-md: 12px; --r-lg: 16px; --r-xl: 20px;
+    /* 等宽栈: 拉丁走 mono 字体, 中文回退到雅黑（否则 Windows 下会掉进宋体, 十分难看） */
+    --font-mono: "Cascadia Code", "JetBrains Mono", Menlo, Consolas, "Microsoft YaHei", monospace;
     /* 代码高亮（hljs 类名，深色） */
     --hl-comment: #6b6d76; --hl-keyword: #f27a5c; --hl-string: #9ecb74;
     --hl-number: #e5b567;  --hl-title: #6fb3f2;  --hl-attr: #d18fe8;
@@ -116,6 +118,7 @@
   }
 
   * { box-sizing: border-box; margin: 0; padding: 0; }
+  input[type="checkbox"], input[type="radio"] { accent-color: var(--accent); }
   html, body { height: 100%; }
   body {
     font-family: -apple-system, "SF Pro Text", "Segoe UI Variable Text", "Segoe UI",
@@ -421,14 +424,43 @@
     border-radius: var(--r-lg); border-bottom-right-radius: 6px;
     font-size: 14px; line-height: 1.65; white-space: pre-wrap; word-break: break-word;
   }
-  /* 排队中的后续消息: 半透明 + 「已排队」徽标, 轮到它时转正 */
-  .msg.user.queued .bubble { opacity: .6; }
-  .q-chip {
-    display: inline-flex; align-items: center; margin-left: 8px;
-    padding: 1px 8px; border-radius: 999px;
-    background: var(--surface-3); color: var(--text-3);
-    font-size: 11px; vertical-align: 1px; white-space: nowrap;
+  /* 待发送条: 嵌在输入卡顶部的灰色标题条, 与输入框一体化 (Claude.ai 式)
+     操作: 「↑ 立即」打断当前回复让它插队 / 编辑放回输入框 / 删除 */
+  #queue-cards { display: flex; flex-direction: column; }
+  #queue-cards:empty { display: none; }
+  #queue-cards:not(:empty) { margin-bottom: 8px; }
+  .q-card {
+    display: flex; align-items: center; gap: 8px;
+    margin: 0 -14px 0 -17px;   /* 横向顶满输入卡内边距 */
+    padding: 7px 12px 7px 16px;
+    background: var(--surface-2);
+    border-bottom: 1px solid var(--border);
   }
+  #queue-cards .q-card:first-child {
+    margin-top: -13px;   /* 吃掉输入卡顶部内边距, 贴住圆角 */
+    border-radius: calc(var(--r-xl) - 1px) calc(var(--r-xl) - 1px) 0 0;
+  }
+  .q-card .q-text {
+    flex: 1; min-width: 0; font-size: 12.5px; color: var(--text-2);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .q-promote {
+    flex: none; display: inline-flex; align-items: center; gap: 4px;
+    border: 1px solid var(--border-strong); background: var(--surface);
+    color: var(--text); border-radius: 7px; padding: 3px 9px;
+    font-size: 11.5px; font-weight: 600; cursor: pointer; font-family: inherit;
+  }
+  .q-promote:hover { color: var(--accent); border-color: var(--accent-border); background: var(--accent-soft); }
+  .q-ico {
+    flex: none; width: 24px; height: 24px; border: none; background: none;
+    border-radius: 6px; color: var(--text-3); cursor: pointer;
+    display: inline-flex; align-items: center; justify-content: center;
+  }
+  .q-ico:hover { color: var(--text); background: var(--hover); }
+  .q-ico.q-del:hover { color: var(--err); background: var(--err-soft); }
+  /* 已登记插队: 等当前回复收尾, 卡片置灰防重复点击 */
+  .q-card.promoting { opacity: .55; }
+  .q-card.promoting button { pointer-events: none; }
 
   /* assistant 消息: 头像 + 无框正文（文档感） */
   .msg.assistant { gap: 11px; }
@@ -458,7 +490,7 @@
   .bubble li { margin: .2em 0; }
   .bubble li::marker { color: var(--text-3); }
   .bubble code {
-    font-family: "Cascadia Code", Consolas, "JetBrains Mono", monospace; font-size: .9em;
+    font-family: var(--font-mono); font-size: .9em;
     background: var(--surface-2); border: 1px solid var(--border);
     padding: 1.5px 6px; border-radius: 5px;
   }
@@ -485,7 +517,7 @@
   .code-lang {
     font-size: 11px; color: var(--text-3); font-weight: 600;
     letter-spacing: .05em; text-transform: uppercase;
-    font-family: "Cascadia Code", Consolas, monospace;
+    font-family: var(--font-mono);
   }
   .code-copy {
     display: inline-flex; align-items: center; gap: 5px;
@@ -531,6 +563,11 @@
   }
   .think-row .t-ico { flex: none; display: inline-flex; color: var(--text-3); }
   .think-row.thinking { color: var(--text-2); }
+  /* 本轮被打断: 「已停止」追加在思考胶囊尾部 */
+  .think-row .t-stopped {
+    flex: none; color: var(--text-3);
+    border-left: 1px solid var(--border-strong); padding-left: 7px;
+  }
   .think-row .shine {
     background: linear-gradient(90deg, var(--text-3) 30%, var(--text) 50%, var(--text-3) 70%);
     background-size: 200% 100%;
@@ -552,7 +589,7 @@
   .tool-row .tdesc {
     flex: 0 1 auto; min-width: 0;
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-    font-family: "Cascadia Code", Consolas, monospace; font-size: 11.5px;
+    font-family: var(--font-mono); font-size: 11.5px;
   }
   .tool-row .tstate { flex: none; }
   .tstate::before { content: "· "; }
@@ -571,6 +608,12 @@
   }
   .note.warn { color: var(--warn); background: var(--warn-soft); border-color: color-mix(in srgb, var(--warn) 26%, transparent); }
   .note.err  { color: var(--err); background: var(--err-soft); border-color: color-mix(in srgb, var(--err) 26%, transparent); }
+  /* 打断收尾: 素雅一行 + 底部细分隔线, 不用警示样式 */
+  .note.stopped {
+    width: 100%; max-width: 100%; border: none; background: none;
+    color: var(--text-3); font-size: 12.5px; padding: 0 2px 12px;
+    border-bottom: 1px solid var(--border); border-radius: 0;
+  }
   @supports not (background: color-mix(in srgb, red 50%, blue)) {
     .note.warn { border-color: transparent; } .note.err { border-color: transparent; }
   }
@@ -593,15 +636,14 @@
     display: none; width: var(--content-w); margin: 0 auto 8px; padding-left: 6px;
     align-items: center; gap: 9px;
   }
-  #thinking .dots { display: inline-flex; gap: 4px; }
-  #thinking .dots i {
-    width: 5px; height: 5px; border-radius: 50%; background: var(--accent);
-    animation: bounce 1.2s infinite;
+  /* 等待转圈: 模型首 token 未到 / 工具跑完后的 prefill 空窗, 告诉用户还没结束 */
+  #thinking .spin {
+    flex: none; width: 13px; height: 13px; border-radius: 50%;
+    border: 2px solid var(--border-strong); border-top-color: var(--accent);
+    animation: spin .8s linear infinite;
   }
-  #thinking .dots i:nth-child(2) { animation-delay: .15s; }
-  #thinking .dots i:nth-child(3) { animation-delay: .3s; }
   #thinking .t { color: var(--text-3); font-size: 12.5px; }
-  @keyframes bounce { 0%, 60%, 100% { transform: translateY(0); opacity: .4; } 30% { transform: translateY(-4px); opacity: 1; } }
+  @keyframes spin { to { transform: rotate(360deg); } }
 
   #input-card {
     width: var(--content-w); margin: 0 auto;
@@ -679,7 +721,7 @@
     transition: border-color .15s;
   }
   .set-input:focus { outline: none; border-color: var(--accent-border); }
-  .set-input.mono { font-family: "Cascadia Code", Consolas, monospace; font-size: 12px; }
+  .set-input.mono { font-family: var(--font-mono); font-size: 12px; }
   .key-row { display: flex; gap: 6px; align-items: center; }
   .key-row .set-input { flex: 1; }
   .key-eye {
@@ -732,7 +774,7 @@
     flex: none; width: 116px; height: 30px;
     border: 1px solid var(--border-strong); border-radius: 7px;
     background: var(--bg); color: var(--text);
-    font-family: "Cascadia Code", Consolas, monospace; font-size: 12.5px;
+    font-family: var(--font-mono); font-size: 12.5px;
     padding: 0 9px; text-align: right; transition: border-color .15s;
   }
   .hex-input:focus { outline: none; border-color: var(--accent-border); }
@@ -844,7 +886,7 @@
   #dir-path-input {
     flex: 1; min-width: 0; height: 28px;
     border: 1px solid var(--border-strong); border-radius: 7px;
-    padding: 0 9px; font-size: 12px; font-family: "Cascadia Code", Consolas, monospace;
+    padding: 0 9px; font-size: 12px; font-family: var(--font-mono);
     color: var(--text); background: var(--bg);
   }
   #dir-path-input:focus { outline: none; border-color: var(--accent-border); }
@@ -899,7 +941,7 @@
     background: var(--code-bg); border: 1px solid var(--border);
     border-radius: 8px; padding: 9px 11px;
     max-height: 220px; overflow: auto; font-size: 12px;
-    font-family: "Cascadia Code", Consolas, monospace; white-space: pre-wrap; word-break: break-all;
+    font-family: var(--font-mono); white-space: pre-wrap; word-break: break-all;
     margin-top: 5px;
   }
   #perm-modal .btns { display: flex; gap: 10px; justify-content: flex-end; margin-top: 16px; }

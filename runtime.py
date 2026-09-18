@@ -261,6 +261,7 @@ class ConversationRuntime:
             )
     def compact(self)->  str:
         curr_session = self._session
+        # 手动压缩: 0 让估算闸门恒过, 无条件压到 preserve_recent
         compact_reslut = compact_session(
             messages=curr_session.messages,
             config=CompactionConfig(
@@ -277,6 +278,9 @@ class ConversationRuntime:
         # 信号: 最近一次调用的 input_tokens ≈ 当前上下文占用。
         # 旧实现用累计 input（计费口径，单调涨），和上下文大小无关。
         latest = self.usage().current_turn_usage()
+        # 真正的闸门是下面这个真实用量阈值; 传 max_estimated_tokens=0 是
+        # 有意的——阈值已过就让估算恒过闸, 无条件压到 preserve_recent,
+        # 并非"消息多就每轮压缩"
         if latest.input_tokens >= self._auto_compact_threshold:
             curr_session = self._session
             compact_reslut = compact_session(

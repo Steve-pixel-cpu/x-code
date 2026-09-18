@@ -251,7 +251,12 @@ class _LiveMessagesProxy:
         self._dispatch = dispatch_ref
 
     def stream(self, **kwargs):
-        return _LiveStreamProxy(self._real.stream(**kwargs), self._dispatch.current(),
+        sink = self._dispatch.current()
+        # 每次向模型发起调用就广播一次: 工具跑完到下一个 token 之间有一段
+        # prefill 空窗, 界面全静会像已经结束——前端据此显示等待转圈
+        if sink is not None:
+            sink({"type": "await_output"})
+        return _LiveStreamProxy(self._real.stream(**kwargs), sink,
                                 self._dispatch.current_should_stop())
 
 
@@ -707,12 +712,25 @@ def _spawn_turn_thread(web_session: WebSession, text: str,
 def _drain_queued_turns() -> None:
     """槽位释放后按 FIFO 唤醒排队轮次。事件循环线程独占调用。
 
-    排队期间被叫停（request_stop）或已断连的会话直接跳过: prompter.cancel
-    已经把它的等待权限请求全部 DENY, 轮次起了也会立刻收束, 不如不起。
+    排队期间被叫停（request_stop / 立即发送插队）或已断连的会话直接跳过:
+    prompter.cancel 已经把它的等待权限请求全部 DENY, 轮次起了也会立刻
+    收束, 不如不起。跳过时给会话收尾——插队场景（排队区非空）把被跳过
+    的轮次文本归队, 由后续消息接力开跑; 否则复位忙碌并补发 turn_done,
+    不然前端永远停在忙碌态。
     """
     while _queued_turns and _turn_slots.acquire(blocking=False):
         web_session, text, emitter, prompter = _queued_turns.pop(0)
         if web_session.stop_requested or not web_session.busy:
+            if web_session.busy:
+                if web_session.pending:
+                    web_session.pending.append(text)   # 插队消息在前, 原消息不丢
+                    if web_session.emits and web_session.loop is not None:
+                        web_session.loop.call_soon_threadsafe(
+                            _start_pending_turn, web_session)
+                else:
+                    web_session.busy = False
+                    emitter({"type": "turn_done", "interrupted": True, "iterations": 0,
+                             "budget_exhausted": False, "iterations_exhausted": False})
             continue
         _spawn_turn_thread(web_session, text, emitter, prompter)
 
@@ -1048,9 +1066,10 @@ async def ws_endpoint(websocket: WebSocket, session_id: str):
                 if not text:
                     continue
                 if web_session.busy:
-                    # 本轮还在跑: 追加进会话级排队区, 当前轮结束后自动接力
+                    # 本轮还在跑: 静默追加进会话级排队区, 当前轮结束后自动接力;
+                    # 前端在待发送气泡上提供「立即」按钮, 需要插队时发 queue_promote
                     if len(web_session.pending) >= 10:
-                        emit_error("排队消息过多（上限 10 条），请等当前轮次结束")
+                        emit_error("待发送消息过多（上限 10 条），请等当前轮次结束")
                         continue
                     web_session.pending.append(text)
                     emit({"type": "turn_queued_user", "position": len(web_session.pending)})
@@ -1071,6 +1090,25 @@ async def ws_endpoint(websocket: WebSocket, session_id: str):
                     continue
                 _start_turn(web_session, text, web_session.broadcast)
 
+            elif msg_type == "queue_promote":
+                # 「立即」: 把待发送区里的这条提到最前, 并叫停当前轮——
+                # 回落后它作为下一棒立刻接力开跑（朝安全侧, 同 request_stop
+                # 但不清空待发送区）。文本不在待发送区时静默忽略:
+                # 它可能已经开跑, 此刻叫停只会误杀当前轮
+                text = str(raw.get("text") or "").strip()
+                if text and web_session.busy and text in web_session.pending:
+                    web_session.pending.remove(text)
+                    web_session.pending.insert(0, text)
+                    web_session.stop_requested = True
+                    if web_session.prompter is not None:
+                        web_session.prompter.cancel()
+
+            elif msg_type == "queue_remove":
+                # 编辑/删除待发送卡片: 从待发送区移除首个匹配文本, 静默无回执
+                text = str(raw.get("text") or "").strip()
+                if text and text in web_session.pending:
+                    web_session.pending.remove(text)
+
             elif msg_type == "permission_response":
                 prompter = web_session.prompter
                 if prompter is None:
@@ -1082,7 +1120,7 @@ async def ws_endpoint(websocket: WebSocket, session_id: str):
                 request_stop(web_session)
 
             else:
-                emit_error(f"未知消息类型: {msg_type!r}（已知: user / permission_response / stop）")
+                emit_error(f"未知消息类型: {msg_type!r}（已知: user / queue_promote / queue_remove / permission_response / stop）")
 
     except WebSocketDisconnect:
         # 断连但一轮对话可能还在跑: 朝安全侧叫停；落盘由工作线程完成

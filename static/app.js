@@ -30,6 +30,7 @@ function runOf(id) {
       toolResultIndex: {},    // 历史回放: tool_use id → 卡片（等结果块配对）
       currentWorkdir: null,   // 该会话的工作目录（messages 接口返回）
       pendingSends: [],       // WS 建立期间待发的消息（onopen 后冲刷）
+      queue: [],              // 待发送消息（本轮进行中追加, 停在输入框上方卡片）
       unread: 0,              // 后台完成/待审批的未读计数
       loaded: false,          // 历史是否已加载过（首次切入必拉）
       loading: false,         // 历史加载进行中（防并发重复拉取）
@@ -56,6 +57,7 @@ function restoreCurrentInput() {
   $("input").value = v || "";
   autoGrow($("input"));
   updateSendBtn();
+  renderQueueCards();   // 待发送卡片跟着会话走
 }
 
 /* ============================================================
@@ -890,6 +892,10 @@ function handleServerMessage(msg, sid) {
       run.curThinking = null;
     } else if (msg.type === "turn_started") {
       run.busy = true;               // 排队的后续消息接力开跑
+      run.lastThinkRow = null;
+      const qi = run.queue.indexOf(msg.text);
+      if (qi >= 0) run.queue.splice(qi, 1);
+      addUserBubble(msg.text, colOf(sid));
     }
     return;
   }
@@ -903,6 +909,7 @@ function handleServerMessage(msg, sid) {
     case "turn_started":       onTurnStarted(msg, sid); break;
     case "turn_queued_user":   onTurnQueuedUser(msg, sid); break;
     case "turn_queue_cleared": onQueueCleared(sid); break;
+    case "await_output":       onAwaitOutput(); break;
     case "permission_request": onPermissionRequest(msg); break;
     case "turn_done":          onTurnDone(msg); break;
     case "session_renamed":    onSessionRenamed(msg); break;
@@ -976,6 +983,7 @@ function onThinkingStart(msg, sid) {
     '<span class="shine">思考中…</span>';
   colOf(sid).appendChild(div);
   run.curThinking = { el: div, t0: Date.now() };
+  run.lastThinkRow = div;   // 本轮思考行引用: 打断时「已停止」挂在这里
   if (active) scrollToBottom();
 }
 
@@ -991,6 +999,7 @@ function onThinkingEnd(msg, sid) {
   cur.el.innerHTML = '<span class="t-ico">' + ICON_MIND + '</span>' +
     '<span>思考 · 持续了 ' + fmtDuration(ms) + '</span>';
   run.curThinking = null;
+  run.lastThinkRow = cur.el;
   if (active) scrollToBottom();
 }
 
@@ -1127,21 +1136,27 @@ function endTurnUiReset() {
 }
 
 function onTurnQueued(msg) {
-  addNoteBubble("warn", `并发已满（上限 ${msg.max_concurrent} 轮），本轮已排队，前面轮次结束后自动开始`);
+  addNoteBubble("warn", `并发已满（上限 ${msg.max_concurrent} 轮），等前面的轮次结束后自动开始`);
 }
 
-/* ---------- 排队接力: 轮到排队的后续消息了 ---------- */
+function onAwaitOutput() {
+  // 模型调用已发出、首个 token 未到的空窗（每轮 prefill / 工具跑完后的下一轮）:
+  // 显示等待转圈, 收到 text/thinking 等首个事件时会被自动顶掉
+  const run = curRun();
+  if (run && run.busy) $("thinking").style.display = "flex";
+}
+
+/* ---------- 接力: 轮到待发送的后续消息了 ---------- */
 function onTurnStarted(msg, sid) {
   const run = runOf(sid);
   run.busy = true;
-  const col = colOf(sid);
-  const q = col.querySelector(".msg.user.queued");
-  if (q) {
-    q.classList.remove("queued");          // "已排队"气泡转正
-    const chip = q.querySelector(".q-chip");
-    if (chip) chip.remove();
-  }
+  run.lastThinkRow = null;   // 新一轮开始: 打断标记只属于当前轮的思考行
+  // 待发送卡片此刻转正: 从队列撤下, 消息正式出现在消息流
+  const qi = run.queue.indexOf(msg.text);
+  if (qi >= 0) run.queue.splice(qi, 1);
+  addUserBubble(msg.text, colOf(sid));
   if (sid === state.sessionId) {
+    renderQueueCards();
     $("thinking").style.display = "flex";
     setBusyUi(true);
     scrollToBottom();
@@ -1150,22 +1165,19 @@ function onTurnStarted(msg, sid) {
 }
 
 function onTurnQueuedUser(msg, sid) {
-  // 服务端确认入队: 用权威排队位置刷新徽标
-  const col = colOf(sid);
-  const chips = col.querySelectorAll(".msg.user.queued .q-chip");
-  const chip = chips[chips.length - 1];
-  if (chip) chip.textContent = `已排队 · 第${msg.position}位`;
+  // 服务端入队回执: 前端只显示中性的"待发送"徽标, 不展示排队位置
 }
 
 function onQueueCleared(sid) {
-  // 打断/断连清空排队区: 撤掉排队气泡, 最后一条放回输入框
-  const col = colOf(sid);
-  const qs = [...col.querySelectorAll(".msg.user.queued")];
-  if (!qs.length) return;
-  const lastText = qs[qs.length - 1]._text || "";
-  for (const q of qs) q.remove();
-  if (sid === state.sessionId && lastText) {
-    $("input").value = lastText;
+  // 打断/断连清空待发送区: 撤掉全部卡片, 文本放回输入框不丢
+  const run = runOf(sid);
+  if (!run.queue.length) return;
+  const texts = run.queue.slice();
+  run.queue.length = 0;
+  if (sid === state.sessionId) {
+    renderQueueCards();
+    const cur = $("input").value.trim();
+    $("input").value = cur ? cur + "\n" + texts.join("\n") : texts.join("\n");
     autoGrow($("input"));
   }
 }
@@ -1173,7 +1185,16 @@ function onQueueCleared(sid) {
 function onTurnDone(msg) {
   endTurnUiReset();
   if (msg.interrupted) {
-    addNoteBubble("warn", "已中断本轮对话");
+    // 「已停止」挂在本轮思考行的胶囊里; 本轮没思考过（工具/正文阶段打断）才落成独立提示行
+    const row = curRun()?.lastThinkRow;
+    if (row && row.isConnected) {
+      const tag = document.createElement("span");
+      tag.className = "t-stopped";
+      tag.textContent = "已停止";
+      row.appendChild(tag);
+    } else {
+      addNoteBubble("stopped", "已停止");
+    }
   } else if (msg.budget_exhausted) {
     addNoteBubble("warn", "本轮输出 token 预算已用尽，已提前收束本轮");
   } else if (msg.iterations_exhausted) {
@@ -1197,7 +1218,7 @@ function onError(msg) {
 function addNoteBubble(kind, text) {
   const div = document.createElement("div");
   div.className = "note " + kind;
-  div.textContent = (kind === "err" ? "✗ " : "⚠ ") + text;
+  div.textContent = (kind === "err" ? "✗ " : kind === "warn" ? "⚠ " : "") + text;
   msgCol().appendChild(div);
   scrollToBottom();
 }
@@ -1215,23 +1236,84 @@ function msgCol() {
   return colOf(id);
 }
 
-function addUserBubble(text, queued) {
+function addUserBubble(text, col) {
   const div = document.createElement("div");
-  div.className = "msg user" + (queued ? " queued" : "");
+  div.className = "msg user";
   div._text = text;
   const b = document.createElement("div");
   b.className = "bubble";
   b.textContent = text;   // 用户输入永远纯文本
-  if (queued) {
-    const chip = document.createElement("span");
-    chip.className = "q-chip";
-    chip.textContent = "已排队";
-    b.appendChild(chip);
-  }
   div.appendChild(b);
-  msgCol().appendChild(div);
+  (col || msgCol()).appendChild(div);
   scrollToBottom();
   return b;
+}
+
+/* ---------- 待发送卡片: ↑立即(插队) / 编辑(放回输入框) / 删除 ---------- */
+const Q_PROMOTE_SVG = '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5.5 11.5L12 5l6.5 6.5"/></svg>';
+
+function renderQueueCards() {
+  const box = $("queue-cards");
+  if (!box) return;
+  box.innerHTML = "";
+  const run = curRun();
+  const items = run ? run.queue : [];
+  items.forEach((text, idx) => {
+    const card = document.createElement("div");
+    card.className = "q-card";
+    const t = document.createElement("span");
+    t.className = "q-text";
+    t.textContent = text;
+    t.dataset.tip = text;   // 悬停看全文
+    card.appendChild(t);
+    const promote = document.createElement("button");
+    promote.type = "button";
+    promote.className = "q-promote";
+    promote.innerHTML = Q_PROMOTE_SVG + "<span>立即</span>";
+    promote.dataset.tip = "打断当前回复, 这条立即发送";
+    promote.onclick = () => {
+      card.classList.add("promoting");   // 已登记插队, 等当前回复收尾
+      sendWs({ type: "queue_promote", text });
+    };
+    card.appendChild(promote);
+    const edit = document.createElement("button");
+    edit.type = "button";
+    edit.className = "q-ico";
+    edit.innerHTML = PENCIL_SMALL_SVG;
+    edit.dataset.tip = "编辑";
+    edit.onclick = () => editQueued(idx);
+    card.appendChild(edit);
+    const del = document.createElement("button");
+    del.type = "button";
+    del.className = "q-ico q-del";
+    del.innerHTML = TRASH_SMALL_SVG;
+    del.dataset.tip = "删除";
+    del.onclick = () => removeQueued(idx);
+    card.appendChild(del);
+    box.appendChild(card);
+  });
+}
+
+function editQueued(idx) {
+  const run = curRun();
+  if (!run || run.queue[idx] === undefined) return;
+  const [text] = run.queue.splice(idx, 1);
+  sendWs({ type: "queue_remove", text });
+  const input = $("input");
+  input.value = input.value ? input.value + "\n" + text : text;
+  autoGrow(input);
+  input.focus();
+  saveCurrentInput();
+  updateSendBtn();
+  renderQueueCards();
+}
+
+function removeQueued(idx) {
+  const run = curRun();
+  if (!run) return;
+  const [text] = run.queue.splice(idx, 1);
+  if (text !== undefined) sendWs({ type: "queue_remove", text });
+  renderQueueCards();
 }
 
 function addAssistantBubble(html, raw, col) {
@@ -1261,9 +1343,11 @@ function updateSendBtn() {
   const btn = $("btn-send");
   const stop = !hasText && busy;
   btn.dataset.mode = stop ? "stop" : "send";
-  btn.dataset.tip = stop ? "停止本轮" : "发送";
+  btn.dataset.tip = stop ? "中断对话" : "发送";
 }
 function setBusyUi(busy) {
+  // 忙碌态占位符对齐 Claude.ai: 提示可以直接继续排队
+  $("input").placeholder = busy ? "继续输入以排队后续修改" : "提出后续修改要求";
   updateSendBtn();
 }
 
@@ -1292,14 +1376,28 @@ async function sendCurrent() {
     }
   }
   msgCol().querySelector(".empty-state")?.remove();
-  // 本轮在跑: 以排队样式追加, 服务端入队后轮到它自动接力
-  addUserBubble(text, busy);
+  nearBottom = true;
+  scrollToBottom(true);   // 发送是用户主动行为: 无论滚到哪里, 立刻回到底部看最新消息
+  // 本轮在跑: 消息进入输入框上方的待发送卡片, 轮到它时才出现在消息列
+  if (busy) {
+    runOf(state.sessionId).queue.push(text);
+    input.value = "";
+    autoGrow(input);
+    saveCurrentInput();          // 已发送: 清空本会话的输入草稿
+    updateSendBtn();             // 输入已清空: 圆钮切回"停止"形态, 随时可中断
+    renderQueueCards();
+    sendWs({ type: "user", text });
+    return;
+  }
+  addUserBubble(text);
   input.value = "";
   autoGrow(input);
   saveCurrentInput();          // 已发送: 清空本会话的输入草稿
+  updateSendBtn();             // 输入已清空: 忙碌态下圆钮切回"停止"形态
   const myRun = runOf(state.sessionId);
   if (!busy) {
     myRun.busy = true;
+    myRun.lastThinkRow = null;   // 新一轮开始: 打断标记只属于当前轮的思考行
     $("thinking").style.display = "flex";
     setBusyUi(true);
     renderSessionList();   // 立即显示运行状态（转圈图标）
@@ -1961,11 +2059,12 @@ document.body.appendChild(tip);
 let tipTimer = null, tipAnchor = null, tipSaved = null;
 
 function tipShow(el) {
-  const text = el.getAttribute("title") || el.getAttribute("data-tip") || "";
+  const nativeTitle = el.getAttribute("title");
+  const text = nativeTitle || el.getAttribute("data-tip") || "";
   if (!text) return;
-  tipSaved = { el, title: text };
-  el.removeAttribute("title");   // 压住原生提示, 移开时还原
-  tip.textContent = text;
+  tipSaved = { el, title: nativeTitle || null };   // 仅原生 title 需要压住/还原;
+  if (nativeTitle) el.removeAttribute("title");    // data-tip 不能回写 title, 否则动态
+  tip.textContent = text;                          // 改文案后会被旧 title 永远盖住
   tip.classList.add("show");
   const r = el.getBoundingClientRect();
   const x = Math.max(8, Math.min(r.left + r.width / 2 - tip.offsetWidth / 2, window.innerWidth - tip.offsetWidth - 8));
@@ -1977,7 +2076,10 @@ function tipShow(el) {
 function tipHide() {
   if (tipTimer) { clearTimeout(tipTimer); tipTimer = null; }
   tip.classList.remove("show");
-  if (tipSaved) { tipSaved.el.setAttribute("title", tipSaved.title); tipSaved = null; }
+  if (tipSaved) {
+    if (tipSaved.title) tipSaved.el.setAttribute("title", tipSaved.title);
+    tipSaved = null;
+  }
 }
 document.addEventListener("mouseover", ev => {
   const el = ev.target.closest("[title], [data-tip]");

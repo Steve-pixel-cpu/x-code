@@ -1,5 +1,5 @@
-from asyncio import sleep
-from typing import Callable, TypeVar
+import time
+from typing import Callable, Optional, TypeVar
 
 # CC 的默认常量 — 源码: client.rs:18-20
 DEFAULT_INITIAL_BACKOFF_MS = 200
@@ -33,7 +33,7 @@ class AuthError(ApiError):
         super().__init__(message)
 
 class RetriesExhausted(ApiError):
-    def __init(self, attempts: int, last_error: ApiError):
+    def __init__(self, attempts: int, last_error: ApiError):
         self.attempts = attempts
         self.last_error = last_error
         self.is_retryable = last_error.is_retryable
@@ -59,6 +59,7 @@ def send_with_retry(
     initial_backoff_ms: int = DEFAULT_INITIAL_BACKOFF_MS,
     max_backoff_ms: int = DEFAULT_MAX_BACKOFF_MS,
 ) -> T:
+    last_error: Optional[ApiError] = None
     retry_count = 0
     while True:
         retry_count += 1
@@ -66,18 +67,15 @@ def send_with_retry(
         try:
             return fn()
         except ApiError as e:
-            if e.is_retryable and retry_count <= max_retries + 1:
-                last_error = e
-            else:
+            last_error = e
+            if not (e.is_retryable and retry_count <= max_retries + 1):
                 raise
         if retry_count > max_retries:
             break
 
         backoff_time = backoff_for_attempt(retry_count, initial_backoff_ms, max_backoff_ms)
-        sleep(backoff_time)
+        time.sleep(backoff_time)   # 同步退避; asyncio.sleep 在这里不会真正休眠
 
 
-    raise RetriesExhausted(initial_backoff_ms, last_error)
-
-
-
+    assert last_error is not None   # 能走到这说明循环内必然捕获过 ApiError
+    raise RetriesExhausted(retry_count, last_error)
