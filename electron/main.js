@@ -95,6 +95,7 @@ async function createWindow() {
     backgroundColor: "#101014",   // 与前端深色主题一致, 避免启动闪白
     autoHideMenuBar: true,
     title: "x-code",
+    icon: path.join(ROOT, "static", "icon.png"),   // 窗口/任务栏图标（打包成 exe 需另配 .ico）
     show: false,
     webPreferences: {
       contextIsolation: true,

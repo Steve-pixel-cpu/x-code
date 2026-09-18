@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <meta name="color-scheme" content="dark light">
 <title>x-code</title>
+<link rel="icon" type="image/png" href="/static/icon.png">
 <script>/* 主题与强调色在绘制前应用，避免闪白 (dark | light | system) */ (function(){var p=localStorage.getItem("xc-theme")||"system";var d=p==="dark"||(p==="system"&&window.matchMedia("(prefers-color-scheme: dark)").matches);document.documentElement.dataset.theme=d?"dark":"light";var a=localStorage.getItem("xc-accent");if(a&&a!=="gray")document.documentElement.dataset.accent=a;})();</script>
 <script src="https://cdn.jsdelivr.net/npm/marked@12.0.2/lib/marked.umd.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@highlightjs/cdn-assets@11.9.0/highlight.min.js"></script>
@@ -16,7 +17,7 @@
 
 <!-- ============ 左侧栏 ============ -->
 <aside id="sidebar">
-  <div class="side-logo"><span class="mark">✻</span>x-code</div>
+  <div class="side-logo"><img class="mark" src="/static/icon.png" alt="">x-code</div>
 
   <!-- 会话侧栏（进入设置页时整块切换为设置导航） -->
   <div id="side-chat">
@@ -156,9 +157,20 @@
         </div>
         <input id="accent-hex-input" class="hex-input" spellcheck="false" placeholder="#8b80f9" maxlength="7">
       </div>
+      <div class="set-row">
+        <div class="set-info">
+          <div class="set-name">应用图标</div>
+          <div class="set-desc">替换侧栏与消息头像的标志；PNG/JPEG/WebP，建议 256×256（限 384KB）</div>
+        </div>
+        <img id="icon-preview" src="/static/icon.png" alt="">
+        <button type="button" class="icon-act" id="btn-icon-upload">上传图片</button>
+        <button type="button" class="icon-act" id="btn-icon-reset">恢复默认</button>
+        <input type="file" id="icon-file" accept="image/png,image/jpeg,image/webp" hidden>
+      </div>
       </div>
       <div class="sp-section-body" data-section="models" style="display:none">
         <div class="sp-section">模型</div>
+        <div class="sp-section-desc">管理 API 供应商与模型列表；保存后立即可在会话中切换</div>
         <div id="provider-cards"></div>
         <div class="prov-actions">
           <button type="button" id="btn-add-provider" class="prov-ghost">+ 添加供应商</button>

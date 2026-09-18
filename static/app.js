@@ -528,9 +528,19 @@ function renderSessionList() {
     }
   }
 
-  // 任务 = 没有选择文件夹的会话
+  // 任务 = 没有选择文件夹的会话; 标题行带 + 与项目分组一致
+  const taskRow = document.createElement("div");
+  taskRow.className = "list-label-row";
+  taskRow.innerHTML = '<span class="list-label">任务</span>';
+  const taskAdd = document.createElement("button");
+  taskAdd.type = "button";
+  taskAdd.className = "icon-btn";
+  taskAdd.dataset.tip = "新建任务";
+  taskAdd.innerHTML = PLUS_SMALL_SVG;
+  taskAdd.onclick = ev => { ev.stopPropagation(); startDraft(); };
+  taskRow.appendChild(taskAdd);
+  list.appendChild(taskRow);
   const loose = sessions.filter(s => !s.workdir);
-  addLabel("任务");
   if (!loose.length) {
     const e = document.createElement("div");
     e.className = "list-empty";
@@ -622,8 +632,7 @@ async function browseDir(path) {
   }
 }
 
-function openDirPop() {
-  const anchor = $("btn-add-project");
+function openDirPop(anchor = $("btn-add-project")) {
   const r = anchor.getBoundingClientRect();
   dirPop.classList.add("open");
   const left = Math.max(10, Math.min(r.left, window.innerWidth - 352));
@@ -651,6 +660,10 @@ $("dir-path-input").addEventListener("keydown", ev => {
 $("dir-pick").onclick = () => {
   if (!dirBrowsePath) return;
   addProject(dirBrowsePath);
+  if (state.draft) {   // 从欢迎页打开: 选中的目录同时作为草稿的工作区
+    state.draftDir = dirBrowsePath;
+    showEmptyState();
+  }
   closeDirPop();
 };
 document.addEventListener("click", ev => {
@@ -735,19 +748,20 @@ const SUGGESTIONS = [
 
 function showEmptyState() {
   const col = msgCol();
+  const h = new Date().getHours();
+  const greet = h < 6 ? "夜深了" : h < 12 ? "上午好" : h < 14 ? "中午好" : h < 18 ? "下午好" : "晚上好";
+  const wsRow = state.draft
+    ? "<div class='ws-chip-row'><button class='ws-chip' id='ws-chip'></button></div>"
+    : "";
   col.innerHTML =
-    "<div class='empty-state'>" +
-    "<div class='mark'>✻</div><h2>开始新任务</h2>" +
-    "<p>和 x-code 聊聊代码，它会用工具帮你完成任务</p>" +
-    (state.draft && state.draftDir
-      ? "<div class='draft-proj'><span class='dp-ico'>" + FOLDER_SVG
-        + "</span>新会话将归入项目&nbsp;<b></b></div>"
-      : "") +
+    "<div class='empty-state welcome'>" +
+    "<img class='watermark' src='" + iconUrl() + "' alt=''>" +
+    "<h2>" + greet + "呀，有什么想让我帮忙的吗</h2>" +
+    wsRow +
     "<div class='sug-row'>" +
     SUGGESTIONS.map(s => `<button class='sug-chip'>${escapeHtml(s)}</button>`).join("") +
     "</div></div>";
-  const dpName = col.querySelector(".draft-proj b");
-  if (dpName) dpName.textContent = projectDisplayName(state.draftDir);
+  renderWsChip();
   col.querySelectorAll(".sug-chip").forEach(chip => {
     chip.onclick = () => {
       $("input").value = chip.textContent;
@@ -756,6 +770,105 @@ function showEmptyState() {
     };
   });
 }
+
+/* ---------- 工作区 chip + 下拉: 选了文件夹归项目, 不选归独立任务 ---------- */
+const WS_CHEV = '<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>';
+
+function renderWsChip() {
+  const chip = $("ws-chip");
+  if (!chip) return;
+  if (state.draftDir) {
+    chip.classList.add("on");
+    chip.innerHTML = FOLDER_SVG + "<span class='ws-name'></span>" +
+      "<span class='ws-x' data-tip='清除, 作为独立任务'>×</span>" + WS_CHEV;
+    chip.querySelector(".ws-name").textContent = projectDisplayName(state.draftDir);
+    chip.title = state.draftDir;
+    chip.querySelector(".ws-x").onclick = ev => {
+      ev.stopPropagation();
+      state.draftDir = null;
+      renderWsChip();
+    };
+  } else {
+    chip.classList.remove("on");
+    chip.innerHTML = FOLDER_SVG + "<span>选择工作区</span>" + WS_CHEV;
+    chip.title = "";
+  }
+  chip.onclick = ev => { ev.stopPropagation(); openWsPop(chip); };
+}
+
+function knownWorkspaces() {
+  const set = new Set(state.customProjects);
+  for (const s of state.sessions) if (s.workdir) set.add(s.workdir);
+  return [...set];
+}
+
+function openWsPop(anchor) {
+  closeWsPop();
+  const known = knownWorkspaces();
+  const pop = document.createElement("div");
+  pop.id = "ws-pop";
+  pop.innerHTML = "<input class='ws-search' placeholder='搜索工作区'><div class='ws-list'></div>" +
+    "<div class='ws-item ws-act' data-act='browse'>" + FOLDER_SVG + "<span>打开文件夹…</span></div>" +
+    "<div class='ws-item ws-act' data-act='none'>" + FOLDER_SVG + "<span>不在项目中工作</span></div>";
+  document.body.appendChild(pop);
+  const list = pop.querySelector(".ws-list");
+  const renderList = q => {
+    const items = known.filter(w => !q || w.toLowerCase().includes(q.toLowerCase()));
+    list.innerHTML = items.length
+      ? items.map(w =>
+          `<div class="ws-item${w === state.draftDir ? " on" : ""}">` +
+          FOLDER_SVG + "<span>" + escapeHtml(projectDisplayName(w)) + "</span>" +
+          (w === state.draftDir ? "<span class='ws-check'>✓</span>" : "") + "</div>").join("")
+      : '<div class="list-empty" style="margin:8px 10px">没有匹配的工作区</div>';
+    const els = list.querySelectorAll(".ws-item");
+    items.forEach((w, i) => {
+      els[i].onclick = () => {
+        state.draftDir = w;
+        closeWsPop();
+        renderWsChip();
+      };
+    });
+  };
+  renderList("");
+  pop.querySelector(".ws-search").addEventListener("input", ev => renderList(ev.target.value));
+  pop.querySelector("[data-act='browse']").onclick = async () => {
+    closeWsPop();
+    if (window.xcodePickFolder) {   // 桌面端: 原生文件夹对话框
+      try {
+        const dir = await window.xcodePickFolder();
+        if (dir) { addProject(dir); state.draftDir = dir; renderWsChip(); }
+      } catch (e) { /* 用户取消 */ }
+      return;
+    }
+    openDirPop(anchor);             // 浏览器/预览: 页面内目录浏览兜底
+  };
+  pop.querySelector("[data-act='none']").onclick = () => {
+    state.draftDir = null;
+    closeWsPop();
+    renderWsChip();
+  };
+  // 定位: chip 下方, 越界时翻到上方/收拢
+  const r = anchor.getBoundingClientRect();
+  pop.style.visibility = "hidden";
+  requestAnimationFrame(() => {
+    let left = Math.max(10, Math.min(r.left, window.innerWidth - pop.offsetWidth - 10));
+    let top = r.bottom + 6;
+    if (top + pop.offsetHeight > window.innerHeight - 10) {
+      top = Math.max(10, r.top - pop.offsetHeight - 6);
+    }
+    pop.style.left = left + "px";
+    pop.style.top = top + "px";
+    pop.style.visibility = "";
+    pop.querySelector(".ws-search").focus();
+  });
+}
+function closeWsPop() { const p = $("ws-pop"); if (p) p.remove(); }
+document.addEventListener("click", ev => {
+  const pop = $("ws-pop");
+  if (!pop) return;
+  const chip = $("ws-chip");
+  if (!pop.contains(ev.target) && !(chip && chip.contains(ev.target))) closeWsPop();
+});
 
 function startDraft(draftDir = null) {
   saveCurrentInput();          // 离开原会话: 保存其未发送输入
@@ -1319,9 +1432,10 @@ function removeQueued(idx) {
 function addAssistantBubble(html, raw, col) {
   const div = document.createElement("div");
   div.className = "msg assistant";
-  const avatar = document.createElement("div");
+  const avatar = document.createElement("img");
   avatar.className = "avatar";
-  avatar.textContent = "✻";
+  avatar.src = iconUrl();
+  avatar.alt = "";
   const b = document.createElement("div");
   b.className = "bubble";
   b.innerHTML = html || "";
@@ -1713,7 +1827,19 @@ async function loadSettings() {
     if (s.workspace) $("ws-tag-text").textContent = s.workspace;
     state.serverWorkspace = s.workspace || null;
     refreshWorkdirTag();
+    if (s.icon_ver) { iconVer = s.icon_ver; applyIconEverywhere(iconUrl()); }
   } catch (e) { console.error("加载设置失败", e); }
+}
+
+/* ---------- 应用图标: 设置 → 外观 可上传替换, 服务端落盘 static/icon.png ---------- */
+let iconVer = 0;   // 图标文件版本（mtime）: 用 ?v= 穿透浏览器缓存
+const iconUrl = () => "/static/icon.png" + (iconVer ? `?v=${iconVer}` : "");
+function applyIconEverywhere(src) {
+  document.querySelectorAll("img.mark, img.avatar").forEach(el => { el.src = src; });
+  const fav = document.querySelector('link[rel="icon"]');
+  if (fav) fav.href = src;
+  const prev = $("icon-preview");
+  if (prev) prev.src = src;
 }
 
 /* ---------- 模型供应商配置: 渲染 / 编辑 / 保存 ---------- */
@@ -1750,25 +1876,28 @@ function buildProviderCard(p) {
   const card = document.createElement("div");
   card.className = "prov-card";
 
-  /* 头部: 名称 / 已启用 / 删除 */
+  /* 头部: 行内名称 / 启用开关 / 删除 */
   const head = document.createElement("div");
   head.className = "prov-head";
   const name = document.createElement("input");
-  name.className = "set-input prov-name";
+  name.className = "prov-name";
   name.value = p.name || "";
   name.placeholder = "供应商名称";
   name.addEventListener("input", () => { p.name = name.value; });
   const en = document.createElement("label");
-  en.className = "prov-enabled";
+  en.className = "prov-switch";
   const enBox = document.createElement("input");
   enBox.type = "checkbox";
   enBox.checked = p.enabled !== false;
   enBox.addEventListener("change", () => { p.enabled = enBox.checked; });
-  en.append(enBox, document.createTextNode("已启用"));
+  const track = document.createElement("i");
+  track.className = "track";
+  en.append(enBox, track, document.createTextNode("已启用"));
   const del = document.createElement("button");
   del.type = "button";
   del.className = "prov-del";
-  del.textContent = "删除供应商";
+  del.innerHTML = TRASH_SMALL_SVG;
+  del.dataset.tip = "删除供应商";
   del.onclick = () => {
     if (!confirm(`删除供应商「${p.name}」？其模型将从下拉中移除。`)) return;
     state.providerCfg.providers = state.providerCfg.providers.filter(x => x !== p);
@@ -1780,22 +1909,21 @@ function buildProviderCard(p) {
   head.append(name, en, del);
   card.appendChild(head);
 
-  /* Base URL */
+  /* 连接配置: Base URL / API Key 并排两列 */
+  const grid = document.createElement("div");
+  grid.className = "prov-grid";
   const urlField = document.createElement("div");
   urlField.className = "prov-field";
-  urlField.innerHTML = "<label>Base URL</label>";
+  urlField.innerHTML = "<label>BASE URL</label>";
   const url = document.createElement("input");
   url.className = "set-input mono";
   url.value = p.base_url || "";
   url.placeholder = "https://...";
   url.addEventListener("input", () => { p.base_url = url.value; });
   urlField.appendChild(url);
-  card.appendChild(urlField);
-
-  /* API Key */
   const keyField = document.createElement("div");
   keyField.className = "prov-field";
-  keyField.innerHTML = "<label>API Key</label>";
+  keyField.innerHTML = "<label>API KEY</label>";
   const keyRow = document.createElement("div");
   keyRow.className = "key-row";
   const key = document.createElement("input");
@@ -1810,16 +1938,17 @@ function buildProviderCard(p) {
   eye.onclick = () => { key.type = key.type === "password" ? "text" : "password"; };
   keyRow.append(key, eye);
   keyField.appendChild(keyRow);
-  card.appendChild(keyField);
+  grid.append(urlField, keyField);
+  card.appendChild(grid);
 
-  /* 模型列表 */
+  /* 模型列表: 列头 + 行 */
   const mField = document.createElement("div");
-  mField.className = "prov-field";
-  mField.innerHTML = "<label>模型列表</label>";
+  mField.className = "prov-models";
+  mField.innerHTML =
+    '<div class="prov-models-label">模型列表</div>' +
+    '<div class="model-cols"><span>显示名</span><span>模型 ID</span><span>标签</span><span></span></div>';
   const rows = document.createElement("div");
-  rows.style.display = "flex";
-  rows.style.flexDirection = "column";
-  rows.style.gap = "6px";
+  rows.className = "model-rows";
   const buildModelRow = m => {
     const row = document.createElement("div");
     row.className = "model-row";
@@ -1857,7 +1986,7 @@ function buildProviderCard(p) {
   const addM = document.createElement("button");
   addM.type = "button";
   addM.className = "m-add";
-  addM.textContent = "+ 添加模型";
+  addM.textContent = "＋ 添加模型";
   addM.onclick = () => {
     const m = { id: "", name: "", tags: [] };
     p.models.push(m);
@@ -1875,6 +2004,48 @@ $("btn-add-provider").onclick = () => {
     models: [{ id: "", name: "", tags: [] }],
   });
   renderProviderSettings();
+};
+
+/* ---------- 设置 → 外观: 应用图标上传 / 恢复默认 ---------- */
+$("btn-icon-upload").onclick = () => $("icon-file").click();
+$("icon-file").addEventListener("change", () => {
+  const file = $("icon-file").files[0];
+  $("icon-file").value = "";   // 清空: 允许重复选择同一文件
+  if (!file) return;
+  if (file.size > 384 * 1024) { toast("图片过大（限 384KB）"); return; }
+  const rd = new FileReader();
+  rd.onload = async () => {
+    const data = String(rd.result || "");
+    if (!/^data:image\/(png|jpeg|webp);base64,/.test(data)) {
+      toast("仅支持 PNG / JPEG / WebP");
+      return;
+    }
+    try {
+      const r = await fetch("/api/icon", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ data }),
+      });
+      if (!r.ok) throw new Error((await r.json()).detail || "HTTP " + r.status);
+      iconVer = (await r.json()).ver;
+      applyIconEverywhere(data);   // dataURL 即时生效, 无缓存问题
+      toast("图标已更新");
+    } catch (e) { toast("图标更新失败: " + e.message); }
+  };
+  rd.readAsDataURL(file);
+});
+$("btn-icon-reset").onclick = async () => {
+  try {
+    const r = await fetch("/api/icon", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ data: null }),
+    });
+    if (!r.ok) throw new Error((await r.json()).detail || "HTTP " + r.status);
+    iconVer = (await r.json()).ver;
+    applyIconEverywhere(iconUrl());
+    toast("已恢复默认图标");
+  } catch (e) { toast("恢复失败: " + e.message); }
 };
 $("btn-save-providers").onclick = saveProviders;
 async function saveProviders() {

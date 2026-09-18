@@ -14,10 +14,13 @@
 #   WebPermissionPrompter — 权限询问转发成弹窗，阻塞等浏览器审批
 
 import asyncio
+import base64
 import json
 import os
 import platform
 import queue
+import re
+import shutil
 import sys
 import threading
 import time
@@ -797,6 +800,45 @@ async def index():
     return FileResponse(STATIC_DIR / "index.html")
 
 
+@app.get("/favicon.ico", include_in_schema=False)
+async def favicon():
+    # 浏览器/工具的默认图标请求路径兜底（页面里已用 <link> 指到 /static/icon.png）
+    return FileResponse(STATIC_DIR / "icon.png")
+
+
+# --- 应用图标: 设置 → 外观 可上传替换; icon-default.png 是出厂副本 ---
+_ICON_DEFAULT = STATIC_DIR / "icon-default.png"
+_ICON_RE = re.compile(r"^data:image/(png|jpeg|webp);base64,(.+)$", re.S)
+
+
+def _icon_ver() -> int:
+    """图标文件 mtime 当版本号: 前端拿它做缓存穿透 (?v=ver)。"""
+    try:
+        return int((STATIC_DIR / "icon.png").stat().st_mtime)
+    except OSError:
+        return 0
+
+
+@app.post("/api/icon")
+async def api_post_icon(request: dict):
+    """data 为 dataURL 时覆盖应用图标, null 恢复出厂; 返回新版本号。"""
+    data = request.get("data")
+    live = STATIC_DIR / "icon.png"
+    if data is None:
+        if not _ICON_DEFAULT.exists():
+            raise HTTPException(status_code=400, detail="出厂图标缺失，无法恢复")
+        shutil.copyfile(_ICON_DEFAULT, live)
+    else:
+        m = _ICON_RE.match(str(data))
+        if not m:
+            raise HTTPException(status_code=400, detail="图标必须是 PNG/JPEG/WebP 的 dataURL")
+        raw = base64.b64decode(m.group(2))
+        if len(raw) > 512 * 1024:
+            raise HTTPException(status_code=400, detail="图标过大（解码后限 512KB）")
+        live.write_bytes(raw)
+    return {"ok": True, "ver": _icon_ver()}
+
+
 @app.get("/api/sessions")
 async def api_list_sessions():
     on_disk = set(store.list_sessions())
@@ -921,6 +963,7 @@ async def api_get_settings():
         "provider_id": active.get("provider"),
         "model_id": active.get("model"),
         "workspace": Path.cwd().name,
+        "icon_ver": _icon_ver(),
     }
 
 
