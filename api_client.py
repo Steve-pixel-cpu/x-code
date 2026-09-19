@@ -204,7 +204,7 @@ class ClaudeApiClient(ApiClient):
                  model: str,
                  tools: list[dict] | None = None,
                  emit_output: bool = True,
-                 thinking_level: str = "low",
+                 thinking_level: str = "high",
                  base_url: str | None = None):
 
         self.model = model

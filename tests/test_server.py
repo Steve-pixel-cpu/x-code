@@ -466,52 +466,35 @@ def test_turn_emitter_无id事件回退FIFO():
 
 
 # ------------------------------------------------------------
-# 插队不遗弃: 被抢占任务自动回队尾接力, 手动停止才是彻底停
+# 插队即遗弃: 被打断任务就地收束不自动续跑, 与手动停止同语义
 # ------------------------------------------------------------
 
 def _stub_session(**kw):
     from types import SimpleNamespace
     s = SimpleNamespace(busy=True, pending=[], prompter=None,
-                        preempted=False, current_text=None,
                         stop_requested=False, broadcast=lambda p: None)
     for k, v in kw.items():
         setattr(s, k, v)
     return s
 
 
-def test_promote_pending_置位抢占并提到队首():
-    s = _stub_session(current_text="任务A", pending=["B", "C"])
+def test_promote_pending_提到队首并叫停当前轮():
+    s = _stub_session(pending=["B", "C"])
 
     assert server.promote_pending(s, "B") is True
     assert s.pending == ["B", "C"]
-    assert s.preempted is True and s.stop_requested is True
+    assert s.stop_requested is True
 
 
 def test_promote_pending_不在队列时静默忽略():
     s = _stub_session(pending=["B"])
 
     assert server.promote_pending(s, "X") is False
-    assert s.preempted is False and s.stop_requested is False
+    assert s.stop_requested is False
 
 
-def test_抢占收尾_被打断任务合成接力消息回队尾():
-    s = _stub_session(preempted=True, current_text="看看目前子agent的编排实现了没",
-                      pending=["B"])
+def test_request_stop_清空排队区():
+    s = _stub_session(pending=["B"])
 
-    server._schedule_continuation(s)
-
-    assert s.preempted is False
-    assert s.pending[0] == "B"
-    assert len(s.pending) == 2
-    assert "看看目前子agent的编排实现了没" in s.pending[1]
-    assert "插队" in s.pending[1]        # 接力消息自描述: 引用原文 + 进度在历史里
-
-
-def test_手动停止不续跑():
-    s = _stub_session(preempted=True, current_text="任务A", pending=["B"])
-
-    server.request_stop(s)               # 叫停清掉抢占标记并清空排队区
-    assert s.preempted is False and s.pending == []
-
-    server._schedule_continuation(s)     # 收尾时不再合成接力消息
-    assert s.pending == []
+    server.request_stop(s)               # 叫停 = 彻底停: 排队区一并撤回
+    assert s.stop_requested is True and s.pending == []

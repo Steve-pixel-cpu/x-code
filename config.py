@@ -56,10 +56,10 @@ class RuntimeFeatureConfig(BaseModel):
     # max_tokens 留位），否则永远轮不到它触发——只会等 API 报 context length。
     # 取 128k 窗口的 ~75%，上下文过半即压，避免长会话每步拖着巨量历史。
     token_budget: int = 100_000
-    # 默认 low: GLM 强制思考无法关闭, 输出 tokens 直接决定墙钟时间;
-    # medium/high 在简单步骤上烧 8k+ 思考纯付串行延迟。要深想按项目
-    # 配 thinkingLevel 或 CLAUDE_THINKING_LEVEL 覆盖。
-    thinking_level: str = "low"
+    # 默认 high: 深思考质量优先。速度敏感场景按项目配 thinkingLevel 或
+    # CLAUDE_THINKING_LEVEL 调低（low 明显更快——输出 tokens 是每步
+    # 墙钟时间的主导项）。
+    thinking_level: str = "high"
     turn_token_budget: int = 65_536
 
 class RuntimeConfig(BaseModel):
@@ -156,7 +156,7 @@ class ConfigLoader:
             permission_mode = mode_map[raw_mode]
 
         # thinking_level: 思考深浅档位，budget 映射见 api_client.THINKING_LEVEL_TO_BUDGET
-        raw_level = merged.get("thinkingLevel", "low")
+        raw_level = merged.get("thinkingLevel", "high")
         if not isinstance(raw_level, str) or raw_level.strip().lower() not in (
             "low", "medium", "high", "max",
         ):

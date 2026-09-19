@@ -169,12 +169,26 @@ def format_compact_summary(summary: str) -> str:
         result = result.replace(match.group(0), f"Summary:\n{content}")
     return _collapse_blank_lines(result).strip()
 
+def _adjust_cut_point(messages: List[Message], keep_from: int) -> int:
+    """把切割点回退到安全边界: 保留区不能以 tool 消息开头。
+
+    消息序列是 user → assistant(tool_use) → tool(result) → ... 条数切割
+    可能正好切在工具交换块中间——tool_use 被压进摘要、tool_result 留在
+    保留区, 下一轮 _convert_message 会发出引用了不存在 tool_use 的
+    tool_result, API 直接 400 掀翻整轮。回退到这组交换块的起点
+    （assistant(tool_use) 之前）, 让 tool_use 和它的 result 同生共死。
+    """
+    while keep_from > 0 and messages[keep_from].role == "tool":
+        keep_from -= 1
+    return keep_from
+
+
 def compact_session(messages: List[Message], config: CompactionConfig) -> CompactionResult:
     """执行会话压缩 — 源码 compact.rs:75-111
 
         核心逻辑:
         1. 判断是否需要压缩
-        2. 分割: 旧消息（要压缩的）+ 新消息（要保留的）
+        2. 分割: 旧消息（要压缩的）+ 新消息（要保留的）, 切割点落在安全边界
         3. 对旧消息生成摘要
         4. 创建延续消息（System 角色）
         5. 返回: [延续消息] + 保留的消息
@@ -187,8 +201,18 @@ def compact_session(messages: List[Message], config: CompactionConfig) -> Compac
             removed_count= 0
         )
 
-    # 分割点: 保留最后 N 条
+    # 分割点: 保留最后 N 条; 再回退出工具交换块（悬空 tool_result 防护）
     keep_from = max(0, len(messages) - config.preserve_recent_messages)
+    keep_from = _adjust_cut_point(messages, keep_from)
+    if keep_from == 0:
+        # 回退到头: 没有可安全切割的位置, 宁可不压——原样返回,
+        # 调用方按 removed_count == 0 的"没压掉东西"语义处理
+        return CompactionResult(
+            summary="",
+            formatted_summary="",
+            compacted_messages=messages,
+            removed_count=0
+        )
     removed = messages[:keep_from]
     preserved = messages[keep_from:]
 

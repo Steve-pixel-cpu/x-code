@@ -33,12 +33,11 @@ def make_loader(tmp_path: ...) -> ConfigLoader:
 
 
 # ------------------------------------------------------------
-# 配置解析 — 契约: 默认 low（提速: 思考预算是每步串行延迟的主导项）;
-# low/medium/high/max 合法; 非法值报 ConfigError
+# 配置解析 — 契约: 默认 high; low/medium/high/max 合法; 非法值报 ConfigError
 # ------------------------------------------------------------
 
-def test_default_level_is_low(tmp_path):
-    assert make_loader(tmp_path).load().thinking_level() == "low"
+def test_default_level_is_high(tmp_path):
+    assert make_loader(tmp_path).load().thinking_level() == "high"
 
 
 @pytest.mark.parametrize("level", ["low", "medium", "high", "max", "HIGH", " low "])

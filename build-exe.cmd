@@ -49,6 +49,14 @@ call npx tauri build
 if errorlevel 1 exit /b 1
 
 echo.
+echo Copying installer into dist\ and removing stale Electron artifacts...
+if not exist dist mkdir dist
+copy /y "src-tauri\target\release\bundle\nsis\x-code_*_x64-setup.exe" dist\ >nul
+if errorlevel 1 exit /b 1
+del /q "dist\x-code 0.1.0.exe" >nul 2>&1
+del /q "dist\x-code Setup 0.1.0.exe" >nul 2>&1
+
+echo.
 echo Done. Artifacts in dist\:
 dir /b dist\*.exe
 endlocal

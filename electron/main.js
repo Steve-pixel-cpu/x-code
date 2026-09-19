@@ -75,7 +75,7 @@ function startServer() {
       process.platform === "win32" ? "x-code-server.exe" : "x-code-server");
     const dataDir = path.join(app.getPath("home"), ".x-code");
     fs.mkdirSync(dataDir, { recursive: true });
-    const proc = spawn(exe, [], {
+    const proc = spawn(exe, ["--parent-pid", String(process.pid)], {
       cwd: dataDir,
       windowsHide: true,
       detached: process.platform !== "win32",   // posix: 独立进程组, 退出时整组杀
@@ -96,7 +96,7 @@ function startServer() {
     ? path.join(ROOT, ".venv", "Scripts", "python.exe")
     : path.join(ROOT, ".venv", "bin", "python");
   const cmd = fs.existsSync(pyExe) ? pyExe : "python";
-  const proc = spawn(cmd, [path.join(ROOT, "server.py")], {
+  const proc = spawn(cmd, [path.join(ROOT, "server.py"), "--parent-pid", String(process.pid)], {
     cwd: ROOT,
     windowsHide: true,
     detached: process.platform !== "win32",

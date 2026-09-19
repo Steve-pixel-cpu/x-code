@@ -18,7 +18,8 @@
     "targets": ["nsis"],
     "icon": ["icons/icon.ico"],
     "resources": {
-      "server/x-code-server.exe": "server/"
+      "server/x-code-server.exe": "resources/server/x-code-server.exe",
+      "WebView2Loader.dll": "WebView2Loader.dll"
     },
     "windows": {
       "nsis": {

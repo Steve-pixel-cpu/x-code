@@ -24,7 +24,7 @@ from permissions import PermissionRequest, PermissionResult, PermissionMode, Per
 from prompt import SystemPromptBuilder
 from runtime import ConversationRuntime
 from storage import SessionStore
-from tools import ToolRegistry, bash_tool, read_tool, write_tool, powershell_tool
+from tools import ToolRegistry, bash_tool, read_tool, write_tool, powershell_tool, git_bash_unavailable_reason
 
 DEFAULT_MODEL = "glm-5.3-flash"
 bash_spec = {
@@ -36,9 +36,11 @@ bash_spec = {
         "installing dependencies, and other command-line tasks. "
         "Commands time out after 30 seconds, so avoid long-running or "
         "interactive commands. "
-        "Note: on Windows this runs through PowerShell (there is no sh), "
-        "so use PowerShell-compatible syntax; bash-only constructs such as "
-        "'&&' chains, subshells, or GNU grep/sed flags may not work."
+        "On Windows this runs in Git Bash (MSYS2), so standard bash/GNU "
+        "syntax works: '&&' chains, pipes, grep/sed/awk are available. "
+        "Prefer this tool over powershell for portability. "
+        "Note: output is UTF-8; prefer bash text tools (cat/grep) over "
+        "cmdlets for reading files."
     ),
     "input_schema": {
         "type": "object",
@@ -48,7 +50,7 @@ bash_spec = {
                 "description": (
                     "The shell command to execute, e.g. 'ls -la' or "
                     "'python script.py'. Must be non-interactive. "
-                    "On Windows, write PowerShell-compatible commands."
+                    "Use bash syntax on all platforms."
                 ),
             },
         },
@@ -687,6 +689,11 @@ def usage() -> None:
 
 def main():
     setup_console()
+    # 命令执行器依赖 Git Bash: 没有就拒绝启动（说明里带下载入口）
+    reason = git_bash_unavailable_reason()
+    if reason:
+        print(c_red("✗ " + reason))
+        sys.exit(1)
     session_store = SessionStore(
         storage_dir=USER_DIR / "sessions",
     )

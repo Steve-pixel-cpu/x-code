@@ -163,7 +163,13 @@ fn start_server() -> Result<Child, String> {
     });
     if let Some(exe_path) = sidecar {
         let _ = std::fs::create_dir_all(data_dir());
-        return spawn_backend(exe_path, vec![], data_dir());
+        // --parent-pid: 后端内置看门狗, 壳死亡(含崩溃/被强杀)时后端立刻退出,
+        // 端口随之释放——ExitRequested 清理只覆盖正常退出路径
+        return spawn_backend(
+            exe_path,
+            vec!["--parent-pid".to_string(), std::process::id().to_string()],
+            data_dir(),
+        );
     }
     // 开发态: 项目 .venv 的 python 跑 server.py。
     // 兼容三种启动: cargo run（cwd=src-tauri）、项目根跑 target 下的 exe、任意目录启动
@@ -189,7 +195,11 @@ fn start_server() -> Result<Child, String> {
     };
     spawn_backend(
         python,
-        vec![root.join("server.py").to_string_lossy().to_string()],
+        vec![
+            root.join("server.py").to_string_lossy().to_string(),
+            "--parent-pid".to_string(),
+            std::process::id().to_string(),
+        ],
         root,
     )
 }

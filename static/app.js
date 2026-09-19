@@ -55,6 +55,7 @@ function runOf(id) {
       loaded: false,          // 历史是否已加载过（首次切入必拉）
       loading: false,         // 历史加载进行中（防并发重复拉取）
       everConnected: false,   // 该会话 WS 是否成功连过（区分首次连接与断线重连）
+      awaiting: false,        // 忙碌中且正处于等待模型输出的空窗（await_output 起止）
     };
   }
   return state.runs[id];
@@ -773,6 +774,7 @@ async function selectSession(id) {
   renderSessionList();
   refreshWorkdirTag();
   setBusyUi(run.busy);
+  syncThinkingIndicator();   // 切会话必须重算: 转圈只属于"正在等待输出的那个会话"
   setConn(run.ws && run.ws.readyState === 1 ? "on" : "", run.ws ? (run.ws.readyState === 1 ? "已连接" : "连接中…") : "未连接");
   // 有挂着的审批请求: 重新弹出
   if (id === state.sessionId && run.pendingPerm) onPermissionRequest(run.pendingPerm);
@@ -1065,24 +1067,37 @@ function handleServerMessage(msg, sid) {
     else if (msg.type === "thinking_end") onThinkingEnd(msg, sid);
     else if (msg.type === "tool_use") onToolUse(msg, sid);
     else if (msg.type === "tool_result") onToolResult(msg, sid);
+    else if (msg.type === "await_output") run.awaiting = run.busy;
 
     if (msg.type === "permission_request") { bumpUnread(sid); run.pendingPerm = msg; }
     else if (msg.type === "tool_result") bumpUnread(sid);
     else if (msg.type === "turn_done" || msg.type === "error") {
       bumpUnread(sid);
       run.busy = false;
+      run.awaiting = false;
       run.queued = false;
       run.pendingPerm = null;
       // 轮次收口: 悬空工具行标"已中断", 清掉流式指针
       sweepPendingToolCards(run);
       run.curBubble = null;
-      run.curThinking = null;
+      // 思考行/乐观胶囊兜底收口（客户端计时）, 与前台 endTurnUiReset 一致;
+      // 只清指针的话, 行会永远卡在"思考中…"动画态
+      if (run.curThinking) onThinkingEnd({}, sid);
+      // 打断收口与前台 onTurnDone 一致: 「已停止」挂在本轮思考行上
+      if (msg.type === "turn_done" && msg.interrupted
+          && run.lastThinkRow && run.lastThinkRow.isConnected) {
+        const tag = document.createElement("span");
+        tag.className = "t-stopped";
+        tag.textContent = "已停止";
+        run.lastThinkRow.appendChild(tag);
+      }
     } else if (msg.type === "turn_started") {
       run.busy = true;               // 排队的后续消息接力开跑
       run.lastThinkRow = null;
       const qi = run.queue.indexOf(msg.text);
       if (qi >= 0) run.queue.splice(qi, 1);
       addUserBubble(msg.text, colOf(sid));
+      beginOptimisticThinking(run, sid, colOf(sid));
     }
     return;
   }
@@ -1096,7 +1111,7 @@ function handleServerMessage(msg, sid) {
     case "turn_started":       onTurnStarted(msg, sid); break;
     case "turn_queued_user":   onTurnQueuedUser(msg, sid); break;
     case "turn_queue_cleared": onQueueCleared(sid); break;
-    case "await_output":       onAwaitOutput(); break;
+    case "await_output":       onAwaitOutput(msg, state.sessionId); break;
     case "permission_request": onPermissionRequest(msg); break;
     case "turn_done":          onTurnDone(msg); break;
     case "session_renamed":    onSessionRenamed(msg); break;
@@ -1117,7 +1132,9 @@ function bumpUnread(sid) {
 function onTextDelta(msg, sid) {
   const run = runOf(sid);
   const active = sid === state.sessionId;
-  if (active) $("thinking").style.display = "none";
+  run.awaiting = false;                    // 首个内容事件: 等待空窗结束
+  if (active) syncThinkingIndicator();
+  dropOptimisticThinking(run);   // 正文先到: 撤掉还没被 thinking_start 接管的乐观胶囊
   if (!run.curBubble) {
     run.curBubble = addAssistantBubble("", "", colOf(sid));
     run.curBubble._raw = "";
@@ -1161,9 +1178,10 @@ function fmtDuration(ms) {
 function onThinkingStart(msg, sid) {
   const run = runOf(sid);
   const active = sid === state.sessionId;
-  if (active) $("thinking").style.display = "none";
+  run.awaiting = false;                    // 思考行已是可见反馈: 空窗结束
+  if (active) syncThinkingIndicator();
   flushAssistantBubble(run);
-  if (run.curThinking) return;   // 已有实时思考行
+  if (run.curThinking) return;   // 已有实时思考行或乐观胶囊: 直接采用, 计时连续不归零
   const div = document.createElement("div");
   div.className = "think-row thinking";
   div.innerHTML = '<span class="t-ico">' + ICON_MIND + '</span>' +
@@ -1177,17 +1195,47 @@ function onThinkingStart(msg, sid) {
 function onThinkingEnd(msg, sid) {
   const run = runOf(sid);
   const active = sid === state.sessionId;
-  if (active) $("thinking").style.display = "none";
+  if (active) syncThinkingIndicator();
   const cur = run.curThinking;
   if (!cur) return;
-  // 服务端计时优先，缺失（轮次兜底收口）时用客户端起止时间
-  const ms = typeof msg.duration_ms === "number" ? msg.duration_ms : Date.now() - cur.t0;
+  // 服务端计时优先，缺失（轮次兜底收口）时用客户端起止时间。
+  // 例外: 乐观胶囊出身的思考行用客户端起止——服务端 duration_ms 只覆盖
+  // 思考块本身, 会把 发送→首个思考块 之间的 prefill 等待丢掉, 违背
+  // "等待+思考合并计时"的语义（等待就是用户真实等待的一部分）。
+  const ms = (cur.optimistic || typeof msg.duration_ms !== "number")
+    ? Date.now() - cur.t0 : msg.duration_ms;
   cur.el.classList.remove("thinking");
   cur.el.innerHTML = '<span class="t-ico">' + ICON_MIND + '</span>' +
     '<span>思考 · 持续了 ' + fmtDuration(ms) + '</span>';
   run.curThinking = null;
   run.lastThinkRow = cur.el;
   if (active) scrollToBottom();
+}
+
+/* ---------- 乐观思考胶囊 ----------
+ * 发送/接力开跑的瞬间先渲染"思考中…"胶囊, 把模型首个事件之前不可见的
+ * prefill 等待（长会话可达几十秒）变成可见反馈。thinking_start 到达时,
+ * onThinkingStart 的 curThinking 守卫直接采用它而不新建第二条, 计时从乐观
+ * 创建时刻起连续不归零; 若首个输出是正文/工具, dropOptimisticThinking 撤下
+ * （正文气泡/工具卡已经是反馈, 不能让胶囊与它们同屏挂着）。 */
+function beginOptimisticThinking(run, sid, col) {
+  if (run.curThinking || run.curBubble) return;   // 已有思考行/正文已开流: 不重复创建
+  const div = document.createElement("div");
+  div.className = "think-row thinking";
+  div.innerHTML = '<span class="t-ico">' + ICON_MIND + '</span>' +
+    '<span class="shine">思考中…</span>';
+  col.appendChild(div);
+  run.curThinking = { el: div, t0: Date.now(), optimistic: true };
+  run.lastThinkRow = div;   // 打断「已停止」与轮次收口兜底都走 lastThinkRow, 复用既有逻辑
+  if (sid === state.sessionId) scrollToBottom();
+}
+
+function dropOptimisticThinking(run) {
+  const cur = run.curThinking;
+  if (!cur || !cur.optimistic) return;   // 只撤尚未被 thinking_start 接管的
+  cur.el.remove();
+  if (run.lastThinkRow === cur.el) run.lastThinkRow = null;
+  run.curThinking = null;
 }
 
 /* ---------- 工具调用 ---------- */
@@ -1248,8 +1296,10 @@ function completeToolCard(row, { is_error, denied }) {
 function onToolUse(msg, sid) {
   const run = runOf(sid);
   const active = sid === state.sessionId;
-  if (active) $("thinking").style.display = "none";
+  run.awaiting = false;                    // 工具卡已是可见反馈: 空窗结束
+  if (active) syncThinkingIndicator();
   flushAssistantBubble(run);   // 工具前先收掉流式中的正文气泡
+  dropOptimisticThinking(run);   // 工具先于思考到达: 撤掉乐观胶囊（工具卡已是反馈）
   const card = addToolCard({ id: msg.id, name: msg.name, input: msg.input }, colOf(sid));
   if (msg.id) run.liveToolCards[msg.id] = card;   // 按 id 登记, 结果精确配对
   run.activeToolCard = card;
@@ -1329,6 +1379,7 @@ function endTurnUiReset() {
   const run = curRun();
   if (run) {
     run.busy = false;
+    run.awaiting = false;
     run.queued = false;
     run.unread = 0;             // 前台亲眼看完了, 未读清零
     flushAssistantBubble(run);
@@ -1336,7 +1387,7 @@ function endTurnUiReset() {
     sweepPendingToolCards(run);
     if (run.curThinking) onThinkingEnd({}, state.sessionId);   // 思考行兜底收口（客户端计时）
   }
-  $("thinking").style.display = "none";
+  syncThinkingIndicator();
   setBusyUi(false);
   renderSessionList();          // 运行标识/未读刷新
 }
@@ -1345,25 +1396,31 @@ function onTurnQueued(msg) {
   addNoteBubble("warn", `并发已满（上限 ${msg.max_concurrent} 轮），等前面的轮次结束后自动开始`);
 }
 
-function onAwaitOutput() {
+function onAwaitOutput(msg, sid) {
   // 模型调用已发出、首个 token 未到的空窗（每轮 prefill / 工具跑完后的下一轮）:
-  // 显示等待转圈, 收到 text/thinking 等首个事件时会被自动顶掉
-  const run = curRun();
-  if (run && run.busy) $("thinking").style.display = "flex";
+  // 空窗状态记在会话上, 显示统一走 syncThinkingIndicator 重算——
+  // 切到该会话时也能正确显示/隐藏, 不会残留到别的会话
+  const run = runOf(sid);
+  if (run && run.busy) {
+    run.awaiting = true;
+    if (sid === state.sessionId) syncThinkingIndicator();
+  }
 }
 
 /* ---------- 接力: 轮到待发送的后续消息了 ---------- */
 function onTurnStarted(msg, sid) {
   const run = runOf(sid);
   run.busy = true;
+  run.awaiting = false;      // 新一轮: 上一轮的空窗状态作废, 等 await_output 重新点亮
   run.lastThinkRow = null;   // 新一轮开始: 打断标记只属于当前轮的思考行
   // 待发送卡片此刻转正: 从队列撤下, 消息正式出现在消息流
   const qi = run.queue.indexOf(msg.text);
   if (qi >= 0) run.queue.splice(qi, 1);
   addUserBubble(msg.text, colOf(sid));
+  beginOptimisticThinking(run, sid, colOf(sid));   // 排队消息接力开跑: 立刻给反馈
   if (sid === state.sessionId) {
     renderQueueCards();
-    $("thinking").style.display = "flex";
+    syncThinkingIndicator();
     setBusyUi(true);
     scrollToBottom();
   }
@@ -1558,6 +1615,14 @@ function setBusyUi(busy) {
   updateSendBtn();
 }
 
+/* 底部"思考中"转圈 = 当前会话忙且正处于等待模型输出的空窗（await_output
+ * 起至首个内容事件）。此前各事件分支里手工开关、切换会话不重算:
+ * 切到空闲会话转圈残留、后台轮次跑完转圈不灭——统一在这里按当前会话重算。 */
+function syncThinkingIndicator() {
+  const run = curRun();
+  $("thinking").style.display = run && run.busy && run.awaiting ? "flex" : "none";
+}
+
 async function sendCurrent() {
   const input = $("input");
   const text = input.value.trim();
@@ -1607,8 +1672,10 @@ async function sendCurrent() {
   const myRun = runOf(state.sessionId);
   if (!busy) {
     myRun.busy = true;
+    myRun.awaiting = false;
     myRun.lastThinkRow = null;   // 新一轮开始: 打断标记只属于当前轮的思考行
-    $("thinking").style.display = "flex";
+    beginOptimisticThinking(myRun, state.sessionId, msgCol());   // 乐观胶囊: 发送瞬间即有反馈
+    syncThinkingIndicator();
     setBusyUi(true);
     renderSessionList();   // 立即显示运行状态（转圈图标）
   }

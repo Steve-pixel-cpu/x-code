@@ -66,7 +66,7 @@ from permissions import (
 )
 from prompt import SystemPromptBuilder
 from storage import SessionStore
-from tools import ToolRegistry
+from tools import ToolRegistry, git_bash_unavailable_reason
 
 setup_console()  # Windows 控制台 UTF-8 兜底（服务器日志不乱码，与 CLI 同一入口）
 
@@ -517,10 +517,6 @@ class WebSession:
         self.persisted_count = 0       # 已落盘的消息条数（本轮从这之后保存）
         self.busy = False              # 并发守卫: 一轮对话进行中
         self.stop_requested = False
-        # 插队抢占标记: queue_promote 置位, worker 收尾时消费——被抢占任务
-        # 合成接力消息回队尾, 默认不遗弃; 手动停止会清除（叫停 = 彻底停）
-        self.preempted = False
-        self.current_text: Optional[str] = None  # 当前轮的用户消息原文（抢占接力用）
         self.titled = store.get_title(session_id) is not None  # 自动命名一次
         self.workdir = store.get_workdir(session_id)  # 会话工作目录（项目）
         # 会话级思考等级: 初值取全局默认; 切换只影响本会话（runtime 注入）
@@ -672,8 +668,6 @@ def _start_turn(web_session: WebSession, text: str, emit: Callable) -> None:
     """
     web_session.busy = True
     web_session.stop_requested = False
-    web_session.preempted = False
-    web_session.current_text = text   # 插队接力时引用原文用
     web_session.persisted_count = len(web_session.runtime.session().messages)
     emitter = TurnEmitter(emit)
     prompter = WebPermissionPrompter(emitter)
@@ -705,9 +699,8 @@ def _spawn_turn_thread(web_session: WebSession, text: str,
             # 用户主动打断: 修补悬空 tool_use 后照常落盘（朝安全侧, 与 CLI Ctrl+C 同路径）
             repair_interrupted_turn(web_session.runtime.session())
             persist_turn(web_session)
-            # 插队抢占（区别于手动停止）: 被打断的任务合成接力消息回队尾,
-            # 默认不遗弃——插队只改变先后顺序
-            _schedule_continuation(web_session)
+            # 插队与手动停止同语义: 被打断的任务就地收束, 不自动续跑
+            # （被打断的进度留在历史里, 是否继续由用户下一次消息决定）
             emitter({"type": "turn_done", "interrupted": True, "iterations": 0,
                      "budget_exhausted": False, "iterations_exhausted": False})
         except Exception as e:
@@ -720,8 +713,6 @@ def _spawn_turn_thread(web_session: WebSession, text: str,
                      "budget_exhausted": False, "iterations_exhausted": False})
         else:
             persist_turn(web_session)
-            # 正常跑完（插队请求可能没来得及生效）: 无被遗弃任务, 清掉标记
-            web_session.preempted = False
             needs_title = not web_session.titled
             emitter({
                 "type": "turn_done",
@@ -757,8 +748,8 @@ def _drain_queued_turns() -> None:
 
     排队期间被叫停（request_stop / 立即发送插队）或已断连的会话直接跳过:
     prompter.cancel 已经把它的等待权限请求全部 DENY, 轮次起了也会立刻
-    收束, 不如不起。跳过时给会话收尾——插队场景（排队区非空）把被跳过
-    的轮次文本归队, 由后续消息接力开跑; 否则复位忙碌并补发 turn_done,
+    收束, 不如不起。跳过时给会话收尾——排队区还有消息（如插队消息）就归队
+    被跳过的轮次文本并调度接力开跑; 否则复位忙碌并补发 turn_done,
     不然前端永远停在忙碌态。
     """
     while _queued_turns and _turn_slots.acquire(blocking=False):
@@ -766,7 +757,7 @@ def _drain_queued_turns() -> None:
         if web_session.stop_requested or not web_session.busy:
             if web_session.busy:
                 if web_session.pending:
-                    web_session.pending.append(text)   # 插队消息在前, 原消息不丢
+                    web_session.pending.append(text)   # 被跳过的轮次归队, 不丢失
                     if web_session.emits and web_session.loop is not None:
                         web_session.loop.call_soon_threadsafe(
                             _start_pending_turn, web_session)
@@ -805,8 +796,6 @@ def request_stop(web_session: WebSession) -> None:
     if not web_session.busy:
         return
     web_session.stop_requested = True
-    # 手动叫停优先于插队续跑: 用户叫停的意图是彻底停下, 被打断的任务不回队
-    web_session.preempted = False
     if web_session.pending:
         web_session.pending.clear()
         web_session.broadcast({"type": "turn_queue_cleared"})
@@ -819,40 +808,18 @@ def promote_pending(web_session: WebSession, text: str) -> bool:
 
     回落后它作为下一棒立刻接力开跑（朝安全侧, 同 request_stop 但不清空
     待发送区）。文本不在待发送区时静默忽略（返回 False）——它可能已经
-    开跑, 此刻叫停只会误杀当前轮。被抢占的当前任务由 worker 在收尾时
-    经 _schedule_continuation 回到队尾, 默认不遗弃。
+    开跑, 此刻叫停只会误杀当前轮。
+    与手动停止一致: 被打断的任务就地收束不自动续跑, 是否继续由用户
+    下一次消息决定。
     """
     if not (text and web_session.busy and text in web_session.pending):
         return False
     web_session.pending.remove(text)
     web_session.pending.insert(0, text)
-    web_session.preempted = True
     web_session.stop_requested = True
     if web_session.prompter is not None:
         web_session.prompter.cancel()
     return True
-
-
-def continuation_text(task: str) -> str:
-    """被抢占任务的接力消息: 引用原文, 让模型接着历史里的部分进度做。"""
-    brief = " ".join(task.split())
-    if len(brief) > 60:
-        brief = brief[:60] + "…"
-    return (f"刚才那条「{brief}」被插队打断了, 还没做完, 请继续把它完成。"
-            f"（进度在上方历史里; 若已经完成或无需继续, 直接说明, 不要重做。）")
-
-
-def _schedule_continuation(web_session: WebSession) -> None:
-    """插队抢占生效时: 被打断的任务合成接力消息放回队尾, 默认不遗弃。
-
-    只在插队路径调用（TurnInterrupted 收尾处）; 手动停止已先清掉
-    preempted 标记, 走不到这里。
-    """
-    if not web_session.preempted:
-        return
-    web_session.preempted = False
-    if web_session.current_text:
-        web_session.pending.append(continuation_text(web_session.current_text))
 
 
 # ============================================================================
@@ -1258,8 +1225,8 @@ async def ws_endpoint(websocket: WebSocket, session_id: str):
 
             elif msg_type == "queue_promote":
                 # 「立即」: 把待发送区里的这条提到最前, 并叫停当前轮——
-                # 回落后它作为下一棒立刻接力开跑。被抢占的当前任务在
-                # worker 收尾时自动回队尾（默认不遗弃, 见 promote_pending）
+                # 回落后它作为下一棒立刻接力开跑。被打断的当前任务就地
+                # 收束, 不自动续跑（与手动停止一致）
                 text = str(raw.get("text") or "").strip()
                 promote_pending(web_session, text)
 
@@ -1296,9 +1263,41 @@ if __name__ == "__main__":
     import socket
     import uvicorn
 
+    # 命令执行器依赖 Git Bash: 没有就拒绝启动。原因落盘到 ~/.x-code/,
+    # 桌面壳只显示通用的"后端未就绪", 具体原因以这里为准
+    reason = git_bash_unavailable_reason()
+    if reason:
+        print(f"✗ {reason}")
+        try:
+            USER_DIR.mkdir(parents=True, exist_ok=True)
+            (USER_DIR / "startup-error.log").write_text(reason, encoding="utf-8")
+        except OSError:
+            pass
+        sys.exit(1)
+
     args = sys.argv[1:]
     port = int(args[args.index("--port") + 1]) if "--port" in args \
         else int(os.getenv("XCODE_PORT") or 8000)
+
+    # 父进程看门狗: 桌面壳拉起后端时把自己的 PID 传进来。壳无论怎么死
+    # （正常退出/崩溃/被任务管理器强杀, RunEvent 清理都来不及跑）, OS 都会
+    # 关闭它持有的内核句柄 → WaitForSingleObject 返回 → 后端立刻自杀,
+    # 端口随之释放。没有它, 壳被强杀时后端孤儿化, 端口占用一直挂着。
+    if "--parent-pid" in args:
+        ppid = int(args[args.index("--parent-pid") + 1])
+
+        def _watch_parent(pid: int) -> None:
+            if os.name != "nt":
+                return                      # 非 Windows 暂无对应实现, 行为同旧版
+            import ctypes
+            SYNCHRONIZE, INFINITE = 0x00100000, 0xFFFFFFFF
+            handle = ctypes.windll.kernel32.OpenProcess(SYNCHRONIZE, False, pid)
+            if not handle:
+                os._exit(0)                 # 父进程已不存在: 拉起即失联, 直接退出
+            ctypes.windll.kernel32.WaitForSingleObject(handle, INFINITE)
+            os._exit(0)                     # 父进程死亡: 立刻退出, 释放端口
+
+        threading.Thread(target=_watch_parent, args=(ppid,), daemon=True).start()
 
     def _port_free(p: int) -> bool:
         # connect_ex 探测: 已有进程监听时返回 0
@@ -1314,5 +1313,6 @@ if __name__ == "__main__":
         sys.exit(1)
     USER_DIR.mkdir(parents=True, exist_ok=True)
     (USER_DIR / "port").write_text(str(chosen), encoding="utf-8")
+    (USER_DIR / "startup-error.log").unlink(missing_ok=True)   # 启动成功: 旧原因作废
     print(f"✓ x-code 服务: http://127.0.0.1:{chosen}")
     uvicorn.run(app, host="127.0.0.1", port=chosen)

@@ -36,6 +36,23 @@ WebView2 窗口加载本地服务；如果 8000 端口已有 x-code 在跑则直
 **运行前提**：Windows 10/11 自带 WebView2 运行时（Tauri 渲染层）。极少数精简系统
 可能没有，安装包会引导安装，或从微软官网下载 WebView2 Runtime。
 
+## 运行前提：Git for Windows（工具执行器 / 中文编码）
+
+**启动时强校验**：CLI 与后端服务启动都会检测 Git Bash，检测不到就拒绝启动
+（CLI 打印说明后退出；桌面端后端退出时把原因写入 `~/.x-code/startup-error.log`，
+启动成功会自动删除该文件）。安装 [Git for Windows](https://git-scm.com/download/win)
+后重启即可，默认选项、无需配置。
+
+为什么强依赖 Git Bash：MSYS2 的 coreutils（cat/grep/ls）对文件内容字节直通，
+UTF-8 不经转码；PowerShell 5.1 的 cmdlet 会按 ANSI(GBK) 转码，读 UTF-8 源码
+必乱。选壳顺序（`tools._git_bash_candidates`）：
+
+1. `XCODE_BASH_HOME` 环境变量指向的目录（预留的打包/定制入口）
+2. `~/.x-code/git-bash/bin/bash.exe`（预留的内置副本位置）
+3. 系统安装的 Git for Windows（从 `git.exe` 推导根目录）← 绝大多数机器走这里
+4. PATH 里的 bash（排除 System32 的 WSL 启动器）
+5. 都没有才退回 PowerShell——但正常情况下启动门禁已经把这条路挡住了
+
 ## 各部分职责
 
 | 文件 | 作用 |
@@ -51,6 +68,8 @@ WebView2 窗口加载本地服务；如果 8000 端口已有 x-code 在跑则直
 
 - **启动弹「Python 后端在 30 秒内未能就绪」**：一般是 8000–8019 端口全被占用，或后端
   进程启动即崩（查看 `~/.x-code/` 下的日志）。按提示关闭占用端口的程序后重试。
+  机器没装 Git 时后端也会拒绝启动，具体原因看 `~/.x-code/startup-error.log`；
+  装 [Git for Windows](https://git-scm.com/download/win) 后重启即可。
 - **端口**：默认 8000，被占自动避让 8010–8019（实际端口见 `~/.x-code/port`）；
   可用 `--port` 参数或 `XCODE_PORT` 环境变量固定。
 - **杀毒软件误报**：PyInstaller onefile 常见误报，可换 onedir（去掉 `--onefile`，并把
