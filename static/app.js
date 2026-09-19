@@ -3093,9 +3093,43 @@ mqDark.addEventListener("change", () => {
   syncAccentInput();
 });
 
+/* ---------- 界面 / 代码字号: 比例写入 --fs-ui / --fs-code, CSS 端 calc 全局生效 ---------- */
+const FS_UI_KEY = "xc-fs-ui";
+const FS_CODE_KEY = "xc-fs-code";
+const FS_UI_ITEMS = [
+  { value: "0.9",  label: "小（90%）" },
+  { value: "1",    label: "标准（100%）" },
+  { value: "1.1",  label: "大（110%）" },
+  { value: "1.25", label: "特大（125%）" },
+];
+const FS_CODE_ITEMS = [
+  { value: "0.9",  label: "小（90%）" },
+  { value: "1",    label: "标准（100%）" },
+  { value: "1.15", label: "大（115%）" },
+  { value: "1.3",  label: "特大（130%）" },
+];
+function fsUiPref()   { return localStorage.getItem(FS_UI_KEY) || "1"; }
+function fsCodePref() { return localStorage.getItem(FS_CODE_KEY) || "1"; }
+function applyFontSize() {
+  const st = document.documentElement.style;
+  st.setProperty("--fs-ui", fsUiPref());
+  st.setProperty("--fs-code", fsCodePref());
+}
+const fsUiDd = makeDropdown($("sel-fs-ui"), {
+  items: FS_UI_ITEMS, value: fsUiPref(),
+  onChange: v => { localStorage.setItem(FS_UI_KEY, v); applyFontSize(); },
+});
+const fsCodeDd = makeDropdown($("sel-fs-code"), {
+  items: FS_CODE_ITEMS, value: fsCodePref(),
+  onChange: v => { localStorage.setItem(FS_CODE_KEY, v); applyFontSize(); },
+});
+applyFontSize();
+
 /* ---------- 设置页视图切换: 侧栏换设置导航, 主区换设置内容 ---------- */
 function openSettings() {
   themeDd.setValue(themePref());   // 每次打开回显当前值
+  fsUiDd.setValue(fsUiPref());
+  fsCodeDd.setValue(fsCodePref());
   syncAccentInput();
   loadProviders().then(renderProviderSettings);   // 拉取供应商配置并渲染
   $("sidebar").classList.add("settings-view");
