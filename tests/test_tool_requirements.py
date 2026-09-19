@@ -44,8 +44,8 @@ def test_workspace_write_still_prompts_for_writes_and_shell():
     assert r.decision == PermissionDecision.DENY and "approval" in r.reason
 
 
-def test_read_only_denies_writes_but_allows_reads():
-    p = _policy(PermissionMode.READ_ONLY)
+def test_plan_mode_denies_writes_but_allows_reads():
+    p = _policy(PermissionMode.PLAN)
     assert p.authorize("read_file", "a.txt", None).decision == PermissionDecision.ALLOW
     r = p.authorize("write_file", "{}", None)
     assert r.decision == PermissionDecision.DENY

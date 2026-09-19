@@ -19,7 +19,7 @@ from permissions import (
 
 PROMPT = PermissionMode.PROMPT
 ALLOW = PermissionMode.ALLOW
-READ_ONLY = PermissionMode.READ_ONLY
+READ_ONLY = PermissionMode.PLAN   # 旧名; 计划模式与旧只读同档(1)
 WORKSPACE_WRITE = PermissionMode.WORKSPACE_WRITE
 DANGER = PermissionMode.DANGER_FULL_ACCESS
 

@@ -233,3 +233,12 @@ def write_tool(params: dict, workdir: Optional[str] = None) -> str:
     except FileNotFoundError:
         return f'ERROR: directory not found {path}'
     return f'OK: wrote to {path}'
+
+
+def present_plan_tool(params: dict, workdir: Optional[str] = None) -> str:
+    """present_plan 的直通 handler: 正常流程在授权层就被拦截（plan 模式
+    弹问计划卡, 其余模式放行后模型继续干别的事）。防御性兜底: 真到执行
+    也返回确认文案, 让轮次平稳收束。"""
+    plan = str(params.get("plan", "")).strip()
+    n = len(plan.splitlines()) if plan else 0
+    return f"Plan received ({n} lines)."

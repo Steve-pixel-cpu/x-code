@@ -146,7 +146,8 @@ class ConfigLoader:
         permission_mode = None
         if isinstance(raw_mode, str):
             mode_map = {
-                "default": "read-only", "plan": "read-only", "read-only": "read-only",
+                # plan 是正名; read-only/default 是旧写法, 归一为 plan
+                "default": "plan", "plan": "plan", "read-only": "plan",
                 "acceptEdits": "workspace-write", "auto": "workspace-write",
                 "workspace-write": "workspace-write",
                 "dontAsk": "danger-full-access", "danger-full-access": "danger-full-access",

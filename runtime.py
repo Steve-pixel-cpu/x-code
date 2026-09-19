@@ -167,6 +167,26 @@ class TurnSummary(BaseModel):
 
 
 # --- ConversationRuntime ---
+# plan 模式的动态 system 段: 追加在缓存边界之后的 sections 尾部。
+# 内容是给模型的行为规范——研究期只读、计划经 present_plan 提交、
+# 批准后才开始写。与 permissions.py 的硬授权互为表里: 提示词管"该做
+# 什么", 授权层管"能做什么"。
+PLAN_MODE_INSTRUCTION = (
+    "# Plan mode (active)\n"
+    "\n"
+    "You are in plan mode. In this mode:\n"
+    " - Research the codebase first: read files, run read-only commands\n"
+    "   (ls / cat / grep / git log ...) to understand the task.\n"
+    " - Do NOT create, modify, or delete any files, and do not run\n"
+    "   commands with side effects (installs, writes, network mutations).\n"
+    " - When research is done, present your implementation plan with the\n"
+    "   present_plan tool: goal, affected files, step-by-step changes,\n"
+    "   and verification steps.\n"
+    " - The user will approve or reject. If approved, the mode switches\n"
+    "   automatically and you implement the plan right away. If rejected,\n"
+    "   revise the plan per the feedback and present again.\n"
+)
+
 class ConversationRuntime:
     def __init__(self,
                  session: Session,
@@ -395,8 +415,13 @@ class ConversationRuntime:
                 auto_compacted = True
 
             iterations += 1
+            # plan 模式: 动态追加计划指令段（位于缓存边界之后, 静态前缀
+            # 缓存不受影响; 段内容恒定, 同模式内动态段自身也稳定）
+            sys_prompt = self._system_prompt
+            if self._permission_policy.active_mode == PermissionMode.PLAN:
+                sys_prompt = list(self._system_prompt) + [PLAN_MODE_INSTRUCTION]
             events = self._api_client.stream(
-                system_prompt=self._system_prompt,
+                system_prompt=sys_prompt,
                 messages=curr_session.messages,
                 thinking_level=self._thinking_level,
             )

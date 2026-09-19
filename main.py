@@ -25,7 +25,7 @@ from permissions import PermissionRequest, PermissionResult, PermissionMode, Per
 from prompt import SystemPromptBuilder
 from runtime import ConversationRuntime
 from storage import SessionStore
-from tools import ToolRegistry, bash_tool, read_tool, write_tool, powershell_tool, git_bash_unavailable_reason
+from tools import ToolRegistry, bash_tool, read_tool, write_tool, present_plan_tool, powershell_tool, git_bash_unavailable_reason
 from agent_tools import AGENT_TOOL_SPECS, get_orchestrator, register_agent_tools
 
 DEFAULT_MODEL = "glm-5.3-flash"
@@ -137,7 +137,34 @@ write_file_spec = {
         "required": ["path", "content"],
     },
 }
-TOOLS = [bash_spec, powershell_spec, read_file_spec, write_file_spec] + AGENT_TOOL_SPECS
+
+present_plan_spec = {
+    "name": "present_plan",
+    "description": (
+        "Present your implementation plan to the user for review and "
+        "approval. Call this after you have finished researching the "
+        "codebase (plan mode). The plan is shown to the user as a card "
+        "with approve/reject buttons; while waiting, do not make any "
+        "changes. If rejected, revise the plan based on the feedback "
+        "and present again."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "plan": {
+                "type": "string",
+                "description": (
+                    "The full implementation plan in markdown. Include: "
+                    "goal, affected files, step-by-step changes, and "
+                    "verification steps."
+                ),
+            },
+        },
+        "required": ["plan"],
+    },
+}
+
+TOOLS = [bash_spec, powershell_spec, read_file_spec, write_file_spec, present_plan_spec] + AGENT_TOOL_SPECS
 
 
 # --- 终端视觉规范: 调色板 + 版式 ---
@@ -222,7 +249,7 @@ def format_preview(output: str) -> str:
     return preview
 
 
-_JSON_KEY_PRIORITY = ("command", "path", "file_path", "url", "content")
+_JSON_KEY_PRIORITY = ("command", "path", "file_path", "url", "content", "plan")
 
 
 def describe_tool_input(raw: str) -> str:
@@ -403,10 +430,13 @@ def switch_mode(runtime: ConversationRuntime, mode_name: str) -> None:
         print(f"当前权限模式: {runtime.permission_mode().as_str()}")
         print(f"可选: {' | '.join(MODE_TO_NAME.values())}")
         return
-    mode = NAME_TO_MODE.get(mode_name.strip().lower())
+    name = mode_name.strip().lower()
+    if name == "read-only":
+        name = "plan"   # 旧名兼容: 归一为 plan
+    mode = NAME_TO_MODE.get(name)
     if mode is None:
         print(c_red(f"✗ 未知模式: {mode_name}"))
-        print(f"可选: {' | '.join(MODE_TO_NAME.values())}")
+        print(f"可选: {' | '.join(MODE_TO_NAME.values())}（read-only 是 plan 的旧名）")
         return
     runtime.set_permission_mode(mode)
     print(f"权限模式已切换: {mode.as_str()}")
@@ -642,6 +672,9 @@ TOOL_REQUIREMENTS = {
     "agent_list": READ_ONLY_MODE,       # 列 subagent
     "write_file": WORKSPACE_WRITE_MODE, # 落盘文件（本地写）
     "agent_tool": WORKSPACE_WRITE_MODE, # 派生 subagent（写 agents 状态目录）
+    # present_plan 走 WORKSPACE_WRITE 档: plan 模式下它触发"可升级弹问"
+    # （Web 端渲染成计划卡）, 其余模式下直接放行
+    "present_plan": WORKSPACE_WRITE_MODE,
 }
 
 
@@ -650,7 +683,8 @@ def build_registry() -> ToolRegistry:
     registry = ToolRegistry().register(name="bash", handler=bash_tool).register(
         name="powershell", handler=powershell_tool).register(
         name="read_file", handler=read_tool).register(
-        name="write_file", handler=write_tool)
+        name="write_file", handler=write_tool).register(
+        name="present_plan", handler=present_plan_tool)
     return register_agent_tools(registry)
 
 

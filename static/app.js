@@ -1469,6 +1469,7 @@ function handleServerMessage(msg, sid) {
     else if (msg.type === "thinking_start") onThinkingStart(msg, sid);
     else if (msg.type === "thinking_end") onThinkingEnd(msg, sid);
     else if (msg.type === "tool_use") onToolUse(msg, sid);
+    else if (msg.type === "permission_request") renderSessionList();   // awaiting 在 onPermissionRequest 里统一处理
     else if (msg.type === "tool_result") onToolResult(msg, sid);
     else if (msg.type === "await_output") run.awaiting = run.busy;
     else if (msg.type === "mode_changed") onModeChanged(msg, sid);
@@ -1481,15 +1482,13 @@ function handleServerMessage(msg, sid) {
       run.queued = false;
       // 未决审批卡定格: 服务端已收口（打断/断连都朝安全侧 DENY）
       for (const rid of Object.keys(run.pendingPerms)) {
-        const card = colOf(sid).querySelector(`.perm-row[data-req-id="${rid}"]`);
+        const card = colOf(sid).querySelector(
+          `.perm-row[data-req-id="${rid}"], .plan-card[data-req-id="${rid}"]`);
         if (card && !card.classList.contains("allowed") && !card.classList.contains("denied")) {
           card.classList.add("denied");
           const choices = card.querySelector(".pr-choices");
           if (choices) choices.remove();
-          const mark = document.createElement("span");
-          mark.className = "pr-mark";
-          mark.textContent = "已拒绝";
-          card.appendChild(mark);
+          card.appendChild(makePrMark("已拒绝", false));
         }
       }
       run.pendingPerms = {};
@@ -1587,6 +1586,7 @@ const TOOL_META = {
   powershell: { label: "终端",     icon: ICON_TERM },
   read_file:  { label: "读取文件", icon: ICON_FILE },
   write_file: { label: "写入文件", icon: ICON_EDIT },
+  present_plan: { label: "实施计划", icon: ICON_MODE_PLAN },
 };
 
 function fmtDuration(ms) {
@@ -1667,7 +1667,7 @@ function describeInput(raw) {
   try {
     const data = JSON.parse(raw);
     if (data && typeof data === "object") {
-      for (const k of ["command", "path", "file_path", "url", "content"]) {
+      for (const k of ["command", "path", "file_path", "url", "content", "plan"]) {
         if (typeof data[k] === "string" && data[k].trim()) {
           return data[k].replace(/\s+/g, " ").slice(0, 90);
         }
@@ -1731,6 +1731,7 @@ function onToolUse(msg, sid) {
 
 function onToolResult(msg, sid) {
   const run = runOf(sid);
+  if (msg.plan_rejected) return;   // 计划被拒: 计划卡已渲染拒绝态, 不补失败工具卡
   flushAssistantBubble(run);
   // 配对优先级: 流式卡片(按 id) → 历史回放登记的卡片(断线重同步接缝) →
   // 旧单槽位 → 都配不上(旧数据)才新开兜底卡片
@@ -1764,7 +1765,39 @@ function sweepPendingToolCards(run) {
 }
 
 /* ---------- 权限审批: 聊天流内联卡片（替代旧模态弹窗） ---------- */
-const PERM_ICONS = { bash: "⌨", powershell: "⌨", write_file: "✎", read_file: "📄" };
+const ICON_PRM_OK = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4.5 12.5l5 5 10-11"/></svg>';
+const ICON_PRM_NO = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M6 6l12 12M18 6L6 18"/></svg>';
+
+/* 允许/拒绝按钮组: 工具审批卡与计划卡共用, 点击即决定 */
+function buildPermChoices(requestId, sid, allowLabel, denyLabel) {
+  const choices = document.createElement("div");
+  choices.className = "pr-choices";
+  for (const trip of [[true, "allow", allowLabel, ICON_PRM_OK],
+                      [false, "deny", denyLabel, ICON_PRM_NO]]) {
+    const val = trip[0], cls = trip[1], label = trip[2], icon = trip[3];
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "pr-btn " + cls;
+    btn.innerHTML = icon;
+    const txt = document.createElement("span");
+    txt.textContent = label;
+    btn.appendChild(txt);
+    btn.onclick = function () { respondPermission(requestId, val, sid); };
+    choices.appendChild(btn);
+  }
+  return choices;
+}
+
+/* 决定后的结果标记: 勾/叉图标 + 文案 */
+function makePrMark(text, approved) {
+  const mark = document.createElement("span");
+  mark.className = "pr-mark";
+  mark.innerHTML = approved ? ICON_PRM_OK : ICON_PRM_NO;
+  const txt = document.createElement("span");
+  txt.textContent = text;
+  mark.appendChild(txt);
+  return mark;
+}
 
 function onPermissionRequest(msg, sid) {
   // sid 缺省 = 当前会话（旧事件流路径）: WS 分发处总是带 sid
@@ -1773,47 +1806,79 @@ function onPermissionRequest(msg, sid) {
   if (run.pendingPerms[msg.request_id]) return;   // 重放/重连重复事件: 忽略
   run.pendingPerms[msg.request_id] = msg;
   bumpUnread(sid2);
+  // 等待授权也是"等模型"的一种: 点亮空窗态, 否则画面全静止,
+  // 用户会以为这轮已经跑完
+  run.awaiting = run.busy;
+  if (sid2 === state.sessionId) syncThinkingIndicator();
 
   const meta = TOOL_META[msg.tool_name] || { label: msg.tool_name, icon: ICON_TOOL };
+  if (msg.tool_name === "present_plan") {
+    renderPlanCard(msg, sid2, run);
+    return;
+  }
   const row = document.createElement("div");
   row.className = "perm-row";
   row.dataset.reqId = msg.request_id;
 
-  // 一行式: 图标 + 工具标签 + 命令摘要 + 单选框(选中即决定)
+  // 卡片式: 头行(图标+工具+等待提示) / 命令行 / 按钮行, 点按钮即决定
+  const head = document.createElement("div");
+  head.className = "pr-head";
   const ico = document.createElement("span");
   ico.className = "pr-ico";
   ico.innerHTML = meta.icon;
   const title = document.createElement("span");
   title.className = "pr-title";
   title.textContent = meta.label;
+  const hint = document.createElement("span");
+  hint.className = "pr-hint";
+  hint.innerHTML = '<i class="pr-dot"></i>等待确认';
+  head.appendChild(ico); head.appendChild(title); head.appendChild(hint);
+  row.appendChild(head);
+
   const body = describeInput(msg.input) || "(无参数)";
-  const cmd = document.createElement("span");
+  const cmd = document.createElement("div");
   cmd.className = "pr-cmd";
   cmd.textContent = body;
   cmd.title = body;   // 悬停看全文
-  row.appendChild(ico); row.appendChild(title); row.appendChild(cmd);
+  row.appendChild(cmd);
 
-  const choices = document.createElement("span");
-  choices.className = "pr-choices";
-  const groupName = "perm-" + msg.request_id;
-  for (const pair of [[true, "allow", "允许"], [false, "deny", "拒绝"]]) {
-    const val = pair[0], cls = pair[1], label = pair[2];
-    const lab = document.createElement("label");
-    lab.className = "pr-opt " + cls;
-    const radio = document.createElement("input");
-    radio.type = "radio"; radio.name = groupName;
-    radio.onchange = function () {
-      if (radio.checked) respondPermission(msg.request_id, val, sid2);
-    };
-    const txt = document.createElement("span");
-    txt.textContent = label;
-    lab.appendChild(radio); lab.appendChild(txt);
-    choices.appendChild(lab);
-  }
-  row.appendChild(choices);
+  row.appendChild(buildPermChoices(msg.request_id, sid2, "允许", "拒绝"));
 
   colOf(sid2).appendChild(row);
   if (sid2 === state.sessionId) scrollToBottom();
+}
+
+/* ---------- 计划预览卡: present_plan 专用 ----------
+ * markdown 渲染计划全文, 单选批准/拒绝; 批准后端自动升级模式并继续,
+ * 拒绝则收起选择区、标记"已拒绝"，模型会修订后再次提交。 */
+function renderPlanCard(msg, sid2, run) {
+  const active = sid2 === state.sessionId;
+  const card = document.createElement("div");
+  card.className = "plan-card";
+  card.dataset.reqId = msg.request_id;
+
+  const head = document.createElement("div");
+  head.className = "plan-head";
+  head.innerHTML = '<span class="pr-ico">' + ICON_MODE_PLAN + '</span>' +
+    '<span class="plan-title">实施计划</span>';
+  card.appendChild(head);
+
+  const body = document.createElement("div");
+  body.className = "plan-body bubble";
+  let planText = "";
+  try {
+    const data = JSON.parse(msg.input || "{}");
+    planText = typeof data.plan === "string" ? data.plan : String(msg.input || "");
+  } catch (e) { planText = String(msg.input || ""); }
+  body._raw = planText;
+  body.innerHTML = renderMd(planText);
+  decorateCode(body);
+  card.appendChild(body);
+
+  card.appendChild(buildPermChoices(msg.request_id, sid2, "批准并实施", "拒绝"));
+
+  colOf(sid2).appendChild(card);
+  if (active) scrollToBottom();
 }
 
 function respondPermission(requestId, approved, sid) {
@@ -1822,15 +1887,17 @@ function respondPermission(requestId, approved, sid) {
   delete run.pendingPerms[requestId];
   sendWs({ type: "permission_response", request_id: requestId, approved }, sid);
   // 卡片定格: 撤按钮, 标记结果
-  const card = colOf(sid).querySelector(`.perm-row[data-req-id="${requestId}"]`);
+  const card = colOf(sid).querySelector(
+    `.perm-row[data-req-id="${requestId}"], .plan-card[data-req-id="${requestId}"]`);
   if (card) {
     card.classList.add(approved ? "allowed" : "denied");
     const choices = card.querySelector(".pr-choices");
     if (choices) choices.remove();
-    const mark = document.createElement("span");
-    mark.className = "pr-mark";
-    mark.textContent = approved ? "已允许" : "已拒绝";
-    card.appendChild(mark);
+    card.appendChild(makePrMark(
+      approved
+        ? (card.classList.contains("plan-card") ? "已批准 · 开始实施" : "已允许")
+        : "已拒绝",
+      approved));
   }
 }
 
@@ -2180,7 +2247,19 @@ function setBusyUi(busy) {
  * 切到空闲会话转圈残留、后台轮次跑完转圈不灭——统一在这里按当前会话重算。 */
 function syncThinkingIndicator() {
   const run = curRun();
-  $("thinking").style.display = run && run.busy && run.awaiting ? "flex" : "none";
+  const show = !!(run && run.busy && run.awaiting);
+  $("thinking").style.display = show ? "flex" : "none";
+  if (show) {
+    const pending = run.pendingPerms ? Object.values(run.pendingPerms) : [];
+    const t = $("thinking").querySelector(".t");
+    if (pending.length && pending.every(p => p.tool_name === "present_plan")) {
+      t.textContent = "等待计划审批…";
+    } else if (pending.length) {
+      t.textContent = "等待授权…";
+    } else {
+      t.textContent = "思考中…";
+    }
+  }
 }
 
 async function sendCurrent() {
@@ -2536,9 +2615,10 @@ const ICON_MODE_EYE = '<svg width="15" height="15" viewBox="0 0 24 24" fill="non
 const ICON_MODE_HAND = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M8 12.5V5.5a1.5 1.5 0 013 0V11m0-5.5v-1a1.5 1.5 0 013 0V11m0-4.5a1.5 1.5 0 013 0V12m-9 .5l-2.4-2.2c-.9-.8-2.2-.4-2.5.8-.1.5 0 1 .3 1.4L10 19c1 1.3 2.3 2 4.2 2 3.2 0 4.8-2 4.8-5v-3.5"/></svg>';
 const ICON_MODE_PENCIL = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20l4.5-1L20 7.5 16.5 4 5 15.5 4 20z"/></svg>';
 const ICON_MODE_SHIELD = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l7 2.8v5.4c0 4.4-2.9 7.8-7 9.8-4.1-2-7-5.4-7-9.8V5.8L12 3z"/></svg>';
+const ICON_MODE_PLAN = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 3h6l1 3h3v15H5V6h3l1-3z"/><path d="M9 12h6M9 16h4"/></svg>';
 const MODE_ITEMS = [
-  { value: "read-only", label: "只读", icon: ICON_MODE_EYE,
-    desc: "只查看和分析，不执行任何修改。" },
+  { value: "plan", label: "计划模式", icon: ICON_MODE_PLAN,
+    desc: "先研究并给出计划，批准后自动开始实施。" },
   { value: "prompt", label: "每次询问", icon: ICON_MODE_HAND,
     desc: "改动前先征求我的意见。" },
   { value: "workspace-write", label: "自动编辑", icon: ICON_MODE_PENCIL,

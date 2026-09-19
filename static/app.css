@@ -1213,50 +1213,75 @@
   }
   #dir-pick:hover { filter: brightness(1.08); }
 
-  /* ============ 权限审批: 无框单选行 ============ */
-  /* 与工具行同缩进同气质: 无边框无底色, 琥珀图标提示待确认, 点单选即决定 */
+  /* ============ 权限审批: 内联确认卡 ============ */
+  /* 琥珀色卡片从灰色工具行里跳出来; 头行/命令/按钮分行, 点按钮即决定 */
   .perm-row {
-    display: flex; align-items: center; gap: 7px;
-    margin: 2px 0 10px 38px; padding: 3px 9px;
-    font-size: 12.5px; color: var(--text-3);
+    display: flex; flex-direction: column; gap: 9px;
+    margin: 6px 0 14px 38px; padding: 11px 13px 12px;
+    max-width: min(680px, 100%);
+    font-size: 12.5px; color: var(--text-2);
+    border: 1px solid color-mix(in srgb, var(--warn) 32%, transparent);
+    border-radius: var(--r-md);
+    background: var(--warn-soft);
     animation: msg-in .22s ease;
   }
+  .perm-row .pr-head { display: flex; align-items: center; gap: 7px; min-width: 0; }
   .perm-row .pr-ico { flex: none; display: inline-flex; color: var(--warn); }
-  .perm-row .pr-title { flex: none; color: var(--text-2); font-weight: 600; }
+  .perm-row .pr-title { flex: none; color: var(--text); font-weight: 600; }
+  .perm-row .pr-hint {
+    margin-left: auto; flex: none;
+    display: inline-flex; align-items: center; gap: 6px;
+    color: var(--warn); font-size: 11.5px; user-select: none;
+  }
+  .perm-row .pr-dot {
+    width: 6px; height: 6px; border-radius: 50%;
+    background: var(--warn); animation: pulse 1.2s infinite;
+  }
   .perm-row .pr-cmd {
-    flex: 0 1 auto; min-width: 0;
+    min-width: 0;
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-    font-family: var(--font-mono); font-size: 11.5px;
+    font-family: var(--font-mono); font-size: 11.5px; color: var(--text-2);
+    padding: 6px 10px;
+    background: color-mix(in srgb, var(--surface) 62%, transparent);
+    border: 1px solid var(--border);
+    border-radius: var(--r-sm);
   }
-  .perm-row .pr-choices { flex: none; display: inline-flex; gap: 12px; margin-left: 6px; }
-  .perm-row .pr-opt {
-    display: inline-flex; align-items: center; gap: 5px;
-    cursor: pointer; color: var(--text-2); user-select: none;
+  .perm-row .pr-choices { display: flex; gap: 8px; }
+  .pr-btn {
+    appearance: none; cursor: pointer; font-family: inherit;
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 6px 16px; border-radius: var(--r-sm);
+    font-size: 12.5px; font-weight: 600; line-height: 1;
+    transition: background .12s, border-color .12s, color .12s, filter .12s;
   }
-  .perm-row .pr-opt:hover { color: var(--text); }
-  .perm-row .pr-opt input {
-    appearance: none; -webkit-appearance: none;
-    width: 13px; height: 13px; margin: 0;
-    border: 1.5px solid var(--border-strong); border-radius: 50%;
-    display: inline-grid; place-content: center;
-    cursor: pointer; transition: border-color .12s;
-    background: var(--surface);
+  .pr-btn:focus-visible { outline: 2px solid var(--accent-border); outline-offset: 2px; }
+  .pr-btn.allow {
+    border: 1px solid var(--accent-border);
+    background: var(--accent-soft); color: var(--text);
   }
-  .perm-row .pr-opt input::before {
-    content: ""; width: 6px; height: 6px; border-radius: 50%;
-    transform: scale(0); transition: transform .12s;
+  .pr-btn.allow svg { color: var(--ok); }
+  .pr-btn.allow:hover { border-color: var(--accent); filter: brightness(1.12); }
+  .pr-btn.deny {
+    border: 1px solid var(--border-strong);
+    background: transparent; color: var(--text-2);
   }
-  .perm-row .pr-opt.allow input:checked { border-color: var(--accent); }
-  .perm-row .pr-opt.allow input:checked::before { transform: scale(1); background: var(--accent); }
-  .perm-row .pr-opt.deny input:checked { border-color: var(--err); }
-  .perm-row .pr-opt.deny input:checked::before { transform: scale(1); background: var(--err); }
-  .perm-row .pr-opt.allow:has(input:checked) { color: var(--accent); font-weight: 600; }
-  .perm-row .pr-opt.deny:has(input:checked) { color: var(--err); font-weight: 600; }
-  /* 定格: 决定后整行降调 */
-  .perm-row.allowed, .perm-row.denied { opacity: .58; }
+  .pr-btn.deny:hover {
+    color: var(--err); background: var(--err-soft);
+    border-color: color-mix(in srgb, var(--err) 45%, transparent);
+  }
+  /* 定格: 决定后整卡降调, 撤等待提示, 结果以状态条收尾 */
+  .perm-row.allowed, .perm-row.denied {
+    opacity: .62; background: transparent;
+    border-color: var(--border);
+  }
+  .perm-row.allowed .pr-hint, .perm-row.denied .pr-hint { display: none; }
   .perm-row.allowed .pr-ico, .perm-row.denied .pr-ico { color: var(--text-3); }
-  .perm-row .pr-mark { flex: none; font-weight: 600; font-size: 12px; }
-  .perm-row.allowed .pr-mark { color: var(--accent); }
+  .perm-row .pr-mark {
+    align-self: flex-start;
+    display: inline-flex; align-items: center; gap: 5px;
+    font-weight: 600; font-size: 12px;
+  }
+  .perm-row.allowed .pr-mark { color: var(--ok); }
   .perm-row.denied .pr-mark { color: var(--err); }
 
   /* 通用确认弹窗（替代原生 confirm——WebView2 的 confirm 带难看的源地址头） */
@@ -1383,3 +1408,23 @@
     transition: background .1s, color .1s;
   }
   .ctx-menu button:hover { background: var(--hover); color: var(--text); }
+  /* 计划预览卡: present_plan 专用。无框, 与消息流同语言; 正文复用
+   * .bubble 的 markdown 排版, 批准/拒绝复用权限卡的按钮组。 */
+  .plan-card { margin: 0 0 18px; max-width: 720px; animation: msg-in .22s ease; }
+  .plan-head { display: flex; align-items: center; gap: 7px; padding: 0 2px 6px; }
+  .plan-head .pr-ico { color: var(--text-3); display: inline-flex; }
+  .plan-title { font-size: 13px; font-weight: 600; color: var(--text-2); }
+  .plan-card .plan-body {
+    max-width: none; margin: 0 0 10px; padding: 10px 14px;
+    background: color-mix(in srgb, var(--surface) 65%, transparent);
+    border-radius: var(--r-md);
+    font-size: 13.5px;
+  }
+  .plan-card .pr-choices { display: flex; gap: 8px; padding: 0 2px; }
+  .plan-card .pr-mark {
+    font-size: 12.5px; font-weight: 600; color: var(--text-3); padding: 0 2px;
+  }
+  .plan-card.allowed .pr-mark { color: var(--ok, #3f9b6e); }
+  .plan-card.allowed .plan-title { color: var(--ok, #3f9b6e); }
+  .plan-card.denied .plan-title { color: var(--text-3); }
+  .plan-card.denied .plan-body { opacity: .55; }

@@ -64,9 +64,9 @@ def test_settings_permission_mode_validation(client):
     assert r.status_code == 400
 
     tc = TestClient(server.app)
-    r = tc.post("/api/settings", json={"permission_mode": "read-only"})
+    r = tc.post("/api/settings", json={"permission_mode": "read-only"})   # 旧名
     assert r.status_code == 200
-    assert r.json()["permission_mode"] == "read-only"
+    assert r.json()["permission_mode"] == "plan"   # 归一为 plan
 
 
 def test_get_messages_returns_empty_for_unknown_session(client):
@@ -864,9 +864,9 @@ def test_settings_permission_mode_unwritable_degrades(settings_file, monkeypatch
 
     monkeypatch.setattr(config.Path, "write_text", boom)
     tc = TestClient(server.app)
-    r = tc.post("/api/settings", json={"permission_mode": "read-only"})
+    r = tc.post("/api/settings", json={"permission_mode": "read-only"})   # 旧名
     assert r.status_code == 200
-    assert r.json()["permission_mode"] == "read-only"   # 请求不受影响
+    assert r.json()["permission_mode"] == "plan"   # 归一为 plan   # 请求不受影响
     assert not real_write_text(settings_file, "", encoding="utf-8") or True
 
 
@@ -919,10 +919,11 @@ def test_ws_set_permission_mode_applies_to_running_runtime(client, isolated_stor
     web_session.runtime = _Rt()
     try:
         with client.websocket_connect("/ws/s-mode-rt") as ws:
-            ws.send_json({"type": "set_permission_mode", "mode": "read-only"})
+            ws.send_json({"type": "set_permission_mode", "mode": "read-only"})   # 旧名
             reply = json.loads(ws.receive_text())
             assert reply["type"] == "mode_changed"
-        assert web_session.runtime.modes == [server.PermissionMode.READ_ONLY]
+            assert reply["permission_mode"] == "plan"
+        assert web_session.runtime.modes == [server.PermissionMode.PLAN]
     finally:
         server._sessions.clear()
 
@@ -940,6 +941,6 @@ def test_settings_permission_mode_only_changes_default(client, isolated_store):
         r = tc.post("/api/settings", json={"permission_mode": "read-only"})
         assert r.status_code == 200
         assert web_session.permission_mode == server.PermissionMode.PROMPT
-        assert server.app_state.permission_mode == server.PermissionMode.READ_ONLY
+        assert server.app_state.permission_mode == server.PermissionMode.PLAN
     finally:
         server._sessions.clear()

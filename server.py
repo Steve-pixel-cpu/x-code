@@ -61,6 +61,7 @@ from models import (
 from permissions import (
     ALLOW_MODE,
     MODE_TO_NAME,
+    WORKSPACE_WRITE_MODE,
     NAME_TO_MODE,
     PermissionDecision,
     PermissionMode,
@@ -488,8 +489,10 @@ class WebPermissionPrompter:
     每轮对话新建一个实例，同一时刻只有一个 decide 在等（runtime 串行处理 tool_use）。
     """
 
-    def __init__(self, emit: Callable):
+    def __init__(self, emit: Callable,
+                 on_plan_approved: Optional[Callable[[], None]] = None):
         self._emit = emit
+        self._on_plan_approved = on_plan_approved
         self._responses: "queue.Queue[tuple[str, bool]]" = queue.Queue()
         self._seq = 0
         self._cancelled = False
@@ -520,8 +523,26 @@ class WebPermissionPrompter:
             if got_id != request_id:
                 continue  # stale/重放的响应，忽略
             if approved:
+                # 计划批准 = 模式升级的触发点: plan → workspace-write,
+                # 升级回调在 _start_turn 注入（拿得到 web_session）。
+                # 先升级再回事件, 前端收卡时 mode_changed 已在路上。
+                if (request.tool_name == "present_plan"
+                        and self._on_plan_approved is not None):
+                    try:
+                        self._on_plan_approved()
+                    except Exception:
+                        pass
+                    return PermissionResult(
+                        decision=PermissionDecision.ALLOW,
+                        reason="Plan approved. Implement it now.")
                 return PermissionResult(
                     decision=PermissionDecision.ALLOW, reason="user said yes!")
+            if request.tool_name == "present_plan":
+                # 计划被拒: 不产生 tool_result 卡, 理由回流让模型修订计划
+                return self._finish_deny(
+                    request,
+                    "Plan rejected by the user. Revise the plan per the "
+                    "feedback and present it again with present_plan.")
             return self._finish_deny(
                 request, f"User denied permission to run {request.tool_name}!")
 
@@ -535,15 +556,21 @@ class WebPermissionPrompter:
         self._responses.put((_CANCEL_SENTINEL, False))
 
     def _finish_deny(self, request: PermissionRequest, reason: str) -> PermissionResult:
-        # 拒绝结果也推一条 tool_result，让前端工具卡片能闭合显示"已拒绝"
-        self._emit({
+        # 拒绝结果也推一条 tool_result，让前端工具卡片能闭合显示"已拒绝"。
+        # present_plan: 拒绝理由必须回流给模型（它要据此修订计划）, 所以
+        # tool_result 照推, 但带 plan_rejected 标记——前端计划卡自己渲染
+        # 拒绝态, 收到该标记不再补一张失败工具卡。
+        payload = {
             "type": "tool_result",
             "name": request.tool_name,
             "input": request.input,
             "output": reason,
             "is_error": True,
             "denied": True,
-        })
+        }
+        if request.tool_name == "present_plan":
+            payload["plan_rejected"] = True
+        self._emit(payload)
         return _deny(request.tool_name, reason)
 
 
@@ -802,7 +829,20 @@ def _start_turn(web_session: WebSession, text: str, emit: Callable,
     web_session.stop_requested = False
     web_session.persisted_count = len(web_session.runtime.session().messages)
     emitter = TurnEmitter(emit)
-    prompter = WebPermissionPrompter(emitter)
+
+    def _upgrade_after_plan() -> None:
+        """计划批准: 本会话 plan → workspace-write（本轮立即生效, 持久到会话）。
+        广播 mode_changed 让前端下拉框跟随; 不写全局设置（会话级隔离）。"""
+        web_session.permission_mode = WORKSPACE_WRITE_MODE
+        if web_session.runtime is not None:
+            web_session.runtime.set_permission_mode(WORKSPACE_WRITE_MODE)
+        web_session.broadcast({
+            "type": "mode_changed",
+            "session_id": web_session.session_id,
+            "permission_mode": MODE_TO_NAME[WORKSPACE_WRITE_MODE],
+        })
+
+    prompter = WebPermissionPrompter(emitter, on_plan_approved=_upgrade_after_plan)
     web_session.prompter = prompter
 
     if not _turn_slots.acquire(blocking=False):
@@ -1209,7 +1249,10 @@ async def api_post_settings(request: dict):
 
     mode_name = request.get("permission_mode")
     if mode_name is not None:
-        mode = NAME_TO_MODE.get(str(mode_name).strip().lower())
+        normalized = str(mode_name).strip().lower()
+        if normalized == "read-only":
+            normalized = "plan"   # 旧名兼容: 归一为 plan
+        mode = NAME_TO_MODE.get(normalized)
         if mode is None:
             raise HTTPException(
                 status_code=400,
@@ -1444,7 +1487,11 @@ async def ws_endpoint(websocket: WebSocket, session_id: str):
 
             elif msg_type == "set_permission_mode":
                 # 会话内下拉框: 只切本会话（全局默认值走 REST /api/settings）
-                mode = NAME_TO_MODE.get(str(raw.get("mode") or "").strip().lower())
+                # "read-only" 是旧名, 归一为 "plan"
+                mode_name = str(raw.get("mode") or "").strip().lower()
+                if mode_name == "read-only":
+                    mode_name = "plan"
+                mode = NAME_TO_MODE.get(mode_name)
                 if mode is None or mode == ALLOW_MODE:
                     emit_error(f"未知或不可用的权限模式: {raw.get('mode')!r}")
                     continue

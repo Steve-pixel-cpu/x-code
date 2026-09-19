@@ -20,7 +20,7 @@ from typing import Self
   在源码中 Prompt 模式会拦截所有需要确认的操作。
   """
 class PermissionMode(IntEnum):
-    READ_ONLY = 1
+    PLAN = 1
     WORKSPACE_WRITE = 2
     DANGER_FULL_ACCESS = 3
     PROMPT = 4
@@ -28,7 +28,7 @@ class PermissionMode(IntEnum):
 
     def as_str(self) -> str:
         return {
-            self.READ_ONLY: "read-only",
+            self.PLAN: "plan",
             self.WORKSPACE_WRITE: "workspace-write",
             self.DANGER_FULL_ACCESS: "danger-full-access",
             self.PROMPT: "prompt",
@@ -36,14 +36,16 @@ class PermissionMode(IntEnum):
         }[self]
 
 # --- 模式名 <-> 枚举: /mode 命令的参数解析与显示用 ---
-READ_ONLY_MODE = PermissionMode.READ_ONLY
+PLAN_MODE = PermissionMode.PLAN
+# 兼容别名: 旧代码/旧配置里的只读模式 = 计划模式
+READ_ONLY_MODE = PLAN_MODE
 WORKSPACE_WRITE_MODE = PermissionMode.WORKSPACE_WRITE
 DANGER_FULL_ACCESS_MODE = PermissionMode.DANGER_FULL_ACCESS
 PROMPT_MODE = PermissionMode.PROMPT
 ALLOW_MODE = PermissionMode.ALLOW
 
 MODE_TO_NAME = {
-    READ_ONLY_MODE: "read-only",
+    PLAN_MODE: "plan",
     WORKSPACE_WRITE_MODE: "workspace-write",
     DANGER_FULL_ACCESS_MODE: "danger-full-access",
     PROMPT_MODE: "prompt",
@@ -127,13 +129,32 @@ class PermissionPolicy:
                                     required_mode = required )
 
 
+        # "可升级弹问"分支（相邻档位）: 当前档差一档且目标可议时交给
+        # prompter 裁决——workspace-write→DANGER(危险命令单次放行) 与
+        # plan→WORKSPACE_WRITE(present_plan 计划审批/write_file 单次放行)。
+        # 批准 present_plan 的同时把模式升级为 workspace-write 由调用方
+        # （server 的 on_plan_approved 回调 / CLI 的 /mode）负责, 授权层
+        # 只管这一次的决定。
+        prompter_decides = (
+            prompter is not None
+            and (current == PermissionMode.PLAN
+                 and required == PermissionMode.WORKSPACE_WRITE)
+        ) or (
+            prompter is not None
+            and current == PermissionMode.WORKSPACE_WRITE
+            and required == PermissionMode.DANGER_FULL_ACCESS
+        )
+        if prompter_decides:
+            return prompter.decide(request)
+        if (current == PermissionMode.PLAN
+                and required == PermissionMode.WORKSPACE_WRITE):
+            return PermissionResult(decision= PermissionDecision.DENY,
+                                    reason= f"tool '{tool_name}' requires approval to escalate "
+                                    f"from {current.as_str()} to {required.as_str()}")
         if current == PermissionMode.WORKSPACE_WRITE and required == PermissionMode.DANGER_FULL_ACCESS:
-            if prompter is not None:
-                return prompter.decide(request)
-            else:
-                return PermissionResult(decision= PermissionDecision.DENY,
-                                        reason= f"tool '{tool_name}' requires approval to escalate "
-                                        f"from {current.as_str()} to {required.as_str()}")
+            return PermissionResult(decision= PermissionDecision.DENY,
+                                    reason= f"tool '{tool_name}' requires approval to escalate "
+                                    f"from {current.as_str()} to {required.as_str()}")
 
         # 其他情况: 权限不足，直接拒绝
         return PermissionResult(
