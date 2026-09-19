@@ -183,3 +183,9 @@ def test_queue_fifo_order(clean_slots):
     finally:
         server._spawn_turn_thread = original
     assert got == ["fifo-0", "fifo-1", "fifo-2"]
+    # 收尾复位: drain 已把计数清 0, 本测试占的槽也没有真实 worker 来释放——
+    # 不补回的话, 计数 0 会泄漏给同进程里所有后跑的测试文件
+    while server._turn_slots.acquire(blocking=False):
+        pass
+    for _ in range(server.MAX_CONCURRENT_TURNS):
+        server._turn_slots.release()
