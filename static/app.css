@@ -1214,46 +1214,51 @@
   #dir-pick:hover { filter: brightness(1.08); }
 
   /* ============ 权限审批: 聊天流内联卡片 ============ */
+  /* 与工具行同缩进; 卡身低调, 靠左侧琥珀条 + 图标提示"需要你", 不抢正文 */
   .perm-card {
-    max-width: 640px; margin: 8px 0;
-    background: var(--surface);
-    border: 1px solid var(--accent-border);
-    border-left: 3px solid var(--accent);
+    max-width: 620px; margin: -4px 0 14px 38px;
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--warn);
     border-radius: var(--r-md);
-    padding: 10px 14px; font-size: 12.5px;
-    animation: rise .2s cubic-bezier(.16, 1, .3, 1);
+    padding: 9px 12px 9px 14px; font-size: 12.5px;
+    animation: msg-in .22s ease;
   }
-  .perm-card .pc-head {
-    display: flex; align-items: center; gap: 7px;
-    font-weight: 600; color: var(--text); margin-bottom: 7px;
+  .perm-card .pc-head { display: flex; align-items: center; gap: 7px; margin-bottom: 6px; }
+  .perm-card .pc-ico { flex: none; display: inline-flex; color: var(--warn); }
+  .perm-card .pc-title { flex: none; font-weight: 600; color: var(--text-2); }
+  .perm-card .pc-ask {
+    flex: none; margin-left: 2px; padding: 1.5px 8px;
+    font-size: 11px; font-weight: 600; border-radius: 999px;
+    color: var(--warn); background: var(--warn-soft);
+    border: 1px solid color-mix(in srgb, var(--warn) 30%, transparent);
   }
-  .perm-card .pc-head svg { color: var(--accent); flex: none; }
-  .perm-card pre {
+  .perm-card .pc-body {
+    font-family: var(--font-mono); font-size: 12px; color: var(--text);
     background: var(--code-bg); border: 1px solid var(--border);
-    border-radius: 8px; padding: 8px 10px;
-    max-height: 180px; overflow: auto; font-size: 11.5px;
-    font-family: var(--font-mono); white-space: pre-wrap; word-break: break-all;
-    margin: 0 0 9px; color: var(--text-2);
+    border-radius: 8px; padding: 7px 10px;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    margin-bottom: 9px;
   }
   .perm-card .pc-btns { display: flex; gap: 8px; justify-content: flex-end; }
   .perm-card .pc-btns button {
-    padding: 5.5px 20px; border-radius: var(--r-sm); font-size: 12.5px; font-weight: 600;
-    border: 1px solid var(--border-strong); background: transparent; color: var(--text);
+    padding: 4.5px 18px; border-radius: 999px; font-size: 12.5px; font-weight: 600;
+    border: 1px solid var(--border-strong); background: transparent; color: var(--text-2);
     transition: all .12s; cursor: pointer;
   }
-  .perm-card .pc-btns button:hover { background: var(--hover); }
-  .perm-card .pc-deny { color: var(--err) !important; border-color: var(--err) !important; }
-  .perm-card .pc-deny:hover { background: var(--err-soft) !important; }
+  .perm-card .pc-btns button:hover { background: var(--hover); color: var(--text); }
   .perm-card .pc-allow {
     background: linear-gradient(135deg, var(--accent), var(--accent-deep)) !important;
     border-color: transparent !important; color: #fff !important;
     box-shadow: 0 2px 10px var(--accent-soft);
   }
-  .perm-card .pc-allow:hover { filter: brightness(1.08) !important; }
-  /* 定格态: 已决定 */
-  .perm-card.allowed { border-left-color: var(--accent); opacity: .82; }
-  .perm-card.denied { border-left-color: var(--err); opacity: .72; }
-  .perm-card .pc-mark { font-weight: 600; font-size: 12px; }
+  .perm-card .pc-allow:hover { filter: brightness(1.08) !important; color: #fff !important; }
+  .perm-card .pc-deny:hover { color: var(--err) !important; border-color: var(--err) !important; background: var(--err-soft) !important; }
+  /* 定格态: 已决定 → 整卡降调, 去警示色 */
+  .perm-card.allowed, .perm-card.denied { border-left-color: var(--border-strong); opacity: .62; }
+  .perm-card.allowed .pc-ico, .perm-card.denied .pc-ico { color: var(--text-3); }
+  .perm-card.allowed .pc-ask, .perm-card.denied .pc-ask { display: none; }
+  .perm-card .pc-mark { margin-left: auto; font-weight: 600; font-size: 12px; }
   .perm-card.allowed .pc-mark { color: var(--accent); }
   .perm-card.denied .pc-mark { color: var(--err); }
 

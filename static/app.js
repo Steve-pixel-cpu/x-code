@@ -1486,6 +1486,11 @@ function handleServerMessage(msg, sid) {
           card.classList.add("denied");
           const btns = card.querySelector(".pc-btns");
           if (btns) btns.remove();
+          const head = card.querySelector(".pc-head");
+          const mark = document.createElement("span");
+          mark.className = "pc-mark";
+          mark.textContent = "已拒绝";
+          if (head) head.appendChild(mark); else card.appendChild(mark);
         }
       }
       run.pendingPerms = {};
@@ -1770,22 +1775,35 @@ function onPermissionRequest(msg, sid) {
   run.pendingPerms[msg.request_id] = msg;
   bumpUnread(sid2);
 
+  const meta = TOOL_META[msg.tool_name] || { label: msg.tool_name, icon: ICON_TOOL };
   const card = document.createElement("div");
   card.className = "perm-card";
   card.dataset.reqId = msg.request_id;
+
+  // 头行: 工具图标 + 「读取文件 · 需要确认」, 与工具行观感一致
   const head = document.createElement("div");
   head.className = "pc-head";
-  head.innerHTML =
-    '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linejoin="round"><path d="M12 3l7 2.8v5.4c0 4.4-2.9 7.8-7 9.8-4.1-2-7-5.4-7-9.8V5.8L12 3z"/></svg>';
-  const t = document.createElement("span");
-  t.textContent = "需要授权 — " + (msg.tool_name || "");
-  head.appendChild(t);
+  const ico = document.createElement("span");
+  ico.className = "pc-ico";
+  ico.innerHTML = meta.icon;
+  const title = document.createElement("span");
+  title.className = "pc-title";
+  title.textContent = meta.label;
+  const ask = document.createElement("span");
+  ask.className = "pc-ask";
+  ask.textContent = "需要你的确认";
+  head.appendChild(ico); head.appendChild(title); head.appendChild(ask);
   card.appendChild(head);
 
-  const pre = document.createElement("pre");
-  pre.textContent = String(msg.input || "");
+  // 内容: 命令/路径原文优先（与工具行摘要同源）, JSON 原始串兜底折叠
+  const body = describeInput(msg.input) || "(无参数)";
+  const pre = document.createElement("div");
+  pre.className = "pc-body";
+  pre.textContent = body;
+  pre.title = body;   // 悬停看全文
   card.appendChild(pre);
 
+  // 操作行: 右对齐两个按钮
   const btns = document.createElement("div");
   btns.className = "pc-btns";
   const deny = document.createElement("button");
@@ -1812,10 +1830,12 @@ function respondPermission(requestId, approved, sid) {
     card.classList.add(approved ? "allowed" : "denied");
     const btns = card.querySelector(".pc-btns");
     if (btns) btns.remove();
+    // 决定标记放头行右侧, 与标题同排
+    const head = card.querySelector(".pc-head");
     const mark = document.createElement("span");
     mark.className = "pc-mark";
     mark.textContent = approved ? "已允许" : "已拒绝";
-    card.appendChild(mark);
+    if (head) head.appendChild(mark); else card.appendChild(mark);
   }
 }
 
