@@ -1,6 +1,7 @@
 import json
+import os
 import uuid
-from typing import Literal
+from typing import Literal, List
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -58,6 +59,38 @@ class SessionStore:
         ).model_dump()
         self._append_entry(file_path, entry)
         return curr_id
+
+    def rewrite_session(self, session_id: str, messages: List[Message]) -> tuple[int, Optional[str]]:
+        """原子重写整个会话文件为给定消息序列（重建 uuid 链）。
+
+        用于上下文压缩后: 内存历史被替换为"摘要+保留区", 追加式落盘的
+        persisted_count 从此失准——重写让磁盘与内存重新一致。
+        标题/工作目录等非消息记录原样保留。返回 (消息数, 新链尾 uuid)。
+        """
+        file_path = self._session_path(session_id)
+        others = [e for e in self._read_entries(file_path)
+                  if not isinstance(e, StorageEntry)]
+        tmp = file_path.with_suffix(file_path.suffix + ".tmp")
+        tmp.write_text("", encoding="utf-8")
+        for e in others:
+            self._append_entry(tmp, e)
+        last: Optional[str] = None
+        for m in messages:
+            last = self.save_message_to(tmp, m, last)
+        os.replace(tmp, file_path)
+        return len(messages), last
+
+    def save_message_to(self, path: Path, message: Message,
+                         parent_uuid: Optional[str]) -> str:
+        """save_message 的指定文件变体（rewrite_session 用）。"""
+        entry = StorageEntry(
+            uuid=str(uuid.uuid4()),
+            parent_uuid=parent_uuid,
+            message=message.model_dump(),
+            timestamp=datetime.now(timezone.utc).isoformat()
+        ).model_dump()
+        self._append_entry(path, entry)
+        return entry["uuid"]
 
     def load_session(self, session_id:str) -> tuple[list[Message], Optional[str]]:
         file_path = self._session_path(session_id)

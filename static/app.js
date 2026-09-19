@@ -255,6 +255,120 @@ function toast(text) {
 }
 
 /* ============================================================
+ * 确认弹窗 — 替代原生 confirm(): WebView2 的 confirm 顶着
+ * "127.0.0.1:8000 显示" 的源地址头, 丑且不可定制。
+ * 用法: if (await confirmDialog("删除会话「x」？", { title: "删除会话", okText: "删除", danger: true })) ...
+ * ============================================================ */
+function confirmDialog(msg, { title = "确认操作", okText = "确定", danger = false } = {}) {
+  return new Promise(resolve => {
+    const ov = document.createElement("div");
+    ov.id = "confirm-overlay";
+    ov.style.display = "flex";
+    ov.innerHTML =
+      '<div id="confirm-modal" role="alertdialog" aria-modal="true">' +
+        '<div id="confirm-title">' +
+          (danger ? '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><path d="M12 9v4m0 4h.01M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/></svg>' : "") +
+          '<span>' + escapeHtml(title) + '</span>' +
+        '</div>' +
+        '<div id="confirm-msg">' + escapeHtml(msg) + '</div>' +
+        '<div id="confirm-actions">' +
+          '<button type="button" data-act="cancel">取消</button>' +
+          '<button type="button" data-act="ok"' + (danger ? ' class="danger"' : '') + '>' + escapeHtml(okText) + '</button>' +
+        '</div>' +
+      '</div>';
+    document.body.appendChild(ov);
+    let done = false;
+    const finish = v => {
+      if (done) return;
+      done = true;
+      document.removeEventListener("keydown", onEsc);
+      ov.remove();
+      resolve(v);
+    };
+    const onEsc = e => { if (e.key === "Escape") finish(false); };
+    document.addEventListener("keydown", onEsc);
+    ov.querySelector("[data-act='ok']").onclick = () => finish(true);
+    ov.querySelector("[data-act='cancel']").onclick = () => finish(false);
+    ov.addEventListener("mousedown", e => { if (e.target === ov) finish(false); });
+    ov.querySelector("[data-act='ok']").focus();
+  });
+}
+
+/* ============================================================
+ * 桌面端右键菜单 — 按上下文提供 复制/粘贴/全选。
+ * 由壳的 BRIDGE_JS 在 contextmenu 时调用（已 preventDefault 原生菜单,
+ * 原生菜单带"刷新"等浏览器项, 与桌面应用形态不符）。
+ * 粘贴经 clipboard 插件在 Rust 侧读系统剪贴板, 避开浏览器权限弹窗。
+ * ============================================================ */
+window.__xcodeCtxMenu = function (ev) {
+  const old = $("ctx-pop");
+  if (old) old.remove();
+  // 复制仅限聊天文本: 选区起止必须都在同一消息列（.msg-col）内,
+  // 否则选中的会混入侧栏/标题等界面文字（如整页 Ctrl+A）
+  const withinChat = (() => {
+    const sel = window.getSelection();
+    if (!sel || !sel.rangeCount) return false;
+    const elOf = n => (n ? (n.nodeType === 1 ? n : n.parentElement) : null);
+    const a = elOf(sel.anchorNode), b = elOf(sel.focusNode);
+    if (!a || !b) return false;
+    const ca = a.closest(".msg-col"), cb = b.closest(".msg-col");
+    return !!(ca && cb && ca === cb);
+  })();
+  const selText = withinChat && window.getSelection().toString();
+  const t = ev.target;
+  const editable = t.closest
+    ? (t.closest("textarea, input") || (t.isContentEditable ? t : null))
+    : null;
+  const items = [];
+  if (selText) items.push(["复制", () => { document.execCommand("copy"); }]);
+  if (editable) {
+    items.push(["粘贴", async () => {
+      try {
+        const text = await window.__TAURI_INTERNALS__.invoke(
+          "plugin:clipboard-manager|read_text");
+        editable.focus();
+        if (!document.execCommand("insertText", false, text || "")) {
+          toast("粘贴失败");
+        }
+      } catch (e) { toast("粘贴失败"); }
+    }]);
+    items.push(["全选", () => {
+      editable.focus();
+      if (editable.select) editable.select();
+      else document.execCommand("selectAll");
+    }]);
+  }
+  if (!items.length) return;
+  const pop = document.createElement("div");
+  pop.id = "ctx-pop";
+  items.forEach(([label, fn]) => {
+    const it = document.createElement("div");
+    it.className = "ctx-item";
+    it.textContent = label;
+    it.onclick = () => { pop.remove(); fn(); };
+    pop.appendChild(it);
+  });
+  document.body.appendChild(pop);
+  const W = pop.offsetWidth, H = pop.offsetHeight;
+  pop.style.left = Math.max(8, Math.min(ev.clientX, window.innerWidth - W - 8)) + "px";
+  pop.style.top = Math.max(8, Math.min(ev.clientY, window.innerHeight - H - 8)) + "px";
+  setTimeout(() => {
+    document.addEventListener("mousedown", function h(e) {
+      if (!pop.contains(e.target)) {
+        pop.remove();
+        document.removeEventListener("mousedown", h);
+      }
+    });
+    document.addEventListener("keydown", function k(e) {
+      if (e.key === "Escape") {
+        pop.remove();
+        document.removeEventListener("keydown", k);
+      }
+    });
+  }, 0);
+};
+
+/* ============================================================
  * 滚动: 贴底自动跟随; 用户上翻时不拽人, 悬浮钮一键回底
  * ============================================================ */
 let nearBottom = true;
@@ -426,7 +540,8 @@ async function deleteSession(id) {
     return;
   }
   const cur = state.sessions.find(s => s.id === id);
-  if (!confirm(`删除会话「${displayTitle(cur)}」？删除后不可恢复。`)) return;
+  if (!await confirmDialog(`删除会话「${displayTitle(cur)}」？删除后不可恢复。`,
+      { title: "删除会话", okText: "删除", danger: true })) return;
   try {
     const r = await fetch(`/api/sessions/${id}`, { method: "DELETE" });
     if (!r.ok) {
@@ -897,17 +1012,32 @@ function openWsPop(anchor) {
     closeWsPop();
     renderWsChip();
   };
-  // 定位: chip 下方, 越界时翻到上方/收拢
+  // 定位: chip 下方优先, 放不下翻到上方; 两向都放不下时限高让列表内滚
   const r = anchor.getBoundingClientRect();
   pop.style.visibility = "hidden";
   requestAnimationFrame(() => {
-    let left = Math.max(10, Math.min(r.left, window.innerWidth - pop.offsetWidth - 10));
-    let top = r.bottom + 6;
-    if (top + pop.offsetHeight > window.innerHeight - 10) {
-      top = Math.max(10, r.top - pop.offsetHeight - 6);
+    const W = pop.offsetWidth, H = pop.offsetHeight;
+    const left = Math.max(10, Math.min(r.left, window.innerWidth - W - 10));
+    const M = 10;                                   // 视口安全边距
+    const below = r.bottom + 6;
+    const fitsBelow = below + H <= window.innerHeight - M;
+    const fitsAbove = r.top - 6 - H >= M;
+    let top = below;
+    if (!fitsBelow && fitsAbove) {
+      top = r.top - 6 - H;                          // 上方空间更充裕: 翻转
+    } else if (below + H > window.innerHeight - M) {
+      // 两向都放不下: 就地限高, 搜索框和操作项固定, 列表内部滚动
+      const avail = Math.max(160, window.innerHeight - below - M);
+      pop.style.maxHeight = avail + "px";
+      pop.style.display = "flex";
+      pop.style.flexDirection = "column";
+      const lst = pop.querySelector(".ws-list");
+      lst.style.flex = "1";
+      lst.style.minHeight = "0";
+      lst.style.maxHeight = "none";
     }
     pop.style.left = left + "px";
-    pop.style.top = top + "px";
+    pop.style.top = Math.max(M, top) + "px";
     pop.style.visibility = "";
     pop.querySelector(".ws-search").focus();
   });
@@ -2063,8 +2193,9 @@ function buildProviderCard(p) {
   del.className = "prov-del";
   del.innerHTML = TRASH_SMALL_SVG;
   del.dataset.tip = "删除供应商";
-  del.onclick = () => {
-    if (!confirm(`删除供应商「${p.name}」？其模型将从下拉中移除。`)) return;
+  del.onclick = async () => {
+    if (!await confirmDialog(`删除供应商「${p.name}」？其模型将从下拉中移除。`,
+        { title: "删除供应商", okText: "删除", danger: true })) return;
     state.providerCfg.providers = state.providerCfg.providers.filter(x => x !== p);
     if (state.providerCfg.active && state.providerCfg.active.provider === p.id) {
       state.providerCfg.active = {};

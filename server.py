@@ -588,6 +588,19 @@ def load_runtime_for(web_session: WebSession) -> None:
     )
     web_session.runtime.set_thinking_level(web_session.thinking_level)
     web_session.last_uuid = last_uuid
+    # 增量落盘: 历史一致点即写盘, 输出中强杀/崩溃最多丢最后一次一致点
+    # 之后的内容, 不再是整轮。压缩会重写内存历史使追加式存储失准,
+    # 此时原子重写会话文件让磁盘与内存重新对齐。
+    web_session.runtime.set_on_iterate(lambda: persist_turn(web_session))
+    web_session.runtime.set_on_compacted(
+        lambda: _rewrite_after_compact(web_session))
+
+
+def _rewrite_after_compact(web_session: WebSession) -> None:
+    messages = web_session.runtime.session().messages
+    count, last_uuid = store.rewrite_session(web_session.session_id, messages)
+    web_session.persisted_count = count
+    web_session.last_uuid = last_uuid
 
 
 # ============================================================================

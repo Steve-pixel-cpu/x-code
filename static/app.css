@@ -370,6 +370,12 @@
      自己的隐藏列, 切回时原样恢复——流式中的回复不丢字、不冻结 */
   .msg-col { width: var(--content-w); margin: 0 auto; padding: 28px 32px 12px; display: none; }
   .msg-col.on { display: block; }
+  /* 桌面应用形态: 界面文字（侧栏/标题/按钮等）不可选中, Ctrl+A 全选
+     只会选中聊天内容; 输入框与消息列保持正常可选 */
+  body { user-select: none; -webkit-user-select: none; }
+  .msg-col, .msg-col *, input, textarea, #input {
+    user-select: text; -webkit-user-select: text;
+  }
 
   /* 欢迎态（新建任务）: 消息区收缩为内容高度, 与输入卡一起在主区垂直居中;
      上下 auto 外边距均分剩余空间, 空间不足时自动退化为贴顶排列。
@@ -434,21 +440,26 @@
   #ws-pop .ws-search {
     width: 100%; border: none; border-bottom: 1px solid var(--border);
     background: none; color: var(--text); font-family: inherit; font-size: 12.5px;
-    padding: 10px 13px; outline: none;
+    padding: 10px 13px; outline: none; transition: border-color .12s;
   }
+  #ws-pop .ws-search:focus { border-bottom-color: var(--accent); }
   #ws-pop .ws-list { max-height: 208px; overflow-y: auto; padding: 4px; }
   #ws-pop .ws-item {
     display: flex; align-items: center; gap: 8px;
     padding: 8px 10px; border-radius: 8px;
     color: var(--text); font-size: 12.5px; cursor: pointer;
+    transition: background .1s;
   }
   #ws-pop .ws-item:hover { background: var(--hover); }
+  #ws-pop .ws-item.on { background: var(--accent-soft); }
+  #ws-pop .ws-item.on svg { color: var(--accent); }
   #ws-pop .ws-item span:not(.ws-check) {
     flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   }
   #ws-pop .ws-item .ws-check { flex: none; color: var(--accent); font-weight: 700; }
   #ws-pop .ws-item svg { flex: none; color: var(--text-3); }
-  #ws-pop .ws-act { border-top: 1px solid var(--border); border-radius: 0; }
+  #ws-pop .ws-act { border-top: 1px solid var(--border); border-radius: 0; flex: none; }
+  #ws-pop .ws-item.ws-act:hover { background: var(--hover); }
   /* 草稿态: 建议 chips 挂在输入卡下方居中 */
   #sug-dock { display: none; }
   #sug-dock:not(:empty) {
@@ -1136,6 +1147,53 @@
   #btn-allow:hover { filter: brightness(1.08) !important; background: linear-gradient(135deg, var(--accent), var(--accent-deep)) !important; }
   #btn-deny { color: var(--err) !important; border-color: var(--err) !important; }
   #btn-deny:hover { background: var(--err-soft) !important; }
+
+  /* 通用确认弹窗（替代原生 confirm——WebView2 的 confirm 带难看的源地址头） */
+  #confirm-overlay {
+    display: none; position: fixed; inset: 0; z-index: 300;
+    background: var(--overlay); backdrop-filter: blur(3px);
+    align-items: center; justify-content: center;
+  }
+  #confirm-modal {
+    width: min(400px, 90vw);
+    background: var(--surface);
+    background: color-mix(in srgb, var(--surface) 92%, transparent);
+    -webkit-backdrop-filter: blur(20px) saturate(1.4); backdrop-filter: blur(20px) saturate(1.4);
+    border: 1px solid var(--border);
+    border-radius: var(--r-lg); box-shadow: var(--shadow-pop);
+    padding: 20px 22px; animation: rise .2s cubic-bezier(.16, 1, .3, 1);
+  }
+  #confirm-title {
+    display: flex; align-items: center; gap: 8px;
+    font-size: 15px; font-weight: 700; color: var(--text); margin-bottom: 8px;
+  }
+  #confirm-title svg { color: var(--err); flex: none; }
+  #confirm-msg { color: var(--text-2); font-size: 13px; line-height: 1.7; }
+  #confirm-actions { display: flex; gap: 10px; justify-content: flex-end; margin-top: 18px; }
+  #confirm-actions button {
+    padding: 8px 22px; border-radius: var(--r-sm); font-size: 13.5px; font-weight: 600;
+    border: 1px solid var(--border-strong); background: transparent; color: var(--text);
+    cursor: pointer; transition: all .12s;
+  }
+  #confirm-actions button:hover { background: var(--hover); }
+  #confirm-actions button.danger {
+    background: var(--err); border-color: transparent; color: #fff;
+    box-shadow: 0 2px 10px var(--err-soft);
+  }
+  #confirm-actions button.danger:hover { filter: brightness(1.08); background: var(--err); }
+
+  /* 桌面端右键菜单（复制/粘贴/全选, 由 BRIDGE_JS 触发 app.js 构建） */
+  #ctx-pop {
+    position: fixed; z-index: 350; min-width: 132px;
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 10px; box-shadow: var(--shadow-pop); overflow: hidden;
+    padding: 4px; animation: rise .12s cubic-bezier(.16, 1, .3, 1);
+  }
+  #ctx-pop .ctx-item {
+    padding: 8px 14px; border-radius: 7px; font-size: 12.5px;
+    color: var(--text); cursor: pointer; transition: background .1s;
+  }
+  #ctx-pop .ctx-item:hover { background: var(--hover); }
 
   /* 轻提示 */
   #toast {

@@ -11,8 +11,15 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = [] }
 tauri-plugin-opener = "2"
 tauri-plugin-single-instance = "2"
+# 右键菜单的"粘贴": 读系统剪贴板走 Rust 侧, 避开 WebView2 剪贴板读权限弹窗
+tauri-plugin-clipboard-manager = "2"
 # 原生"选择文件夹"对话框（对应 Electron 版 preload 桥的 pick-folder）
 rfd = "0.15"
+
+# 关闭 WebView2 浏览器快捷键（F5/Ctrl+R 刷新等, tauri 未透传该设置）
+[target.'cfg(windows)'.dependencies]
+webview2-com = "0.38"
+windows = { version = "0.61", features = ["Win32_Foundation"] }
 
 [profile.release]
 strip = true

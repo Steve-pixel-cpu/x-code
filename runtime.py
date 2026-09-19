@@ -188,6 +188,28 @@ class ConversationRuntime:
         # 会话级思考等级: 初值取自 api_client（=全局默认）, 之后只改自己。
         # stream() 调用时带上, 多会话共用 client 也不会互相串设置。
         self._thinking_level = api_client.thinking_level
+        # 持久化钩子（Web 端增量落盘用, CLI 默认 None 行为不变）:
+        # - on_iterate: 消息历史处于一致点（无悬空 tool_use）时触发——
+        #   用户消息落定后、每次工具结果回填后
+        # - on_compacted: 压缩替换内存历史后触发——追加式存储从此
+        #   失准, 调用方需要重写存储（见 storage.rewrite_session）
+        self._on_iterate = None
+        self._on_compacted = None
+
+    def set_on_iterate(self, fn) -> "ConversationRuntime":
+        self._on_iterate = fn
+        return self
+
+    def set_on_compacted(self, fn) -> "ConversationRuntime":
+        self._on_compacted = fn
+        return self
+
+    def _notify_iterate(self) -> None:
+        if self._on_iterate is not None:
+            try:
+                self._on_iterate()
+            except Exception as e:
+                print(f"[WARN] persist hook failed: {e}")
 
     def with_max_iterations(self, n) -> "ConversationRuntime":
         self._max_iterations = n
@@ -326,6 +348,11 @@ class ConversationRuntime:
         if compact_result.removed_count == 0:
             return False
         curr_session.messages = compact_result.compacted_messages
+        if self._on_compacted is not None:
+            try:
+                self._on_compacted()
+            except Exception as e:
+                print(f"[WARN] compact hook failed: {e}")
 
         return True
 
@@ -346,6 +373,7 @@ class ConversationRuntime:
         auto_compacted = False
 
         curr_session.messages.append(Message.user_text(user_input))
+        self._notify_iterate()   # 一致点: 用户消息已落定
         while True:
             # 循环层预算检查点: 收束发生在这里——上一迭代的工具结果已全部
             # 回填，会话历史一致，break 不会产生悬空 tool_use，也不需要异常
@@ -414,6 +442,7 @@ class ConversationRuntime:
                 if tool_result_msg:
                     curr_session.messages.append(tool_result_msg)
                     tool_results.append(tool_result_msg)
+            self._notify_iterate()   # 一致点: 本迭代的工具结果已全部回填
 
         if self._maybe_auto_compact():
             auto_compacted = True

@@ -248,12 +248,22 @@ fn error_box(title: &str, text: &str) {
 }
 
 /// 原生"选择文件夹"对话框（前端经 window.xcodePickFolder() 调用）
+///
+/// 必须是 async + spawn_blocking: 同步命令在主线程执行, 阻塞式 rfd 对话框
+/// 会在主线程上等窗口消息——而消息循环正是被它自己卡住的 → 对话框永远
+/// 弹不出来, 前端 await 悬死。挪进阻塞线程池后主线程照常泵消息。
 #[tauri::command]
-fn pick_folder() -> Option<String> {
-    rfd::FileDialog::new()
-        .set_title("选择文件夹")
-        .pick_folder()
-        .map(|p| p.to_string_lossy().to_string())
+async fn pick_folder() -> Option<String> {
+    // spawn_blocking: rfd 的阻塞式对话框不能跑在主线程——会卡死 UI 消息泵
+    tauri::async_runtime::spawn_blocking(move || {
+        rfd::FileDialog::new()
+            .set_title("选择文件夹")
+            .pick_folder()
+            .map(|p| p.to_string_lossy().to_string())
+    })
+    .await
+    .ok()
+    .flatten()
 }
 
 // ---------- 注入页面的桥（对齐 electron/preload.js） ----------
@@ -263,6 +273,14 @@ fn pick_folder() -> Option<String> {
 const BRIDGE_JS: &str = r#"
 (() => {
   Object.defineProperty(window, 'xcodeDesktop', { value: true });
+  // 桌面应用形态: 用自建右键菜单（按上下文 复制/粘贴/全选, 见 app.js）替代
+  // WebView2 默认菜单——默认菜单带"刷新/后退"等浏览器项。文件拖入不导航。
+  document.addEventListener('contextmenu', e => {
+    e.preventDefault();
+    if (window.__xcodeCtxMenu) window.__xcodeCtxMenu(e);
+  });
+  ['dragover', 'drop'].forEach(t =>
+    document.addEventListener(t, e => e.preventDefault()));
   window.xcodePickFolder = async () => {
     try { return await window.__TAURI_INTERNALS__.invoke('pick_folder'); }
     catch (e) { return null; }
@@ -277,6 +295,7 @@ fn main() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             // 单实例: 二次启动只把已有窗口带到前台
             if let Some(win) = app.get_webview_window("main") {
@@ -292,15 +311,24 @@ fn main() {
             RunEvent::Ready => {
                 let app = app.clone();
                 let token = token.clone();
+                // 窗口先开（秒级, 显示 loading 页）, 后端在后台线程拉起
+                if let Err(e) = create_main_window(&app) {
+                    error_box("x-code 启动失败", &e);
+                    app.exit(1);
+                    return;
+                }
                 std::thread::spawn(move || {
                     if let Err(e) = bootstrap(&token) {
                         error_box("x-code 启动失败", &e);
                         app.exit(1);
                         return;
                     }
-                    if let Err(e) = create_main_window(&app, &token) {
-                        error_box("x-code 启动失败", &e);
-                        app.exit(1);
+                    // 就绪后把窗口从 loading 页导航到真正的应用地址
+                    if let Some(win) = app.get_webview_window("main") {
+                        let _ = win.eval(&format!(
+                            "location.replace('{}')",
+                            app_url(&token)
+                        ));
                     }
                 });
             }
@@ -333,30 +361,34 @@ fn bootstrap(token: &str) -> Result<(), String> {
     Err("Python 后端在 30 秒内未能就绪。\n若 8000-8019 端口被其他程序（如 C-Lodop 打印服务）占用, 请关闭后重试。".to_string())
 }
 
-fn create_main_window(app: &AppHandle, token: &str) -> Result<(), String> {
-    let port = read_port();
-    let base = format!("http://127.0.0.1:{port}");
-    let url: tauri::Url = format!("{base}/?token={}", urlencode(token))
-        .parse()
-        .map_err(|e| format!("bad url: {e}"))?;
-
-    // 窗口加载本地 FastAPI 服务（页面/静态/API/WS 同源）
-    let base_for_nav = base.clone();
-    let app_for_nav = app.clone();
-    WebviewWindowBuilder::new(app, "main", WebviewUrl::External(url))
+fn create_main_window(app: &AppHandle) -> Result<(), String> {
+    // 首屏 = 内嵌 loading 页（tauri:// 资产协议, 不依赖后端进程）。
+    // 此前窗口要等后端就绪才创建——Python 冷启动约 3s, 用户对着空白。
+    // 现在窗口秒开, bootstrap 完成后由启动线程导航到真正的应用地址。
+    let app_for_nav = app.clone();   // 闭包要求 'static: 捕获克隆而非函数引用
+    let win = WebviewWindowBuilder::new(app, "main", WebviewUrl::App("loading.html".into()))
         .title("x-code")
         .inner_size(1440.0, 900.0)
         .min_inner_size(960.0, 600.0)
         .visible(false) // 页面就绪后再显示, 避免白屏闪烁
         .initialization_script(BRIDGE_JS)
         .on_navigation(move |url| {
-            // 本地链接放行; 外部链接（markdown 链接等）转交系统浏览器
             let s = url.as_str();
-            if s.starts_with(&base_for_nav) || s.starts_with("http://127.0.0.1") {
+            // 内部导航放行: 后端地址（任意端口）+ tauri 内嵌资产 + 浏览器内部页。
+            // 内嵌资产在 Windows WebView2 上是 http(s)://tauri.localhost,
+            // 在 macOS/Linux 上是 tauri://localhost——漏了前者会把启动页
+            // 误判为外部链接, 每次启动都用系统浏览器开一遍 loading.html
+            if s.starts_with("http://127.0.0.1")
+                || s.starts_with("http://tauri.localhost")
+                || s.starts_with("https://tauri.localhost")
+                || s.starts_with("tauri://localhost")
+                || s.starts_with("about:")
+            {
                 true
             } else {
-                let _ = app_for_nav.opener().open_url(s, None::<&str>);
-                false
+                // 外部链接（markdown 链接等）转交系统浏览器
+                let open = app_for_nav.opener().open_url(s, None::<&str>).is_ok();
+                open
             }
         })
         .on_page_load(|win, payload| {
@@ -368,7 +400,32 @@ fn create_main_window(app: &AppHandle, token: &str) -> Result<(), String> {
         .build()
         .map_err(|e| e.to_string())?;
 
+    // 关闭 WebView2 浏览器快捷键（F5/Ctrl+R/Ctrl+F/Ctrl+P/Ctrl+± 等）:
+    // 桌面应用不该有"刷新页面"。tauri 未透传该设置, 经 with_webview 拿
+    // 原生控制器直接写 ICoreWebView2Settings3。
+    #[cfg(windows)]
+    {
+        use webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2Settings3;
+        use windows::core::Interface;
+        win.with_webview(|wv| unsafe {
+            if let Ok(core) = wv.controller().CoreWebView2() {
+                if let Ok(settings) = core.Settings() {
+                    if let Ok(s3) = settings.cast::<ICoreWebView2Settings3>() {
+                        let _ = s3.SetAreBrowserAcceleratorKeysEnabled(false);
+                    }
+                }
+            }
+        })
+        .map_err(|e| e.to_string())?;
+    }
+
     Ok(())
+}
+
+/// 应用真实入口: 本地 FastAPI 服务（页面/静态/API/WS 同源）。
+/// 必须在 bootstrap 之后再调——端口以后端避让后写出的 port 文件为准。
+fn app_url(token: &str) -> String {
+    format!("http://127.0.0.1:{}/?token={}", read_port(), urlencode(token))
 }
 
 fn urlencode(s: &str) -> String {
