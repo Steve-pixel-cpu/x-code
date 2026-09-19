@@ -238,11 +238,12 @@ def test_ws_queues_second_turn_while_busy(client, isolated_store, monkeypatch):
     web_session.busy = True
     try:
         with client.websocket_connect("/ws/s-busy") as ws:
-            ws.send_json({"type": "user", "text": "第二条"})
+            ws.send_json({"type": "user", "text": "第二条", "qid": "q-1"})
             reply = json.loads(ws.receive_text())
             assert reply["type"] == "turn_queued_user"
             assert reply["position"] == 1
-            assert web_session.pending == ["第二条"]
+            assert web_session.pending == [{"qid": "q-1", "text": "第二条",
+                                            "attachments": []}]
     finally:
         web_session.busy = False
 
@@ -251,15 +252,16 @@ def test_ws_queue_promote_jumps_queue_while_busy(client, isolated_store):
     """「立即」: busy 会话上 queue_promote 把指定待发送消息提到最前并叫停当前轮, 无回执。"""
     web_session = server.get_or_create_web_session("s-promote")
     web_session.busy = True
-    web_session.pending = ["第一条", "第二条"]
+    web_session.pending = [{"qid": "q-1", "text": "第一条", "attachments": []},
+                           {"qid": "q-2", "text": "第二条", "attachments": []}]
     try:
         with client.websocket_connect("/ws/s-promote") as ws:
-            ws.send_json({"type": "queue_promote", "text": "第二条"})
+            ws.send_json({"type": "queue_promote", "qid": "q-2"})
             ws.send_json({"type": "nope"})   # 探测: queue_promote 分支应静默
             reply = json.loads(ws.receive_text())
             assert reply["type"] == "error"
             assert "未知消息类型" in reply["message"]
-            assert web_session.pending == ["第二条", "第一条"]
+            assert [it["qid"] for it in web_session.pending] == ["q-2", "q-1"]
             assert web_session.stop_requested is True
     finally:
         web_session.busy = False
@@ -271,14 +273,14 @@ def test_ws_queue_promote_ignores_unknown_text(client, isolated_store):
     """queue_promote 的文本不在待发送区（可能已开跑）: 静默忽略, 不误杀当前轮。"""
     web_session = server.get_or_create_web_session("s-promote2")
     web_session.busy = True
-    web_session.pending = ["第一条"]
+    web_session.pending = [{"qid": "q-1", "text": "第一条", "attachments": []}]
     try:
         with client.websocket_connect("/ws/s-promote2") as ws:
-            ws.send_json({"type": "queue_promote", "text": "不存在的消息"})
+            ws.send_json({"type": "queue_promote", "qid": "不存在的qid"})
             ws.send_json({"type": "nope"})
             reply = json.loads(ws.receive_text())
             assert reply["type"] == "error"
-            assert web_session.pending == ["第一条"]
+            assert [it["qid"] for it in web_session.pending] == ["q-1"]
             assert web_session.stop_requested is False
     finally:
         web_session.busy = False
@@ -289,15 +291,17 @@ def test_ws_queue_remove_drops_pending_text(client, isolated_store):
     """编辑/删除待发送卡片: queue_remove 从待发送区移除首个匹配文本, 不叫停当前轮。"""
     web_session = server.get_or_create_web_session("s-rm")
     web_session.busy = True
-    web_session.pending = ["第一条", "第二条", "第一条"]
+    web_session.pending = [{"qid": "q-1", "text": "第一条", "attachments": []},
+                           {"qid": "q-2", "text": "第二条", "attachments": []},
+                           {"qid": "q-3", "text": "第一条", "attachments": []}]
     try:
         with client.websocket_connect("/ws/s-rm") as ws:
-            ws.send_json({"type": "queue_remove", "text": "第一条"})
+            ws.send_json({"type": "queue_remove", "qid": "q-2"})
             ws.send_json({"type": "nope"})
             reply = json.loads(ws.receive_text())
             assert reply["type"] == "error"
             assert "未知消息类型" in reply["message"]
-            assert web_session.pending == ["第二条", "第一条"]   # 只移除首个匹配
+            assert [it["qid"] for it in web_session.pending] == ["q-1", "q-3"]
             assert web_session.stop_requested is False
     finally:
         web_session.busy = False
@@ -479,15 +483,17 @@ def _stub_session(**kw):
 
 
 def test_promote_pending_提到队首并叫停当前轮():
-    s = _stub_session(pending=["B", "C"])
+    s = _stub_session(pending=[{"qid": "a", "text": "A", "attachments": []},
+                               {"qid": "b", "text": "B", "attachments": []},
+                               {"qid": "c", "text": "C", "attachments": []}])
 
-    assert server.promote_pending(s, "B") is True
-    assert s.pending == ["B", "C"]
+    assert server.promote_pending(s, "b") is True
+    assert [it["qid"] for it in s.pending] == ["b", "a", "c"]
     assert s.stop_requested is True
 
 
 def test_promote_pending_不在队列时静默忽略():
-    s = _stub_session(pending=["B"])
+    s = _stub_session(pending=[{"qid": "b", "text": "B", "attachments": []}])
 
     assert server.promote_pending(s, "X") is False
     assert s.stop_requested is False
@@ -517,3 +523,267 @@ def test_startup_reconciles_orphan_agents(monkeypatch):
     assert calls == [1]
     # 处理函数确实挂在 startup 事件上（TestClient 不进 lifespan, 测试不触发它）
     assert server._reconcile_orphan_agents in server.app.router.on_startup
+
+
+# ------------------------------------------------------------
+# 附件（图片 / 文本文件）: 校验、WS user 消息落盘、历史回放、排队 qid
+# ------------------------------------------------------------
+
+SMALL_B64 = "iVBORw0KGgoAAAANSUhEUg=="   # 合法形状的小 base64（不校验内容）
+
+
+def test_parse_attachments_accepts_valid():
+    """合法附件: 形状规整, 图片在前文件在后。"""
+    atts, err = server._parse_attachments([
+        {"kind": "file", "name": "n.md", "text": "# hi"},
+        {"kind": "image", "name": "a.png", "media_type": "image/webp", "data": SMALL_B64},
+    ])
+    assert err is None
+    assert atts[0]["kind"] == "image" and atts[0]["data"] == SMALL_B64
+    assert atts[1] == {"kind": "file", "name": "n.md", "text": "# hi"}
+
+
+def test_parse_attachments_none_and_empty():
+    """缺失 attachments / 空数组都算合法空集。"""
+    atts, err = server._parse_attachments(None)
+    assert (atts, err) == ([], None)
+    atts, err = server._parse_attachments([])
+    assert (atts, err) == ([], None)
+
+
+def test_parse_attachments_rejects_bad_media_type():
+    """media_type 白名单外的图片（如 bmp）拒绝。"""
+    atts, err = server._parse_attachments([
+        {"kind": "image", "name": "x.bmp", "media_type": "image/bmp", "data": SMALL_B64},
+    ])
+    assert atts is None and err and "image/bmp" in err
+
+
+def test_parse_attachments_rejects_oversize_image():
+    """单张 base64 超 5MB 拒绝。"""
+    big = "A" * (5 * 1024 * 1024 + 1)
+    atts, err = server._parse_attachments([
+        {"kind": "image", "media_type": "image/png", "data": big},
+    ])
+    assert atts is None and err and "5MB" in err
+
+
+def test_parse_attachments_rejects_too_many_images():
+    """图片最多 8 张。"""
+    raw = [{"kind": "image", "media_type": "image/png", "data": "A"}
+           for _ in range(9)]
+    atts, err = server._parse_attachments(raw)
+    assert atts is None and err and "8 张" in err
+
+
+def test_parse_attachments_rejects_too_many_files():
+    """文本附件最多 8 个。"""
+    raw = [{"kind": "file", "name": "f.txt", "text": "x"} for _ in range(9)]
+    atts, err = server._parse_attachments(raw)
+    assert atts is None and err and "8 个" in err
+
+
+def test_parse_attachments_rejects_oversize_file_text():
+    """单个文本附件内容超 512KB 拒绝。"""
+    atts, err = server._parse_attachments([
+        {"kind": "file", "name": "big.log", "text": "x" * (512 * 1024 + 1)},
+    ])
+    assert atts is None and err and "512KB" in err
+
+
+def test_parse_attachments_rejects_total_over_20mb():
+    """全部附件总量超 20MB 拒绝（单张未超限）。"""
+    part = "A" * (4500 * 1024)   # 单张 4.5MB 合规, 4 张总量超 20MB
+    raw = [{"kind": "image", "media_type": "image/png", "data": part}
+           for _ in range(5)]
+    atts, err = server._parse_attachments(raw)
+    assert atts is None and err and "20MB" in err
+
+
+def test_parse_attachments_rejects_unknown_kind():
+    atts, err = server._parse_attachments([{"kind": "video", "data": "A"}])
+    assert atts is None and err and "video" in err
+
+
+def test_ws_user_with_attachments_persists_blocks(client, isolated_store):
+    """WS 发带附件的 user 消息: runtime 收到 image/file 块并经增量落盘进 JSONL。"""
+    captured = {}
+
+    class _Summary:
+        assistant_messages = []
+        tool_results = []
+        iterations = 1
+        budget_exhausted = False
+        iterations_exhausted = False
+
+        @property
+        def usage(self):
+            from runtime import UsageTracker
+            return UsageTracker().cumulative_usage()
+
+        auto_compacted = False
+
+    def fake_start_turn(web_session, text, emit, attachments=None):
+        captured["text"] = text
+        captured["attachments"] = attachments
+        web_session.runtime = type("R", (), {"session": lambda self: _Session()})()
+        emit({"type": "turn_done", "interrupted": False, "iterations": 1,
+              "budget_exhausted": False, "iterations_exhausted": False})
+
+    class _Session:
+        messages = []
+
+    import types as _types
+    monkey = client
+    # 直接打桩 _start_turn, 避免真起工作线程
+    original = server._start_turn
+    server._start_turn = fake_start_turn
+    try:
+        with client.websocket_connect("/ws/s-att") as ws:
+            ws.send_json({
+                "type": "user", "text": "看图",
+                "attachments": [
+                    {"kind": "image", "name": "a.png",
+                     "media_type": "image/webp", "data": SMALL_B64},
+                    {"kind": "file", "name": "n.md", "text": "# notes"},
+                ],
+            })
+            reply = json.loads(ws.receive_text())
+    finally:
+        server._start_turn = original
+    assert reply["type"] == "turn_done"
+    assert captured["text"] == "看图"
+    kinds = [a["kind"] for a in captured["attachments"]]
+    assert kinds == ["image", "file"]
+
+
+def test_ws_user_image_only_not_dropped(client, isolated_store):
+    """只发图不打字: 不丢弃, 正常开轮（text 为空但附件非空）。"""
+    captured = {}
+
+    def fake_start_turn(web_session, text, emit, attachments=None):
+        captured["text"] = text
+        captured["attachments"] = attachments
+
+    original = server._start_turn
+    server._start_turn = fake_start_turn
+    try:
+        with client.websocket_connect("/ws/s-imgonly") as ws:
+            ws.send_json({
+                "type": "user", "text": "",
+                "attachments": [
+                    {"kind": "image", "media_type": "image/png", "data": SMALL_B64},
+                ],
+            })
+            ws.send_json({"type": "nope"})   # 探测: user 分支不应回错误
+            reply = json.loads(ws.receive_text())
+    finally:
+        server._start_turn = original
+    assert reply["type"] == "error"   # 探测消息的回包, 证明 user 分支静默
+    assert captured["text"] == ""
+    assert captured["attachments"] and captured["attachments"][0]["kind"] == "image"
+
+
+def test_ws_user_oversize_attachment_returns_error(client, isolated_store):
+    """超限附件: error 事件带原因, 不开轮。"""
+    started = []
+    original = server._start_turn
+    server._start_turn = lambda ws, t, e, attachments=None: started.append(1)
+    try:
+        with client.websocket_connect("/ws/s-over") as ws:
+            ws.send_json({
+                "type": "user", "text": "hi",
+                "attachments": [
+                    {"kind": "image", "media_type": "image/png",
+                     "data": "A" * (5 * 1024 * 1024 + 1)},
+                ],
+            })
+            reply = json.loads(ws.receive_text())
+    finally:
+        server._start_turn = original
+    assert reply["type"] == "error"
+    assert "5MB" in reply["message"]
+    assert started == []
+
+
+def test_ws_user_empty_text_and_no_attachments_dropped(client, isolated_store):
+    """text 与 attachments 同时为空: 静默丢弃。"""
+    with client.websocket_connect("/ws/s-empty2") as ws:
+        ws.send_json({"type": "user", "text": "   "})
+        ws.send_json({"type": "nope"})
+        reply = json.loads(ws.receive_text())
+        assert reply["type"] == "error"
+        assert "未知消息类型" in reply["message"]
+
+
+def test_message_to_dict_image_and_file_blocks():
+    """历史回放: image 输出 {type, media_type, data}, file 输出 {type, name, text}。"""
+    msg = Message.user_input("看图", [
+        {"kind": "image", "name": "a.png", "media_type": "image/webp", "data": SMALL_B64},
+        {"kind": "file", "name": "n.md", "text": "# notes"},
+    ])
+    d = server._message_to_dict(msg)
+    assert d["role"] == "user"
+    assert d["blocks"][0] == {"type": "text", "text": "看图"}
+    assert d["blocks"][1] == {"type": "image", "media_type": "image/webp",
+                              "data": SMALL_B64}
+    assert d["blocks"][2] == {"type": "file", "name": "n.md", "text": "# notes"}
+
+
+def test_ws_busy_queue_with_attachments_and_qid(client, isolated_store):
+    """busy 时带附件消息进排队区: 存 {qid, text, attachments}。"""
+    web_session = server.get_or_create_web_session("s-busy-att")
+    web_session.busy = True
+    try:
+        with client.websocket_connect("/ws/s-busy-att") as ws:
+            ws.send_json({
+                "type": "user", "text": "排队看图", "qid": "q-x1",
+                "attachments": [
+                    {"kind": "image", "media_type": "image/gif", "data": "QQ=="},
+                ],
+            })
+            reply = json.loads(ws.receive_text())
+            assert reply["type"] == "turn_queued_user"
+            assert web_session.pending == [
+                {"qid": "q-x1", "text": "排队看图",
+                 "attachments": [{"kind": "image", "name": "",
+                                  "media_type": "image/gif", "data": "QQ=="}]},
+            ]
+    finally:
+        web_session.busy = False
+        web_session.pending = []
+
+
+def test_ws_busy_queue_without_qid_gets_generated(client, isolated_store):
+    """前端未带 qid（旧客户端）: 服务端兜底生成, 排队仍可用。"""
+    web_session = server.get_or_create_web_session("s-busy-noqid")
+    web_session.busy = True
+    try:
+        with client.websocket_connect("/ws/s-busy-noqid") as ws:
+            ws.send_json({"type": "user", "text": "旧客户端消息"})
+            reply = json.loads(ws.receive_text())
+            assert reply["type"] == "turn_queued_user"
+            item = web_session.pending[0]
+            assert item["text"] == "旧客户端消息"
+            assert item["qid"]   # 已生成
+    finally:
+        web_session.busy = False
+        web_session.pending = []
+
+
+def test_history_api_returns_attachment_blocks(client, isolated_store):
+    """历史 REST API 返回 image/file 块（与 _message_to_dict 同形状）。"""
+    sid = "20250101-000000-att"
+    msg = Message.user_input("看图", [
+        {"kind": "image", "media_type": "image/png", "data": SMALL_B64},
+        {"kind": "file", "name": "a.py", "text": "print(1)"},
+    ])
+    isolated_store.save_message(sid, msg, None)
+    r = client.get(f"/api/sessions/{sid}/messages")
+    assert r.status_code == 200
+    msgs = r.json()["messages"]
+    assert msgs[0]["role"] == "user"
+    types = [b["type"] for b in msgs[0]["blocks"]]
+    assert types == ["text", "image", "file"]
+    assert msgs[0]["blocks"][1]["media_type"] == "image/png"
+    assert msgs[0]["blocks"][2]["name"] == "a.py"

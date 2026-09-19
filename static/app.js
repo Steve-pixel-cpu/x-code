@@ -30,6 +30,7 @@ const state = {
   sessions: [],             // 全量会话列表（loadSessions 填充）
   sideTab: "project",       // 侧栏列表模式: project | group
   draft: false,             // 草稿态: 已点"新建"但还没发首条消息（不建条目）
+  draftAttach: [],          // 草稿态未发送的附件（跟随会话切换）
   draftInput: "",           // 草稿态未发送的输入（跟随会话切换）
   draftDir: null,           // 草稿态预选的项目目录（侧栏项目行 + 进入时带上）
   serverWorkspace: null,    // 服务进程工作区名（无会话目录时的兜底展示）
@@ -60,6 +61,7 @@ function runOf(id) {
       loaded: false,          // 历史是否已加载过（首次切入必拉）
       loading: false,         // 历史加载进行中（防并发重复拉取）
       everConnected: false,   // 该会话 WS 是否成功连过（区分首次连接与断线重连）
+      rlNote: null,           // 限流退避提示行（原地更新, 轮次有进展/收口即撤）
       awaiting: false,        // 忙碌中且正处于等待模型输出的空窗（await_output 起止）
     };
   }
@@ -75,16 +77,220 @@ state.draftInput = "";   // 草稿态未发送的输入
 /* 输入框内容跟随会话: 切走前保存, 切回后恢复 */
 function saveCurrentInput() {
   const v = $("input").value;
-  if (state.draft) state.draftInput = v;
-  else if (state.sessionId) runOf(state.sessionId).inputDraft = v;
+  const atts = attachDraftOf();
+  if (state.draft) {
+    state.draftInput = v;
+    state.draftAttach = atts;
+  } else if (state.sessionId) {
+    const run = runOf(state.sessionId);
+    run.inputDraft = v;
+    run.attachDraft = atts;
+  }
 }
 function restoreCurrentInput() {
   const v = state.draft ? state.draftInput
     : (state.sessionId ? runOf(state.sessionId).inputDraft : "");
+  const atts = state.draft ? state.draftAttach
+    : (state.sessionId ? runOf(state.sessionId).attachDraft : null);
   $("input").value = v || "";
+  setAttachDraft(atts || []);
   autoGrow($("input"));
   updateSendBtn();
   renderQueueCards();   // 待发送卡片跟着会话走
+}
+
+/* ============================================================
+ * 附件（图片 / 文本文件）: 暂存 → 预览 → 随 user 消息内联发送。
+ * 本地不做任何图像识别: 图片经 Canvas 压缩后 base64 内联在 WS 消息里,
+ * 后端包成 Anthropic image 内容块, 由视觉模型在服务端看图。
+ * ============================================================ */
+const ATTACH_IMAGE_TYPES = ["image/png", "image/jpeg", "image/webp", "image/gif"];
+/* 文本附件扩展白名单: 命中才读入内容, 其余类型 toast 拒绝 */
+const ATTACH_TEXT_EXTS = [
+  "txt", "md", "markdown", "py", "js", "mjs", "cjs", "ts", "tsx", "jsx",
+  "json", "csv", "tsv", "log", "xml", "yml", "yaml", "html", "htm", "css",
+  "scss", "less", "sh", "bash", "bat", "cmd", "ps1", "sql", "ini", "toml",
+  "cfg", "conf", "env", "java", "c", "h", "cpp", "hpp", "go", "rs", "rb",
+  "php", "swift", "kt", "vue", "svg", "diff", "patch",
+];
+const ATTACH_MAX_IMAGES = 8;
+const ATTACH_MAX_FILES = 8;
+const ATTACH_MAX_FILE_CHARS = 512 * 1024;   // 与后端 _parse_attachments 上限对齐
+
+/* 附件草稿读写: 与输入文字同一节奏（切会话保存/恢复, 发送后清空） */
+function attachDraftOf() {
+  return state.draft ? state.draftAttach
+    : (state.sessionId ? (runOf(state.sessionId).attachDraft || []) : []);
+}
+function setAttachDraft(list) {
+  if (state.draft) state.draftAttach = list;
+  else if (state.sessionId) runOf(state.sessionId).attachDraft = list;
+  renderAttachPreview();
+  updateSendBtn();
+}
+
+function extOf(name) {
+  const i = name.lastIndexOf(".");
+  return i >= 0 ? name.slice(i + 1).toLowerCase() : "";
+}
+
+/* 本地排队 qid: 与后端排队区对齐, 接力/立即/删除都按它配对 */
+function genQid() {
+  return "q-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 8);
+}
+
+function readAsDataURL(file) {
+  return new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => resolve(r.result);
+    r.onerror = () => reject(r.error || new Error("read failed"));
+    r.readAsDataURL(file);
+  });
+}
+function readAsText(file) {
+  return new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => resolve(r.result);
+    r.onerror = () => reject(r.error || new Error("read failed"));
+    r.readAsText(file);
+  });
+}
+function loadImageEl(src) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => resolve(img);
+    img.onerror = () => reject(new Error("decode failed"));
+    img.src = src;
+  });
+}
+
+/* Canvas 压缩: 长边 >2000px 或体积 >1MB 时缩放并重编码 webp(quality 0.85);
+ * gif 重编码会丢动画帧, 恒走原图; 解码/编码任何一步失败都回退原图。
+ * 输出 {kind:"image", name, media_type, data(base64 无头)} */
+async function compressImage(file) {
+  const dataUrl = await readAsDataURL(file);
+  const strip = s => s.slice(s.indexOf(",") + 1);
+  const keep = () => ({
+    kind: "image", name: file.name,
+    media_type: ATTACH_IMAGE_TYPES.includes(file.type) ? file.type : "image/png",
+    data: strip(dataUrl),
+  });
+  if (file.type === "image/gif") return keep();   // 动图不重编码
+  let img;
+  try { img = await loadImageEl(dataUrl); } catch (e) { return keep(); }
+  const longSide = Math.max(img.naturalWidth, img.naturalHeight);
+  if (longSide <= 2000 && file.size <= 1024 * 1024) return keep();
+  try {
+    const scale = longSide > 2000 ? 2000 / longSide : 1;
+    const canvas = document.createElement("canvas");
+    canvas.width = Math.max(1, Math.round(img.naturalWidth * scale));
+    canvas.height = Math.max(1, Math.round(img.naturalHeight * scale));
+    canvas.getContext("2d").drawImage(img, 0, 0, canvas.width, canvas.height);
+    let out = canvas.toDataURL("image/webp", 0.85);
+    let media = "image/webp";
+    if (!out.startsWith("data:image/webp")) {
+      // 浏览器不支持 webp 编码时 toDataURL 静默回退 png
+      out = canvas.toDataURL("image/png");
+      media = "image/png";
+    }
+    return { kind: "image", name: file.name, media_type: media, data: strip(out) };
+  } catch (e) {
+    return keep();   // 编码失败: 回退原图
+  }
+}
+
+/* 附件批量入口: 📎 / 拖拽 / 粘贴 三个入口都汇到这里。
+ * 白名单外类型 toast 拒绝; 超 个数/大小 限制时提示并跳过。 */
+async function addFiles(fileList) {
+  const files = Array.from(fileList || []);
+  if (!files.length) return;
+  const draft = attachDraftOf();
+  let added = 0;
+  for (const f of files) {
+    const ext = extOf(f.name);
+    if (ATTACH_IMAGE_TYPES.includes(f.type)) {
+      if (draft.filter(a => a.kind === "image").length >= ATTACH_MAX_IMAGES) {
+        toast("图片最多 " + ATTACH_MAX_IMAGES + " 张");
+        break;
+      }
+      try { draft.push(await compressImage(f)); added++; }
+      catch (e) { toast("图片读取失败: " + f.name); }
+    } else if (ATTACH_TEXT_EXTS.includes(ext)) {
+      if (draft.filter(a => a.kind === "file").length >= ATTACH_MAX_FILES) {
+        toast("文本附件最多 " + ATTACH_MAX_FILES + " 个");
+        break;
+      }
+      try {
+        const text = await readAsText(f);
+        if (text.length > ATTACH_MAX_FILE_CHARS) {
+          toast("文件过大（内容超 512KB）: " + f.name);
+          continue;
+        }
+        draft.push({ kind: "file", name: f.name, text });
+        added++;
+      } catch (e) { toast("文件读取失败: " + f.name); }
+    } else {
+      toast("不支持的文件类型: " + f.name);
+    }
+  }
+  if (added) {
+    setAttachDraft(draft);
+    saveCurrentInput();
+  }
+}
+
+function removeAttachment(idx) {
+  const draft = attachDraftOf().slice();
+  draft.splice(idx, 1);
+  setAttachDraft(draft);
+  saveCurrentInput();
+}
+
+/* 文件 chip（名 + 可选大小）: 预览行 / 用户气泡共用 */
+function fmtBytes(n) {
+  if (n < 1024) return n + " B";
+  if (n < 1024 * 1024) return (n / 1024).toFixed(1) + " KB";
+  return (n / 1024 / 1024).toFixed(1) + " MB";
+}
+function fileChipEl(name, sizeBytes) {
+  const chip = document.createElement("span");
+  chip.className = "file-chip";
+  chip.innerHTML = ICON_FILE + '<span class="fc-name"></span>'
+    + (sizeBytes ? '<span class="fc-size"></span>' : "");
+  chip.querySelector(".fc-name").textContent = name;
+  const sizeEl = chip.querySelector(".fc-size");
+  if (sizeEl) sizeEl.textContent = fmtBytes(sizeBytes);
+  return chip;
+}
+
+/* 预览行: 图片缩略图 + 文件 chip, 每项带 × 删除钮 */
+function renderAttachPreview() {
+  const box = $("attach-preview");
+  if (!box) return;
+  box.innerHTML = "";
+  const draft = attachDraftOf();
+  draft.forEach((att, idx) => {
+    const item = document.createElement("div");
+    item.className = "att-item";
+    if (att.kind === "image") {
+      const img = document.createElement("img");
+      img.className = "att-thumb";
+      img.alt = att.name || "";
+      img.src = "data:" + (att.media_type || "image/png") + ";base64," + att.data;
+      item.appendChild(img);
+    } else {
+      item.classList.add("att-file");
+      item.appendChild(fileChipEl(att.name, att.text ? att.text.length : 0));
+    }
+    const del = document.createElement("button");
+    del.type = "button";
+    del.className = "att-del";
+    del.innerHTML = "&#215;";
+    del.dataset.tip = "移除";
+    del.onclick = () => removeAttachment(idx);
+    item.appendChild(del);
+    box.appendChild(item);
+  });
 }
 
 /* ============================================================
@@ -1132,7 +1338,13 @@ function startDraft(draftDir = null) {
 function renderHistoryMessage(m) {
   if (m.role === "user") {
     const text = m.blocks.filter(b => b.type === "text").map(b => b.text).join("\n");
-    if (text) addUserBubble(text);
+    // 附件块转成与 WS 同形状: image 拼缩略图网格, file 渲染文件 chip
+    const atts = m.blocks
+      .filter(b => b.type === "image" || b.type === "file")
+      .map(b => b.type === "image"
+        ? { kind: "image", media_type: b.media_type, data: b.data }
+        : { kind: "file", name: b.name, text: b.text });
+    if (text || atts.length) addUserBubble(text, atts);
     return;
   }
   if (m.role === "assistant") {
@@ -1270,6 +1482,7 @@ function handleServerMessage(msg, sid) {
       run.pendingPerm = null;
       // 轮次收口: 悬空工具行标"已中断", 清掉流式指针
       sweepPendingToolCards(run);
+      clearRateLimitNote(run);   // 限流退避提示一并撤下
       run.curBubble = null;
       // 思考行/乐观胶囊兜底收口（客户端计时）, 与前台 endTurnUiReset 一致;
       // 只清指针的话, 行会永远卡在"思考中…"动画态
@@ -1285,9 +1498,11 @@ function handleServerMessage(msg, sid) {
     } else if (msg.type === "turn_started") {
       run.busy = true;               // 排队的后续消息接力开跑
       run.lastThinkRow = null;
-      const qi = run.queue.indexOf(msg.text);
+      // 按 qid 撤下对应待发送卡片（旧消息无 qid 时回退按文本匹配）
+      const qi = run.queue.findIndex(it =>
+        it.qid ? it.qid === msg.qid : it.text === msg.text);
       if (qi >= 0) run.queue.splice(qi, 1);
-      addUserBubble(msg.text, colOf(sid));
+      addUserBubble(msg.text, msg.attachments, colOf(sid));
       beginOptimisticThinking(run, sid, colOf(sid));
     }
     return;
@@ -1303,6 +1518,7 @@ function handleServerMessage(msg, sid) {
     case "turn_queued_user":   onTurnQueuedUser(msg, sid); break;
     case "turn_queue_cleared": onQueueCleared(sid); break;
     case "await_output":       onAwaitOutput(msg, state.sessionId); break;
+    case "rate_limited_retry": onRateLimitedRetry(msg, sid); break;
     case "permission_request": onPermissionRequest(msg); break;
     case "turn_done":          onTurnDone(msg); break;
     case "session_renamed":    onSessionRenamed(msg); break;
@@ -1322,6 +1538,7 @@ function bumpUnread(sid) {
 /* ---------- 正文流式（sid 感知: 后台会话写进自己的列） ---------- */
 function onTextDelta(msg, sid) {
   const run = runOf(sid);
+  clearRateLimitNote(run);   // 正文已到: 限流重试成功, 撤提示行
   const active = sid === state.sessionId;
   run.awaiting = false;                    // 首个内容事件: 等待空窗结束
   if (active) syncThinkingIndicator();
@@ -1368,6 +1585,7 @@ function fmtDuration(ms) {
 
 function onThinkingStart(msg, sid) {
   const run = runOf(sid);
+  clearRateLimitNote(run);   // 思考已开始: 限流重试成功, 撤提示行
   const active = sid === state.sessionId;
   run.awaiting = false;                    // 思考行已是可见反馈: 空窗结束
   if (active) syncThinkingIndicator();
@@ -1488,6 +1706,7 @@ function onToolUse(msg, sid) {
   const run = runOf(sid);
   const active = sid === state.sessionId;
   run.awaiting = false;                    // 工具卡已是可见反馈: 空窗结束
+  clearRateLimitNote(run);   // 工具调用已到: 限流重试成功, 撤提示行
   if (active) syncThinkingIndicator();
   flushAssistantBubble(run);   // 工具前先收掉流式中的正文气泡
   dropOptimisticThinking(run);   // 工具先于思考到达: 撤掉乐观胶囊（工具卡已是反馈）
@@ -1573,6 +1792,7 @@ function endTurnUiReset() {
     run.awaiting = false;
     run.queued = false;
     run.unread = 0;             // 前台亲眼看完了, 未读清零
+    clearRateLimitNote(run);    // 轮次收口: 限流退避提示一并撤下
     flushAssistantBubble(run);
     // 轮次结束还有工具行停在"运行中"（被打断/异常, 结果永远来不了）: 收口
     sweepPendingToolCards(run);
@@ -1604,10 +1824,11 @@ function onTurnStarted(msg, sid) {
   run.busy = true;
   run.awaiting = false;      // 新一轮: 上一轮的空窗状态作废, 等 await_output 重新点亮
   run.lastThinkRow = null;   // 新一轮开始: 打断标记只属于当前轮的思考行
-  // 待发送卡片此刻转正: 从队列撤下, 消息正式出现在消息流
-  const qi = run.queue.indexOf(msg.text);
+  // 待发送卡片此刻转正: 按 qid 从队列撤下, 消息正式出现在消息流
+  const qi = run.queue.findIndex(it =>
+    it.qid ? it.qid === msg.qid : it.text === msg.text);
   if (qi >= 0) run.queue.splice(qi, 1);
-  addUserBubble(msg.text, colOf(sid));
+  addUserBubble(msg.text, msg.attachments, colOf(sid));
   beginOptimisticThinking(run, sid, colOf(sid));   // 排队消息接力开跑: 立刻给反馈
   if (sid === state.sessionId) {
     renderQueueCards();
@@ -1626,13 +1847,18 @@ function onQueueCleared(sid) {
   // 打断/断连清空待发送区: 撤掉全部卡片, 文本放回输入框不丢
   const run = runOf(sid);
   if (!run.queue.length) return;
-  const texts = run.queue.slice();
+  const items = run.queue.slice();
   run.queue.length = 0;
   if (sid === state.sessionId) {
     renderQueueCards();
+    const texts = items.map(it => it.text).filter(t => t);
     const cur = $("input").value.trim();
     $("input").value = cur ? cur + "\n" + texts.join("\n") : texts.join("\n");
     autoGrow($("input"));
+    // 排队区清空: 附件一并放回附件草稿, 不丢
+    const atts = items.flatMap(it => it.attachments || []);
+    if (atts.length) setAttachDraft(attachDraftOf().concat(atts));
+    saveCurrentInput();
   }
 }
 
@@ -1677,6 +1903,28 @@ function addNoteBubble(kind, text) {
   scrollToBottom();
 }
 
+/* ---------- 限流退避提示: 同一轮的多条原地更新一行, 有进展/收口即撤 ---------- */
+function onRateLimitedRetry(msg, sid) {
+  const run = runOf(sid);
+  let el = run.rlNote;
+  if (!el || !el.isConnected) {
+    el = document.createElement("div");
+    el.className = "note warn rl-note";
+    colOf(sid).appendChild(el);
+    run.rlNote = el;
+  }
+  el.textContent =
+    `⚠ 触发限流，${Math.round(msg.delay_s)} 秒后进行第 ${msg.attempt}/${msg.max_retries} 次重试…`;
+  if (sid === state.sessionId) scrollToBottom();
+}
+
+function clearRateLimitNote(run) {
+  if (run && run.rlNote) {
+    run.rlNote.remove();
+    run.rlNote = null;
+  }
+}
+
 function addErrorBubble(text) {
   addNoteBubble("err", text);
 }
@@ -1690,13 +1938,38 @@ function msgCol() {
   return colOf(id);
 }
 
-function addUserBubble(text, col) {
+function addUserBubble(text, attachments, col) {
+  // 兼容旧签名 addUserBubble(text, col): 第二参传的是列元素
+  if (attachments instanceof HTMLElement) { col = attachments; attachments = null; }
   const div = document.createElement("div");
   div.className = "msg user";
   div._text = text;
   const b = document.createElement("div");
   b.className = "bubble";
-  b.textContent = text;   // 用户输入永远纯文本
+  if (text) {
+    const t = document.createElement("div");
+    t.className = "u-text";
+    t.textContent = text;   // 用户输入永远纯文本
+    b.appendChild(t);
+  }
+  // 附件: 图片缩略图网格 + 文件 chip
+  const atts = attachments || [];
+  const imgs = atts.filter(a => a.kind === "image");
+  const files = atts.filter(a => a.kind === "file");
+  if (imgs.length) {
+    const grid = document.createElement("div");
+    grid.className = "u-imgs";
+    for (const im of imgs) {
+      const thumb = document.createElement("img");
+      thumb.className = "u-img";
+      thumb.alt = im.name || "";
+      thumb.loading = "lazy";
+      thumb.src = "data:" + (im.media_type || "image/png") + ";base64," + (im.data || "");
+      grid.appendChild(thumb);
+    }
+    b.appendChild(grid);
+  }
+  for (const f of files) b.appendChild(fileChipEl(f.name));
   div.appendChild(b);
   (col || msgCol()).appendChild(div);
   scrollToBottom();
@@ -1712,14 +1985,27 @@ function renderQueueCards() {
   box.innerHTML = "";
   const run = curRun();
   const items = run ? run.queue : [];
-  items.forEach((text, idx) => {
+  items.forEach(item => {
     const card = document.createElement("div");
     card.className = "q-card";
     const t = document.createElement("span");
     t.className = "q-text";
-    t.textContent = text;
-    t.dataset.tip = text;   // 悬停看全文
+    t.textContent = item.text || "(仅附件)";
+    t.dataset.tip = item.text || "(仅附件)";   // 悬停看全文
     card.appendChild(t);
+    // 附件 badge: 🖼2 / 📄1
+    const atts = item.attachments || [];
+    const nImg = atts.filter(a => a.kind === "image").length;
+    const nFile = atts.filter(a => a.kind === "file").length;
+    if (nImg || nFile) {
+      const badge = document.createElement("span");
+      badge.className = "q-badge";
+      badge.textContent =
+        (nImg ? "\uD83D\uDDBC" + nImg : "")
+        + (nImg && nFile ? " " : "")
+        + (nFile ? "\uD83D\uDCC4" + nFile : "");
+      card.appendChild(badge);
+    }
     const promote = document.createElement("button");
     promote.type = "button";
     promote.className = "q-promote";
@@ -1727,7 +2013,7 @@ function renderQueueCards() {
     promote.dataset.tip = "打断当前回复, 这条立即发送";
     promote.onclick = () => {
       card.classList.add("promoting");   // 已登记插队, 等当前回复收尾
-      sendWs({ type: "queue_promote", text });
+      sendWs({ type: "queue_promote", qid: item.qid });
     };
     card.appendChild(promote);
     const edit = document.createElement("button");
@@ -1735,38 +2021,45 @@ function renderQueueCards() {
     edit.className = "q-ico";
     edit.innerHTML = PENCIL_SMALL_SVG;
     edit.dataset.tip = "编辑";
-    edit.onclick = () => editQueued(idx);
+    edit.onclick = () => editQueued(item.qid);
     card.appendChild(edit);
     const del = document.createElement("button");
     del.type = "button";
     del.className = "q-ico q-del";
     del.innerHTML = TRASH_SMALL_SVG;
     del.dataset.tip = "删除";
-    del.onclick = () => removeQueued(idx);
+    del.onclick = () => removeQueued(item.qid);
     card.appendChild(del);
     box.appendChild(card);
   });
 }
 
-function editQueued(idx) {
+function editQueued(qid) {
   const run = curRun();
-  if (!run || run.queue[idx] === undefined) return;
-  const [text] = run.queue.splice(idx, 1);
-  sendWs({ type: "queue_remove", text });
+  if (!run) return;
+  const idx = run.queue.findIndex(it => it.qid === qid);
+  if (idx < 0) return;
+  const [item] = run.queue.splice(idx, 1);
+  sendWs({ type: "queue_remove", qid });
   const input = $("input");
-  input.value = input.value ? input.value + "\n" + text : text;
+  input.value = input.value ? input.value + "\n" + (item.text || "") : (item.text || "");
   autoGrow(input);
   input.focus();
+  // 附件放回附件草稿, 不丢
+  const atts = item.attachments || [];
+  if (atts.length) setAttachDraft(attachDraftOf().concat(atts));
   saveCurrentInput();
   updateSendBtn();
   renderQueueCards();
 }
 
-function removeQueued(idx) {
+function removeQueued(qid) {
   const run = curRun();
   if (!run) return;
-  const [text] = run.queue.splice(idx, 1);
-  if (text !== undefined) sendWs({ type: "queue_remove", text });
+  const idx = run.queue.findIndex(it => it.qid === qid);
+  if (idx < 0) return;
+  run.queue.splice(idx, 1);
+  sendWs({ type: "queue_remove", qid });
   renderQueueCards();
 }
 
@@ -1794,9 +2087,10 @@ function addAssistantBubble(html, raw, col) {
  * ============================================================ */
 function updateSendBtn() {
   const hasText = !!$("input").value.trim();
+  const hasAttach = attachDraftOf().length > 0;   // 有附件无文字也点亮发送
   const busy = !!(curRun() && curRun().busy);
   const btn = $("btn-send");
-  const stop = !hasText && busy;
+  const stop = !hasText && !hasAttach && busy;
   btn.dataset.mode = stop ? "stop" : "send";
   btn.dataset.tip = stop ? "中断对话" : "发送";
 }
@@ -1817,9 +2111,10 @@ function syncThinkingIndicator() {
 async function sendCurrent() {
   const input = $("input");
   const text = input.value.trim();
+  const attachments = attachDraftOf().slice();   // 发送快照, 与草稿解耦
   const run = curRun();
   const busy = !!(run && run.busy);
-  if (!text) return;
+  if (!text && !attachments.length) return;   // 只发图不打字也允许
   if (!state.draft && (!run || !run.ws || run.ws.readyState !== 1)) return;
   // 草稿态: 此刻才向服务端要 id 建会话条目；失败则留在草稿态
   let firstWorkdir = "";
@@ -1844,19 +2139,22 @@ async function sendCurrent() {
   $("sug-dock").innerHTML = "";
   nearBottom = true;
   scrollToBottom(true);   // 发送是用户主动行为: 无论滚到哪里, 立刻回到底部看最新消息
+  const qid = genQid();   // 本地生成: 排队卡片与服务端排队区按同一 qid 配对
   // 本轮在跑: 消息进入输入框上方的待发送卡片, 轮到它时才出现在消息列
   if (busy) {
-    runOf(state.sessionId).queue.push(text);
+    runOf(state.sessionId).queue.push({ qid, text, attachments });
     input.value = "";
+    setAttachDraft([]);          // 已发送: 清空本会话的附件草稿
     autoGrow(input);
     saveCurrentInput();          // 已发送: 清空本会话的输入草稿
     updateSendBtn();             // 输入已清空: 圆钮切回"停止"形态, 随时可中断
     renderQueueCards();
-    sendWs({ type: "user", text });
+    sendWs({ type: "user", text, attachments, qid });
     return;
   }
-  addUserBubble(text);
+  addUserBubble(text, attachments);
   input.value = "";
+  setAttachDraft([]);          // 已发送: 清空本会话的附件草稿
   autoGrow(input);
   saveCurrentInput();          // 已发送: 清空本会话的输入草稿
   updateSendBtn();             // 输入已清空: 忙碌态下圆钮切回"停止"形态
@@ -1883,7 +2181,7 @@ async function sendCurrent() {
     refreshDocTitle();
     connectWs(state.sessionId);
   }
-  sendWs({ type: "user", text, workdir: firstWorkdir });
+  sendWs({ type: "user", text, attachments, workdir: firstWorkdir, qid });
 }
 
 function sendWs(obj) {
@@ -1914,6 +2212,35 @@ function autoGrow(el) {
   el.style.height = Math.min(el.scrollHeight, 160) + "px";
 }
 $("input").addEventListener("input", () => autoGrow($("input")));
+
+/* ---------- 附件入口 1: 📎 按钮 + 隐藏文件选择框 ---------- */
+$("btn-attach").onclick = () => $("file-input").click();
+$("file-input").addEventListener("change", () => {
+  addFiles($("file-input").files);
+  $("file-input").value = "";   // 允许重复选择同一文件
+});
+
+/* ---------- 附件入口 2: 拖拽到输入卡（dragover 高亮 + drop） ---------- */
+const inputCard = $("input-card");
+inputCard.addEventListener("dragover", ev => {
+  ev.preventDefault();
+  inputCard.classList.add("dragging");
+});
+inputCard.addEventListener("dragleave", () => inputCard.classList.remove("dragging"));
+inputCard.addEventListener("drop", ev => {
+  ev.preventDefault();
+  inputCard.classList.remove("dragging");
+  if (ev.dataTransfer && ev.dataTransfer.files.length) addFiles(ev.dataTransfer.files);
+});
+
+/* ---------- 附件入口 3: 粘贴剪贴板里的图片 ---------- */
+$("input").addEventListener("paste", ev => {
+  const files = ev.clipboardData && ev.clipboardData.files;
+  if (files && files.length) {
+    ev.preventDefault();
+    addFiles(files);
+  }
+});
 
 /* ============================================================
  * 侧栏交互: 分组/项目切换 + 搜索 + 快捷键

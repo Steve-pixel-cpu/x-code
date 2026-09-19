@@ -362,7 +362,8 @@ class ConversationRuntime:
 
 
 
-    def run_turn(self, user_input: str, prompter: Optional[PermissionPrompter]=None) -> TurnSummary:
+    def run_turn(self, user_input: str, prompter: Optional[PermissionPrompter]=None,
+                 attachments: Optional[list[dict]]=None) -> TurnSummary:
         iterations = 0
         curr_session = self._session
         tool_results : list[Message] = []
@@ -372,7 +373,10 @@ class ConversationRuntime:
         iterations_exhausted = False
         auto_compacted = False
 
-        curr_session.messages.append(Message.user_text(user_input))
+        # 附件（图片/文本文件）经 Message.user_input 组装成 image/file 块;
+        # CLI 调用点不传附件, 行为不变
+        curr_session.messages.append(
+            Message.user_input(user_input, attachments))
         self._notify_iterate()   # 一致点: 用户消息已落定
         while True:
             # 循环层预算检查点: 收束发生在这里——上一迭代的工具结果已全部

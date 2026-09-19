@@ -3,7 +3,8 @@ from typing import List
 
 from pydantic import BaseModel
 
-from models import Message, TextContentBlock, ToolContentBlock, ToolResultContentBlock
+from models import (Message, TextContentBlock, ToolContentBlock, ToolResultContentBlock,
+                    ImageContentBlock, FileContentBlock)
 from prompt import _collapse_blank_lines
 
 
@@ -27,6 +28,12 @@ def estimate_message_tokens(msg: Message) -> int:
             res = res + (len(block.name) + len(block.input)) // 4 + 1
         elif isinstance(block, ToolResultContentBlock):
             res = res + (len(block.name) + len(block.output)) // 4 + 1
+        elif isinstance(block, ImageContentBlock):
+            # 图片按固定值估算: base64 体积与像素数都不反映真实 token 开销,
+            # 视觉端点按分辨率分档计, 1500 是常见的单图近似值
+            res = res + 1500
+        elif isinstance(block, FileContentBlock):
+            res = res + (len(block.name) + len(block.text)) // 4 + 1
     return res
 
 
@@ -147,6 +154,10 @@ def summarize_messages(msgs: List[Message]) -> str:
             elif isinstance(block, ToolResultContentBlock):
                 status = "error " if block.is_error else ""
                 parts.append(f"tool_result {block.name}: {status}{block.output[:40]}")
+            elif isinstance(block, ImageContentBlock):
+                parts.append("[图片]")
+            elif isinstance(block, FileContentBlock):
+                parts.append(f"[附件 {block.name}]")
         lines.append(f"  - {role}: {' | '.join(parts)}")
 
     lines.append("</summary>")

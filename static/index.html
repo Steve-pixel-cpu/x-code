@@ -120,8 +120,14 @@
     <div id="input-card">
       <div id="ws-dock"></div>
       <div id="queue-cards"></div>
+      <div id="attach-preview"></div>
       <textarea id="input" rows="1" placeholder="提出后续修改要求"></textarea>
       <div class="comp-row">
+        <button type="button" id="btn-attach" data-tip="添加图片或文本文件">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"/></svg>
+        </button>
+        <input type="file" id="file-input" multiple hidden
+               accept="image/png,image/jpeg,image/webp,image/gif,.txt,.md,.markdown,.py,.js,.mjs,.cjs,.ts,.tsx,.jsx,.json,.csv,.tsv,.log,.xml,.yml,.yaml,.html,.htm,.css,.scss,.less,.sh,.bash,.bat,.cmd,.ps1,.sql,.ini,.toml,.cfg,.conf,.env,.java,.c,.h,.cpp,.hpp,.go,.rs,.rb,.php,.swift,.kt,.vue,.svg,.diff,.patch">
 
         <span class="pill mode" data-tip="权限模式">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linejoin="round"><path d="M12 3l7 2.8v5.4c0 4.4-2.9 7.8-7 9.8-4.1-2-7-5.4-7-9.8V5.8L12 3z"/></svg>

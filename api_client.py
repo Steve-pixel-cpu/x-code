@@ -8,9 +8,16 @@ from json import JSONDecodeError
 import anthropic
 from pydantic import BaseModel
 from abc import ABC, abstractmethod
-from typing import List, Literal, Dict, final, Optional
+from typing import List, Literal, Dict, final, Optional, Callable
 
-from models import Message, ToolResultContentBlock, ToolContentBlock, TextContentBlock
+from models import (
+    Message,
+    ToolResultContentBlock,
+    ToolContentBlock,
+    TextContentBlock,
+    ImageContentBlock,
+    FileContentBlock,
+)
 from prompt import SYSTEM_PROMPT_DYNAMIC_BOUNDARY
 from retry import (
     ApiError as RetryApiError,
@@ -140,6 +147,12 @@ def _map_to_retry_error(e: Exception) -> Optional[RetryApiError]:
 
 
 class ApiClient(ABC):
+    def __init__(self, on_retry: Optional[Callable[[int, int, float, RetryApiError], None]] = None):
+        # 限流退避回调: send_with_retry 每次退避睡眠前调用, 参数 =
+        # (即将进行的重试序号, 本曲线 max_retries, 退避秒数, 触发的错误)。
+        # None = 静默重试（CLI / subagent 默认）。
+        self.on_retry = on_retry
+
     @abstractmethod
     def stream(self, system_prompt: list[str], messages: list) -> List[AssistantEvent]:
         """流式处理，返回事件列表"""
@@ -187,6 +200,18 @@ def _convert_message(message: list[Message]) -> list[dict]:
             for block in msg.content:
                 if isinstance(block, TextContentBlock):
                     content.append({"type": "text", "text": block.text})
+                elif isinstance(block, ImageContentBlock):
+                    # 图片块: base64 线格式原样透传, 由视觉模型在服务端看图
+                    content.append({
+                        "type": "image",
+                        "source": dict(block.source),
+                    })
+                elif isinstance(block, FileContentBlock):
+                    # 文本附件: 内部表示转成带分隔头的 text 块发给模型
+                    content.append({
+                        "type": "text",
+                        "text": "--- 附件: " + block.name + " ---\n" + block.text,
+                    })
             if content:
                 result.append({"role": "user","content": content})
     merged:list[dict] = []
@@ -205,8 +230,9 @@ class ClaudeApiClient(ApiClient):
                  tools: list[dict] | None = None,
                  emit_output: bool = True,
                  thinking_level: str = "high",
-                 base_url: str | None = None):
-
+                 base_url: str | None = None,
+                 on_retry: Optional[Callable[[int, int, float, RetryApiError], None]] = None):
+        super().__init__(on_retry)
         self.model = model
         self.tools = tools or []
         self.emit_output = emit_output
@@ -365,7 +391,7 @@ class ClaudeApiClient(ApiClient):
                     if api_err is None:
                         raise
                     raise api_err from e
-            stream = send_with_retry(_open_stream)
+            stream = send_with_retry(_open_stream, on_retry=self.on_retry)
             blocks = {}
             for event in stream:
                 if event.type == 'content_block_start':

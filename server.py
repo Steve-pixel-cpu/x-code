@@ -26,6 +26,7 @@ import subprocess
 import sys
 import threading
 import time
+import uuid
 from contextlib import suppress
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -54,6 +55,8 @@ from models import (
     TextContentBlock,
     ToolContentBlock,
     ToolResultContentBlock,
+    ImageContentBlock,
+    FileContentBlock,
 )
 from permissions import (
     ALLOW_MODE,
@@ -115,12 +118,27 @@ system_prompt = (
     .with_os(platform.system(), platform.release())
     .build()
 )
+def _mirror_rate_limit_retry(attempt: int, max_retries: int,
+                             delay_s: float, error) -> None:
+    """限流退避镜像: 长退避期间告知前端"还活着、正在重试", 不再静默卡住。
+    dispatch 在模块后段才定义, 回调运行于 turn 工作线程, 取到时必然已就绪;
+    取不到出口（CLI/无连接）静默。仅 429 触发——其余错误的短退避
+    （<1s）不值得打扰界面。"""
+    if getattr(error, "status_code", None) != 429:
+        return
+    sink = dispatch.current()
+    if sink is not None:
+        sink({"type": "rate_limited_retry", "attempt": attempt,
+              "max_retries": max_retries, "delay_s": round(delay_s, 1)})
+
+
 api_client = ClaudeApiClient(
     api_key="",   # 未配置时为空串: 服务照常起, 由初始化页引导填写
     model=runtime_config.model() or "",   # 不设默认模型: 由用户显式添加
     tools=TOOLS,
     emit_output=False,  # Web 模式不打印终端，事件改推给浏览器
     thinking_level=runtime_config.thinking_level(),
+    on_retry=_mirror_rate_limit_retry,
 )
 
 app = FastAPI(title="x-code web")
@@ -553,8 +571,10 @@ class WebSession:
         self.thinking_level = runtime_config.thinking_level()
         self.prompter: Optional[WebPermissionPrompter] = None
         # 排队区: 本轮进行中用户追加的后续消息（事件循环线程读写）,
-        # 当前轮结束后由 _start_pending_turn 接力开跑
-        self.pending: list[str] = []
+        # 当前轮结束后由 _start_pending_turn 接力开跑。
+        # 项为 {qid, text, attachments}——qid 由前端生成、随消息透传,
+        # 排队操作（立即/删除/接力开跑）都按 qid 配对, 不再按文本匹配
+        self.pending: list[dict] = []
         # 事件出口集合: 同一会话可能被多个窗口/标签打开, 事件广播给所有连接,
         # 连接断开时自动移除（key 为连接序号）
         self.emits: dict[int, Callable] = {}
@@ -696,13 +716,79 @@ def maybe_auto_title(web_session: WebSession) -> bool:
 
 
 # ============================================================================
+# 附件（图片 / 文本文件）校验
+# ============================================================================
+
+# 图片: 白名单 media_type + 张数/单张/总量上限; 文本附件: 个数/单内容上限
+ATTACH_IMAGE_TYPES = ("image/png", "image/jpeg", "image/webp", "image/gif")
+MAX_IMAGES = 8
+MAX_IMAGE_B64_BYTES = 5 * 1024 * 1024      # 单张 base64 ≤5MB
+MAX_TOTAL_ATTACH_BYTES = 20 * 1024 * 1024  # 全部附件总量 ≤20MB
+MAX_FILES = 8
+MAX_FILE_TEXT_BYTES = 512 * 1024           # 单个文本附件内容 ≤512KB
+
+
+def _parse_attachments(raw) -> tuple[Optional[list[dict]], Optional[str]]:
+    """校验 WS user 消息里的 attachments 数组, 规整成可入库的形状。
+
+    返回 (attachments, None) = 合法（可能是空列表）; (None, 错误信息) = 超限,
+    错误信息经现有 error 事件发给前端。只做形状与限额校验, 不解压图片、
+    不识别内容——传输信任前端压缩结果, 视觉理解归服务端模型。
+    """
+    if raw is None:
+        return [], None
+    if not isinstance(raw, list):
+        return None, "attachments 必须是数组"
+    images: list[dict] = []
+    files: list[dict] = []
+    total_bytes = 0
+    for att in raw:
+        if not isinstance(att, dict):
+            return None, "attachments 项必须是对象"
+        kind = att.get("kind")
+        if kind == "image":
+            name = str(att.get("name") or "").strip()
+            media_type = str(att.get("media_type") or "").strip().lower()
+            data = att.get("data")
+            if media_type not in ATTACH_IMAGE_TYPES:
+                return None, f"不支持的图片类型: {media_type or '(缺失)'}（仅支持 png/jpeg/webp/gif）"
+            if not isinstance(data, str) or not data:
+                return None, f"图片 {name or media_type} 缺少 data"
+            b64_len = len(data)
+            total_bytes += b64_len
+            if b64_len > MAX_IMAGE_B64_BYTES:
+                return None, f"图片 {name or media_type} 过大（base64 超 5MB）"
+            images.append({"kind": "image", "name": name,
+                           "media_type": media_type, "data": data})
+            if len(images) > MAX_IMAGES:
+                return None, f"图片最多 {MAX_IMAGES} 张"
+        elif kind == "file":
+            name = str(att.get("name") or "").strip()
+            text = att.get("text")
+            if not isinstance(text, str):
+                return None, f"文本附件 {name or '(未命名)'} 缺少 text"
+            total_bytes += len(text.encode("utf-8", "replace"))
+            if len(text) > MAX_FILE_TEXT_BYTES:
+                return None, f"文本附件 {name or '(未命名)'} 过大（内容超 512KB）"
+            files.append({"kind": "file", "name": name, "text": text})
+            if len(files) > MAX_FILES:
+                return None, f"文本附件最多 {MAX_FILES} 个"
+        else:
+            return None, f"未知附件类型: {kind!r}"
+    if total_bytes > MAX_TOTAL_ATTACH_BYTES:
+        return None, "附件总量超过 20MB"
+    return images + files, None
+
+
+# ============================================================================
 # 工作线程: 同步 run_turn + 事件桥接
 # ============================================================================
 
 _turn_slots = threading.BoundedSemaphore(MAX_CONCURRENT_TURNS)
 
 
-def _start_turn(web_session: WebSession, text: str, emit: Callable) -> None:
+def _start_turn(web_session: WebSession, text: str, emit: Callable,
+                attachments: Optional[list[dict]] = None) -> None:
     """开一轮对话: 占坑、准备事件出口、起工作线程。调用方已确认 !busy。
 
     并发上限: 信号量在事件循环线程 try_acquire——拿不到就把本轮标记为
@@ -719,17 +805,19 @@ def _start_turn(web_session: WebSession, text: str, emit: Callable) -> None:
     if not _turn_slots.acquire(blocking=False):
         # 全局槽位已满: 前端显示排队中, 等有轮结束释放槽位后再起线程
         emit({"type": "turn_queued", "max_concurrent": MAX_CONCURRENT_TURNS})
-        _queued_turns.append((web_session, text, emitter, prompter))
+        _queued_turns.append((web_session, text, attachments, emitter, prompter))
         return
 
-    _spawn_turn_thread(web_session, text, emitter, prompter)
+    _spawn_turn_thread(web_session, text, attachments, emitter, prompter)
 
 
-# (web_session, text, emitter, prompter) 三元组队列; 事件循环线程独占读写
+# (web_session, text, attachments, emitter, prompter) 五元组队列;
+# 事件循环线程独占读写
 _queued_turns: list = []
 
 
 def _spawn_turn_thread(web_session: WebSession, text: str,
+                       attachments: Optional[list[dict]],
                        emitter: TurnEmitter, prompter: WebPermissionPrompter) -> None:
     """真正起工作线程跑一轮。槽位已由调用方持有。"""
 
@@ -740,7 +828,8 @@ def _spawn_turn_thread(web_session: WebSession, text: str,
                       lambda: web_session.stop_requested,
                       session_id=web_session.session_id)
         try:
-            summary = web_session.runtime.run_turn(text, prompter)
+            summary = web_session.runtime.run_turn(text, prompter,
+                                                   attachments=attachments)
         except TurnInterrupted:
             # 用户主动打断: 修补悬空 tool_use 后照常落盘（朝安全侧, 与 CLI Ctrl+C 同路径）
             repair_interrupted_turn(web_session.runtime.session())
@@ -767,8 +856,10 @@ def _spawn_turn_thread(web_session: WebSession, text: str,
                 "budget_exhausted": summary.budget_exhausted,
                 "iterations_exhausted": summary.iterations_exhausted,
             })
-            # AI 命名放在 turn_done 之后: 前端先收尾，标题好了再单独广播
-            if needs_title and maybe_auto_title(web_session):
+            # AI 命名放在 turn_done 之后: 前端先收尾，标题好了再单独广播。
+            # 排队区非空 = 用户正在连续驱动: 跳过命名请求, 避免与接力的下一轮
+            # 撞同一账户限流窗口（本次拿不到 AI 标题, 截断回退仍在, UI 无感）
+            if needs_title and not web_session.pending and maybe_auto_title(web_session):
                 emitter({
                     "type": "session_renamed",
                     "session_id": web_session.session_id,
@@ -799,11 +890,14 @@ def _drain_queued_turns() -> None:
     不然前端永远停在忙碌态。
     """
     while _queued_turns and _turn_slots.acquire(blocking=False):
-        web_session, text, emitter, prompter = _queued_turns.pop(0)
+        web_session, text, attachments, emitter, prompter = _queued_turns.pop(0)
         if web_session.stop_requested or not web_session.busy:
             if web_session.busy:
                 if web_session.pending:
-                    web_session.pending.append(text)   # 被跳过的轮次归队, 不丢失
+                    # 被跳过的轮次归队, 不丢失
+                    web_session.pending.append(
+                        {"qid": str(uuid.uuid4()), "text": text,
+                         "attachments": attachments})
                     if web_session.emits and web_session.loop is not None:
                         web_session.loop.call_soon_threadsafe(
                             _start_pending_turn, web_session)
@@ -812,7 +906,7 @@ def _drain_queued_turns() -> None:
                     emitter({"type": "turn_done", "interrupted": True, "iterations": 0,
                              "budget_exhausted": False, "iterations_exhausted": False})
             continue
-        _spawn_turn_thread(web_session, text, emitter, prompter)
+        _spawn_turn_thread(web_session, text, attachments, emitter, prompter)
 
 
 def _start_pending_turn(web_session: WebSession) -> None:
@@ -823,12 +917,19 @@ def _start_pending_turn(web_session: WebSession) -> None:
     """
     if not web_session.pending:
         return
-    text = web_session.pending.pop(0)
+    item = web_session.pending.pop(0)
     if not web_session.emits:
         return
-    # 前端把"已排队"气泡转正, 并重新进入忙碌态
-    web_session.broadcast({"type": "turn_started", "text": text})
-    _start_turn(web_session, text, web_session.broadcast)
+    text = str(item.get("text") or "")
+    attachments = item.get("attachments") or []
+    # 前端把"已排队"气泡转正（按 qid 配对撤卡片）, 并重新进入忙碌态
+    web_session.broadcast({
+        "type": "turn_started",
+        "qid": item.get("qid"),
+        "text": text,
+        "attachments": attachments,
+    })
+    _start_turn(web_session, text, web_session.broadcast, attachments=attachments)
 
 
 def request_stop(web_session: WebSession) -> None:
@@ -849,19 +950,22 @@ def request_stop(web_session: WebSession) -> None:
         web_session.prompter.cancel()
 
 
-def promote_pending(web_session: WebSession, text: str) -> bool:
+def promote_pending(web_session: WebSession, qid: str) -> bool:
     """「立即」插队: 把待发送区里的这条提到最前并叫停当前轮。
 
     回落后它作为下一棒立刻接力开跑（朝安全侧, 同 request_stop 但不清空
-    待发送区）。文本不在待发送区时静默忽略（返回 False）——它可能已经
+    待发送区）。qid 不在待发送区时静默忽略（返回 False）——它可能已经
     开跑, 此刻叫停只会误杀当前轮。
     与手动停止一致: 被打断的任务就地收束不自动续跑, 是否继续由用户
     下一次消息决定。
     """
-    if not (text and web_session.busy and text in web_session.pending):
+    if not (qid and web_session.busy):
         return False
-    web_session.pending.remove(text)
-    web_session.pending.insert(0, text)
+    idx = next((i for i, it in enumerate(web_session.pending)
+                if it.get("qid") == qid), -1)
+    if idx < 0:
+        return False
+    web_session.pending.insert(0, web_session.pending.pop(idx))
     web_session.stop_requested = True
     if web_session.prompter is not None:
         web_session.prompter.cancel()
@@ -873,11 +977,23 @@ def promote_pending(web_session: WebSession, text: str) -> bool:
 # ============================================================================
 
 def _message_to_dict(msg: Message) -> dict:
-    """历史回放: 按块类型摊平成前端易消费的形状（text / tool_use / tool_result）。"""
+    """历史回放: 按块类型摊平成前端易消费的形状。
+
+    image 输出 {type, media_type, data}: 前端拼 data URI 渲染缩略图;
+    file 输出 {type, name, text}: 前端渲染成文件 chip。"""
     blocks = []
     for b in msg.content:
         if isinstance(b, TextContentBlock):
             blocks.append({"type": "text", "text": b.text})
+        elif isinstance(b, ImageContentBlock):
+            source = b.source or {}
+            blocks.append({
+                "type": "image",
+                "media_type": source.get("media_type"),
+                "data": source.get("data"),
+            })
+        elif isinstance(b, FileContentBlock):
+            blocks.append({"type": "file", "name": b.name, "text": b.text})
         elif isinstance(b, ToolContentBlock):
             blocks.append({"type": "tool_use", "id": b.id, "name": b.name, "input": b.input})
         elif isinstance(b, ToolResultContentBlock):
@@ -1242,15 +1358,25 @@ async def ws_endpoint(websocket: WebSocket, session_id: str):
 
             if msg_type == "user":
                 text = str(raw.get("text") or "").strip()
-                if not text:
+                attachments, att_err = _parse_attachments(raw.get("attachments"))
+                if att_err:
+                    emit_error(att_err)
+                    continue
+                # text 与 attachments 同时为空才丢弃（允许只发图不打字）
+                if not text and not attachments:
                     continue
                 if web_session.busy:
                     # 本轮还在跑: 静默追加进会话级排队区, 当前轮结束后自动接力;
-                    # 前端在待发送气泡上提供「立即」按钮, 需要插队时发 queue_promote
+                    # 前端在待发送气泡上提供「立即」按钮, 需要插队时发 queue_promote。
+                    # qid 由前端生成（本地排队卡片与后端排队区对齐）, 缺失时兜底生成
                     if len(web_session.pending) >= 10:
                         emit_error("待发送消息过多（上限 10 条），请等当前轮次结束")
                         continue
-                    web_session.pending.append(text)
+                    web_session.pending.append({
+                        "qid": str(raw.get("qid") or uuid.uuid4()),
+                        "text": text,
+                        "attachments": attachments,
+                    })
                     emit({"type": "turn_queued_user", "position": len(web_session.pending)})
                     continue
                 # 首条消息可携带工作目录（项目的意义）: 只在未设置时落一次
@@ -1267,20 +1393,24 @@ async def ws_endpoint(websocket: WebSocket, session_id: str):
                 except Exception as e:
                     emit_error(f"会话加载失败: {e}")
                     continue
-                _start_turn(web_session, text, web_session.broadcast)
+                _start_turn(web_session, text, web_session.broadcast,
+                            attachments=attachments)
 
             elif msg_type == "queue_promote":
                 # 「立即」: 把待发送区里的这条提到最前, 并叫停当前轮——
                 # 回落后它作为下一棒立刻接力开跑。被打断的当前任务就地
-                # 收束, 不自动续跑（与手动停止一致）
-                text = str(raw.get("text") or "").strip()
-                promote_pending(web_session, text)
+                # 收束, 不自动续跑（与手动停止一致）。按 qid 配对
+                qid = str(raw.get("qid") or "").strip()
+                promote_pending(web_session, qid)
 
             elif msg_type == "queue_remove":
-                # 编辑/删除待发送卡片: 从待发送区移除首个匹配文本, 静默无回执
-                text = str(raw.get("text") or "").strip()
-                if text and text in web_session.pending:
-                    web_session.pending.remove(text)
+                # 编辑/删除待发送卡片: 按 qid 从待发送区移除, 静默无回执
+                qid = str(raw.get("qid") or "").strip()
+                if qid:
+                    web_session.pending = [
+                        it for it in web_session.pending
+                        if it.get("qid") != qid
+                    ]
 
             elif msg_type == "permission_response":
                 prompter = web_session.prompter

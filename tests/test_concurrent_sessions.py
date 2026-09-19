@@ -119,15 +119,15 @@ def test_turn_queue_releases_and_starts(clean_slots):
 
     events = []
     server._queued_turns.append(
-        (ws_busy, "hi", lambda p: None,
+        (ws_busy, "hi", None, lambda p: None,
          server.WebPermissionPrompter(lambda p: None)))
     server._queued_turns.append(
-        (ws_stop, "nope", events.append,
+        (ws_stop, "nope", None, events.append,
          server.WebPermissionPrompter(lambda p: None)))
 
     spawned = []
     original = server._spawn_turn_thread
-    server._spawn_turn_thread = lambda ws, text, e, p: spawned.append(ws.session_id)
+    server._spawn_turn_thread = lambda ws, text, atts, e, p: spawned.append(ws.session_id)
     try:
         server._drain_queued_turns()
     finally:
@@ -147,9 +147,9 @@ def test_turn_queue_skip_with_pending_requeues_text(clean_slots):
     ws = server.get_or_create_web_session("q-jump")
     ws.busy = True
     ws.stop_requested = True
-    ws.pending = ["插队消息"]
+    ws.pending = [{"qid": "q-jump-1", "text": "插队消息", "attachments": []}]
     server._queued_turns.append(
-        (ws, "原始消息", lambda p: None,
+        (ws, "原始消息", None, lambda p: None,
          server.WebPermissionPrompter(lambda p: None)))
 
     def _fail(*_a):
@@ -163,7 +163,7 @@ def test_turn_queue_skip_with_pending_requeues_text(clean_slots):
         server._spawn_turn_thread = original
 
     assert server._queued_turns == []
-    assert ws.pending == ["插队消息", "原始消息"]   # 插队消息在前, 原消息不丢
+    assert [it["text"] for it in ws.pending] == ["插队消息", "原始消息"]   # 插队消息在前, 原消息不丢
     assert ws.busy is True   # 接力由事件循环调度, 忙碌态保持到轮次真正开跑
 
 
@@ -171,14 +171,14 @@ def test_queue_fifo_order(clean_slots):
     """多会话排队时严格 FIFO。"""
     got = []
     original = server._spawn_turn_thread
-    server._spawn_turn_thread = lambda ws, text, e, p: got.append(ws.session_id)
+    server._spawn_turn_thread = lambda ws, text, atts, e, p: got.append(ws.session_id)
     try:
         assert server._turn_slots.acquire(blocking=False)
         for i in range(3):
             ws = server.get_or_create_web_session(f"fifo-{i}")
             ws.busy = True
             server._queued_turns.append(
-                (ws, "x", None, server.WebPermissionPrompter(lambda p: None)))
+                (ws, "x", None, None, server.WebPermissionPrompter(lambda p: None)))
         server._drain_queued_turns()
     finally:
         server._spawn_turn_thread = original
