@@ -67,6 +67,8 @@ from permissions import (
 from prompt import SystemPromptBuilder
 from storage import SessionStore
 from tools import ToolRegistry, git_bash_unavailable_reason
+from multi_agent import set_api_config_provider
+from agent_tools import get_orchestrator
 
 setup_console()  # Windows 控制台 UTF-8 兜底（服务器日志不乱码，与 CLI 同一入口）
 
@@ -357,6 +359,14 @@ def _apply_provider_config(cfg: dict) -> None:
         api_client.reset_to(api_key="", model="", base_url=None)
     api_client.client = _LiveClientProxy(api_client.raw_client)
     _real_messages = api_client.raw_client.messages
+    # subagent worker 跟随同一份供应商配置: 每次 spawn 时实时读 api_client
+    # 的连接信息（apply 在运行期可反复发生, 工厂闭包引用而非快照）
+    set_api_config_provider(_subagent_api_config)
+
+
+def _subagent_api_config() -> tuple[str, Optional[str], str]:
+    """multi_agent worker 工厂: 直接镜像 Leader 的 api_client 连接信息。"""
+    return api_client.api_key, api_client.base_url, api_client.model
 
 
 _provider_cfg = load_providers()

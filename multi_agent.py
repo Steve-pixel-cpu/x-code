@@ -41,11 +41,15 @@ class AgentManifest(BaseModel):
     started_at: Optional[str]
     completed_at: Optional[str]
     error: Optional[str]
+    result: Optional[str] = None   # 终态结果文本（completed 时 = worker 汇报原文）
 
 class AgentJob(BaseModel):
     manifest: AgentManifest
     prompt: str
     allowed_tools: set[str]
+    # worker 的工具工作目录（bash cwd / 相对路径解析基点）: 从 Leader 会话继承,
+    # 让子任务与主对话操作同一个项目。缺省 = 跟随进程 cwd（CLI 旧行为）。
+    workdir: Optional[str] = None
 
 
 def allowed_tools_for_subagent(subagent_type: str) -> set[str]:
@@ -67,13 +71,53 @@ SUBAGENT_TOOL_HANDLERS: dict[str, Callable] = {
 
 class SilentToolExecutor:
     """worker 用的安静执行器 — 实现 runtime 的 ToolExecutor Protocol，
-    但不像 Leader 的 CliToolExecutor 那样往终端打印（终端是 Leader 的）。"""
+    但不像 Leader 的 CliToolExecutor 那样往终端打印（终端是 Leader 的）。
 
-    def __init__(self, registry: ToolRegistry):
+    workdir 来自构造时绑定（job.workdir），执行时注入 registry ——
+    bash 的 cwd、读写文件的相对路径解析基点都由它决定。"""
+
+    def __init__(self, registry: ToolRegistry, workdir: Optional[str] = None):
         self.registry = registry
+        self.workdir = workdir
 
     def execute(self, tool_name: str, input: str, tool_use_id: str | None = None) -> str:
-        return self.registry.execute(tool_name, input)
+        return self.registry.execute(tool_name, input, workdir=self.workdir)
+
+
+# worker 的 API 客户端工厂: 返回 (api_key, base_url, model)。
+# 可被宿主（Web 端）注入以跟随其运行期供应商配置; 缺省回落 .env +
+# main.DEFAULT_MODEL（CLI 的连接方式）。可插拔是为了不让 multi_agent
+# 反向依赖任何特定宿主的配置来源。
+ApiConfigProvider = Callable[[], tuple[str, Optional[str], str]]
+
+
+def _default_api_config() -> tuple[str, Optional[str], str]:
+    load_dotenv()
+    api_key = os.getenv("API_KEY")
+    if api_key is None:
+        raise RuntimeError("API_KEY not set!")
+    # 默认模型定义在 main.py（组装点）。延迟导入: main 接线 multi_agent
+    # 后模块级 import 会成环，函数内 import 不会。
+    from main import DEFAULT_MODEL
+    return api_key, None, os.getenv("CLAUDE_MODEL") or DEFAULT_MODEL
+
+
+_api_config_provider: ApiConfigProvider = _default_api_config
+
+
+def set_api_config_provider(provider: ApiConfigProvider) -> None:
+    """宿主注入 worker 连接配置（如 Web 端跟随 UI 选的供应商/模型）。"""
+    global _api_config_provider
+    _api_config_provider = provider
+
+
+def _tool_specs_for(allowed_tools: set[str]) -> list[dict]:
+    """白名单 → API 请求的 tools 数组。只把白名单内的规格发给模型:
+    执行层拦截（registry 未注册抛 ToolError）是兜底，把不可用的工具
+    从请求里剔除才是让模型不误调的根本手段。"""
+    from main import TOOLS
+    by_name = {spec["name"]: spec for spec in TOOLS}
+    return [by_name[n] for n in sorted(allowed_tools) if n in by_name]
 
 
 def build_subagent_runtime(job: AgentJob) -> ConversationRuntime:
@@ -84,16 +128,10 @@ def build_subagent_runtime(job: AgentJob) -> ConversationRuntime:
     - 白名单工具: 只注册 allowed_tools，白名单之外的工具调不到
     - ALLOW 权限: 子 agent 的边界是白名单而不是权限模式——没有人类
       可以被询问，权限模式在这里没有意义
+    - 递归防护: 工具规格经 _tool_specs_for 过滤，agent 工具永远不在
+      worker 的请求里（TOOL_WHITELIST 亦不含, 双保险）
     """
-    load_dotenv()
-    api_key = os.getenv("API_KEY")
-    if api_key is None:
-        raise RuntimeError("API_KEY not set!")
-
-    # 工具规格和默认模型目前定义在 main.py（组装点）。
-    # 延迟导入: 将来第 13 课 main 接线 multi_agent（Leader 派活）时，
-    # 模块级 import 会变成循环导入，函数内 import 不会。
-    from main import DEFAULT_MODEL, TOOLS
+    api_key, base_url, model = _api_config_provider()
 
     registry = ToolRegistry()
     for tool_name in sorted(job.allowed_tools):
@@ -105,11 +143,12 @@ def build_subagent_runtime(job: AgentJob) -> ConversationRuntime:
         session=Session(),
         api_client=ClaudeApiClient(
             api_key=api_key,
-            model=os.getenv("CLAUDE_MODEL") or DEFAULT_MODEL,
-            tools=TOOLS,
+            model=model,
+            base_url=base_url,
+            tools=_tool_specs_for(job.allowed_tools),
             emit_output=False,
         ),
-        tool_executor=SilentToolExecutor(registry=registry),
+        tool_executor=SilentToolExecutor(registry=registry, workdir=job.workdir),
         permission_policy=PermissionPolicy(active_mode=ALLOW_MODE),
         system_prompt=[
             "You are a focused subagent worker. Complete exactly the task "
@@ -129,8 +168,10 @@ def final_text_of(summary) -> str:
 
 
 class AgentOrchestrator:
-    def __init__(self, store_dir: Path, spawn_fn: Optional[Callable] = None):
+    def __init__(self, store_dir: Path, spawn_fn: Optional[Callable] = None,
+                 workdir: Optional[str] = None):
         self._store_dir = store_dir
+        self._workdir = workdir   # 派生的 worker 工具共用的工作目录（Leader 会话的项目）
         self._spawn_fn = spawn_fn if spawn_fn else self._default_spawn_fn
 
     def _default_spawn_fn(self, job: AgentJob):
@@ -149,7 +190,8 @@ class AgentOrchestrator:
         thread = threading.Thread(target=_worker, name=f"agent-{job.manifest.agent_id}", daemon=True)  # ← 外层：target=_worker（注意没有括号！）
         thread.start()  # ← 点火，立刻返回
 
-    def spawn_agent(self, description: str, prompt: str, name: Optional[str] = None, subagent_type: str = "general") -> AgentManifest:
+    def spawn_agent(self, description: str, prompt: str, name: Optional[str] = None, subagent_type: str = "general",
+                    workdir: Optional[str] = None) -> AgentManifest:
         if description.strip() == "" or prompt.strip() == "":
             raise ValueError("description or prompt are null")
         self._store_dir.mkdir(parents=True, exist_ok=True)
@@ -193,10 +235,12 @@ class AgentOrchestrator:
         with open(json_path, "w", encoding= "utf-8") as f:
             f.write(manifest_content)
 
+        # workdir: 调用方显式传入优先（Web 按会话传）, 否则用编排器默认
         job = AgentJob(
             manifest=manifest.model_copy(),
             prompt=prompt,
-            allowed_tools=white_tools.copy()
+            allowed_tools=white_tools.copy(),
+            workdir=workdir or self._workdir,
         )
         try:
             self._spawn_fn(job)
@@ -205,6 +249,10 @@ class AgentOrchestrator:
             raise RuntimeError(f"Spawn failed: {e}") from e
         return manifest
 
+
+    def set_workdir(self, workdir: Optional[str]) -> None:
+        """更新后续派生的 worker 的工作目录（Web 端按会话解析后注入）。"""
+        self._workdir = workdir or None
 
     def get_status(self,agent_id: str) -> AgentManifest:
         json_path = self._store_dir / f"{agent_id}.json"
@@ -249,6 +297,7 @@ class AgentOrchestrator:
             "status": status,
             "completed_at": now,
             "error": error,
+            "result": result,
         })
         json_path = self._store_dir / f"{manifest.agent_id}.json"
         tmp_path = json_path.with_suffix(".json.tmp")

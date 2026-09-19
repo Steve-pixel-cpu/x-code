@@ -112,3 +112,31 @@ AgentOrchestrator
 - `completed_at` 只在终态才填写
 - spawn_fn 崩溃时要 catch exception 并标记 agent 为 failed
 - 文件名用 agent_id 命名（.md 输出 + .json manifest）
+
+## 接线（已实现）
+
+第 13 课已把编排器接进 Leader 工具环 —— 新增 `agent_tools.py`:
+
+| 工具 | 作用 |
+|------|------|
+| `agent_tool` | 派 worker: description + prompt + subagent_type，立即返回 agent_id |
+| `agent_status` | 按 id 查状态; completed 时 manifest.result = worker 汇报原文 |
+| `agent_list` | 列出全部 worker（跨会话共享, 存 `~/.x-code/agents/`） |
+
+关键改动:
+
+1. **API 层递归防护** — `multi_agent._tool_specs_for()`: worker 的请求只带
+   白名单内的工具规格。执行层拦截（registry 未注册）是兜底，规格过滤才是
+   让模型不误调的根本手段。
+2. **可插拔连接配置** — `set_api_config_provider()`: Web 端注入工厂函数，
+   worker 每次 spawn 实时镜像 Leader api_client 的 key/base_url/model
+   （UI 配置供应商后 worker 跟着走）; CLI 缺省回落 `.env`。
+3. **workdir 传递** — `AgentJob.workdir` / `spawn_agent(workdir=...)`:
+   Web 端由 EmittingToolRegistry 从 `dispatch.current_workdir()` 取当前
+   会话项目目录，按调用参数传入（不走共享单例的中间状态, 无跨会话竞态）。
+   worker 的 bash cwd、相对路径读写都以项目目录为基点。
+4. **manifest.result** — 终态 JSON 里带上结果原文，`agent_status` 直接
+   读回，不用再去解析 .md。
+
+测试: `tests/test_agent_tools.py`（spec↔handler↔白名单一致性、workdir
+参数流、规格过滤、spawn→complete→status 闭环、API 配置注入/回落）。

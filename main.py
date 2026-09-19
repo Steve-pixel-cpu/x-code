@@ -25,6 +25,7 @@ from prompt import SystemPromptBuilder
 from runtime import ConversationRuntime
 from storage import SessionStore
 from tools import ToolRegistry, bash_tool, read_tool, write_tool, powershell_tool, git_bash_unavailable_reason
+from agent_tools import AGENT_TOOL_SPECS, register_agent_tools
 
 DEFAULT_MODEL = "glm-5.3-flash"
 bash_spec = {
@@ -135,7 +136,7 @@ write_file_spec = {
         "required": ["path", "content"],
     },
 }
-TOOLS = [bash_spec, powershell_spec, read_file_spec, write_file_spec]
+TOOLS = [bash_spec, powershell_spec, read_file_spec, write_file_spec] + AGENT_TOOL_SPECS
 
 
 # --- 终端视觉规范: 调色板 + 版式 ---
@@ -629,11 +630,12 @@ def run_repl(runtime: ConversationRuntime,
 
 
 def build_registry() -> ToolRegistry:
-    """CLI 与 Web 共用的工具注册表: 四个内置工具一次注册到位。"""
-    return ToolRegistry().register(name="bash", handler=bash_tool).register(
+    """CLI 与 Web 共用的工具注册表: 四个内置工具 + 多 agent 三件套一次注册到位。"""
+    registry = ToolRegistry().register(name="bash", handler=bash_tool).register(
         name="powershell", handler=powershell_tool).register(
         name="read_file", handler=read_tool).register(
         name="write_file", handler=write_tool)
+    return register_agent_tools(registry)
 
 
 def start(session_store:SessionStore,session_id:str):

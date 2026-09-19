@@ -251,6 +251,16 @@ class ClaudeApiClient(ApiClient):
                                               timeout=300.0, max_retries=0)
         self.client = self.raw_client
 
+    @property
+    def api_key(self) -> str:
+        """当前 key（subagent worker 工厂等宿主读取用）。"""
+        return self._api_key
+
+    @property
+    def base_url(self) -> str | None:
+        """当前 base_url（同上）。"""
+        return self._base_url
+
     def set_thinking_level(self, level: str) -> None:
         self.thinking_level = level
 
