@@ -24,6 +24,7 @@ from retry import (
     ConnectionError as RetryConnectionError,
     AuthError as RetryAuthError,
     HttpApiError as RetryHttpApiError,
+    RetryAborted,
     send_with_retry,
 )
 
@@ -146,6 +147,11 @@ def _map_to_retry_error(e: Exception) -> Optional[RetryApiError]:
     return None
 
 
+class StreamInterrupted(Exception):
+    """用户打断: 在建连前的检查点或重试退避的轮询点抛出。
+    语义与 server 端 SSE 代理的 TurnInterrupted 一致——朝安全侧收束本轮。"""
+
+
 class ApiClient(ABC):
     def __init__(self, on_retry: Optional[Callable[[int, int, float, RetryApiError], None]] = None):
         # 限流退避回调: send_with_retry 每次退避睡眠前调用, 参数 =
@@ -231,8 +237,12 @@ class ClaudeApiClient(ApiClient):
                  emit_output: bool = True,
                  thinking_level: str = "high",
                  base_url: str | None = None,
-                 on_retry: Optional[Callable[[int, int, float, RetryApiError], None]] = None):
+                 on_retry: Optional[Callable[[int, int, float, RetryApiError], None]] = None,
+                 should_stop_provider: Optional[Callable[[], bool]] = None):
         super().__init__(on_retry)
+        # 打断检查点: 重试循环与建连入口轮询它, 让打断在退避/静默窗口内
+        # 也能立即生效（None = 无人打断, CLI/subagent 默认）
+        self._should_stop_provider = should_stop_provider
         self.model = model
         self.tools = tools or []
         self.emit_output = emit_output
@@ -362,7 +372,11 @@ class ClaudeApiClient(ApiClient):
         try:
             # 建连阶段（连接失败/超时/429/5xx）经 retry.py 退避重试（默认再试 2 次）;
             # 一旦开始收事件就不再重试——重放会让内容重复, 流中断直接抛给上层。
+            # 重试循环带 should_stop 轮询: 打断在退避/建连静默窗口内也立即生效。
             def _open_stream():
+                if (self._should_stop_provider is not None
+                        and self._should_stop_provider()):
+                    raise StreamInterrupted()
                 try:
                     # ExitStack 只在进入成功后登记清理: 失败的尝试无残留, 可安全重试
                     return stack.enter_context(self.client.messages.stream(**kwargs))
@@ -391,7 +405,11 @@ class ClaudeApiClient(ApiClient):
                     if api_err is None:
                         raise
                     raise api_err from e
-            stream = send_with_retry(_open_stream, on_retry=self.on_retry)
+            try:
+                stream = send_with_retry(_open_stream, on_retry=self.on_retry,
+                                         should_stop=self._should_stop_provider)
+            except RetryAborted:
+                raise StreamInterrupted() from None
             blocks = {}
             for event in stream:
                 if event.type == 'content_block_start':

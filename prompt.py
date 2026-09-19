@@ -14,20 +14,13 @@ MAX_TOTAL_INSTRUCTION_CHARS = 12_000
 # 只读调研 → present_plan 提交计划 → 批准后自动升级再实施。
 PLAN_MODE_SECTION = (
     "# Plan Mode (ACTIVE)\n"
-    "You are currently in PLAN MODE. This is the research and planning phase "
-    "of the task — the user wants to review your approach BEFORE any change "
-    "is made.\n"
+    "You are currently in PLAN MODE. This is the research and planning phase of the task - the user wants to review your approach BEFORE any change is made.\n"
     " - Allowed: read-only research (read_file) and answering questions.\n"
-    " - Denied: bash/powershell and every tool that writes or mutates "
-    "anything. They will be rejected by the permission system — do NOT "
-    "attempt them and do NOT retry after a denial.\n"
-    " - Required: when your research is done, call the `present_plan` tool "
-    "with a concise step-by-step implementation plan (files to change, what "
-    "to change, how to verify) and STOP. The user will approve or reject it.\n"
-    " - On approval the session automatically upgrades to workspace-write; "
-    "only then do you implement.\n"
-    " - If requirements are ambiguous, state your assumptions inside the "
-    "plan instead of guessing silently."
+    " - Denied: bash/powershell and every tool that writes or mutates anything. They will be rejected by the permission system - do NOT attempt them and do NOT retry after a denial.\n"
+    " - Required: when your research is done, call the present_plan tool with a concise step-by-step implementation plan (files to change, what to change, how to verify) and STOP. The user will approve or reject it.\n"
+    " - On approval the session automatically upgrades to workspace-write; only then do you implement.\n"
+    " - If requirements are ambiguous, state your assumptions inside the plan instead of guessing silently.\n"
+    " - Plan format: structured markdown with sections '## 目标', '## 改动' (a step-by-step nested checklist, one step per line, file paths in backticks), '## 验证' and '## 假设'.\n"
 )
 
 FRONTIER_MODEL_NAME = "Claude Opus 4.6"

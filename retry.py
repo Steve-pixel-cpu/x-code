@@ -49,6 +49,11 @@ class RetriesExhausted(ApiError):
         self.is_retryable = last_error.is_retryable
         super().__init__(f"failed after {attempts} attempts: {last_error}")
 
+class RetryAborted(ApiError):
+    """外部要求放弃重试（用户打断）: 不可重试, 由调用方翻译成自己的
+    中断语义（如 api_client 的 StreamInterrupted）。"""
+    is_retryable = False
+
 _MAX_SAFE_EXPONENT = 31  # 2^31 = 2147483648，超过任何合理 backoff
 
 def is_rate_limit_error(e: Exception) -> bool:
@@ -90,17 +95,23 @@ def send_with_retry(
     initial_backoff_ms: int = DEFAULT_INITIAL_BACKOFF_MS,
     max_backoff_ms: int = DEFAULT_MAX_BACKOFF_MS,
     on_retry: Optional[Callable[[int, int, float, ApiError], None]] = None,
+    should_stop: Optional[Callable[[], bool]] = None,
 ) -> T:
     """同步退避重试。退避曲线按最近一次错误分流: 429 用限流长曲线
     （2s 起步、翻倍、上限 30s、最多重试 4 次）, 其余可重试错误维持
     200ms/2s 短曲线（重试 max_retries 次）。
 
     on_retry 在每次退避睡眠前调用, 参数 = (即将进行的重试序号, 本曲线
-    max_retries, 退避秒数, 触发的错误); None = 不回调（CLI/静默重试）。"""
+    max_retries, 退避秒数, 触发的错误); None = 不回调（CLI/静默重试）。
+
+    should_stop 每次尝试前与每次退避睡眠期间被轮询, True = 用户打断——
+    抛 RetryAborted, 让打断在退避/静默窗口内也能立即生效。"""
     last_error: Optional[ApiError] = None
     attempts = 0
     while True:
         attempts += 1
+        if should_stop is not None and should_stop():
+            raise RetryAborted("interrupted while retrying")
 
         try:
             return fn()
@@ -119,7 +130,17 @@ def send_with_retry(
             delay = backoff_for_attempt(attempts, initial_backoff_ms, max_backoff_ms)
         if on_retry is not None:
             on_retry(attempts, effective_max, delay, last_error)
-        time.sleep(delay)   # 同步退避; asyncio.sleep 在这里不会真正休眠
+        # 退避睡眠切成等分小片轮询打断: 长睡眠期间点停止也能尽快生效
+        # （等分而不是固定步长: 浮点累加不漂移, 分片和恒等于 delay）
+        if delay <= 0.2:
+            time.sleep(delay)
+        else:
+            n = -(-delay // 0.2)          # ceil
+            step = delay / n
+            for _ in range(int(n)):
+                if should_stop is not None and should_stop():
+                    raise RetryAborted("interrupted during backoff")
+                time.sleep(step)
 
 
     assert last_error is not None   # 能走到这说明循环内必然捕获过 ApiError

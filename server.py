@@ -38,7 +38,7 @@ from fastapi import Body, FastAPI, HTTPException, Request, WebSocket, WebSocketD
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from api_client import ClaudeApiClient, THINKING_LEVELS
+from api_client import ClaudeApiClient, THINKING_LEVELS, StreamInterrupted
 import anthropic
 from config import USER_DIR, SETTINGS_FILE, ConfigLoader, RuntimeConfig, load_providers, save_providers
 from main import (
@@ -133,6 +133,14 @@ def _mirror_rate_limit_retry(attempt: int, max_retries: int,
               "max_retries": max_retries, "delay_s": round(delay_s, 1)})
 
 
+def _should_stop_now() -> bool:
+    """打断检查点: 取本轮绑定的 should_stop 并真正调用它。
+    注意必须调用返回的可调用对象——直接把可调用对象当布尔值用,
+    恒为真, 每次建连都会被误判成"已打断"。"""
+    check = dispatch.current_should_stop()
+    return bool(check and check())
+
+
 api_client = ClaudeApiClient(
     api_key="",   # 未配置时为空串: 服务照常起, 由初始化页引导填写
     model=runtime_config.model() or "",   # 不设默认模型: 由用户显式添加
@@ -140,6 +148,9 @@ api_client = ClaudeApiClient(
     emit_output=False,  # Web 模式不打印终端，事件改推给浏览器
     thinking_level=runtime_config.thinking_level(),
     on_retry=_mirror_rate_limit_retry,
+    # 打断检查点: 重试退避/建连静默窗口内轮询, 点停止立即生效
+    # （dispatch 在模块后段定义, 函数运行时才解析, 无先后问题）
+    should_stop_provider=_should_stop_now,
 )
 
 app = FastAPI(title="x-code web")
@@ -894,8 +905,9 @@ def _spawn_turn_thread(web_session: WebSession, text: str,
         try:
             summary = web_session.runtime.run_turn(text, prompter,
                                                    attachments=attachments)
-        except TurnInterrupted:
+        except (TurnInterrupted, StreamInterrupted):
             # 用户主动打断: 修补悬空 tool_use 后照常落盘（朝安全侧, 与 CLI Ctrl+C 同路径）
+            # StreamInterrupted = 打断落在重试退避/建连静默窗口（retry 轮询点抛出）
             repair_interrupted_turn(web_session.runtime.session())
             persist_turn(web_session)
             # 插队与手动停止同语义: 被打断的任务就地收束, 不自动续跑
@@ -1007,6 +1019,9 @@ def request_stop(web_session: WebSession) -> None:
     if not web_session.busy:
         return
     web_session.stop_requested = True
+    # 即时反馈: 打断请求已受理。静默窗口（退避/建连/工具执行）内不会立刻
+    # 收尾, 不告诉用户"正在中断"就会被当成没点上而连点多次
+    web_session.broadcast({"type": "turn_interrupting"})
     if web_session.pending:
         web_session.pending.clear()
         web_session.broadcast({"type": "turn_queue_cleared"})

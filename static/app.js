@@ -1600,6 +1600,7 @@ function handleServerMessage(msg, sid) {
     case "turn_queue_cleared": onQueueCleared(sid); break;
     case "await_output":       onAwaitOutput(msg, state.sessionId); break;
     case "rate_limited_retry": onRateLimitedRetry(msg, sid); break;
+    case "turn_interrupting":  onTurnInterrupting(msg, sid); break;
     case "permission_request": onPermissionRequest(msg, sid); break;
     case "mode_changed":       onModeChanged(msg, sid); break;
     case "turn_done":          onTurnDone(msg); break;
@@ -2111,6 +2112,21 @@ function clearRateLimitNote(run) {
     run.rlNote.remove();
     run.rlNote = null;
   }
+}
+
+/* ---------- 打断受理反馈: 静默窗口（退避/建连/长工具）内停止不是瞬时的,
+ * 明确告诉用户"已受理、正在收束", 避免连点; 轮次收口自动清除 ---------- */
+function onTurnInterrupting(msg, sid) {
+  const run = runOf(sid);
+  let el = run.rlNote;
+  if (!el || !el.isConnected) {
+    el = document.createElement("div");
+    el.className = "note stopped rl-note";
+    colOf(sid).appendChild(el);
+    run.rlNote = el;
+  }
+  el.textContent = "正在中断当前轮，模型输出/命令收束后即停止…";
+  if (sid === state.sessionId) scrollToBottom();
 }
 
 function addErrorBubble(text) {

@@ -156,9 +156,11 @@ present_plan_spec = {
             "plan": {
                 "type": "string",
                 "description": (
-                    "The full implementation plan in markdown. Include: "
-                    "goal, affected files, step-by-step changes, and "
-                    "verification steps."
+                    "The full implementation plan in markdown, structured "
+                    "with sections: '## 目标' (goal), '## 改动' (step-by-step "
+                    "changes as a nested checklist, file paths in backticks), "
+                    "'## 验证' (how to verify), and '## 假设' (assumptions, "
+                    "if any)."
                 ),
             },
         },
