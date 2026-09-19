@@ -2655,6 +2655,10 @@ const modeDd = makeDropdown($("sel-mode"), {
 function onModeChanged(msg, sid) {
   const run = runOf(sid);
   run.permissionMode = msg.permission_mode;
+  // 列表缓存同步: 否则下次 renderSessionList/loadSessions 会用旧值,
+  // 切会话时下拉框停留在别的会话的模式上（看起来像串了）
+  const s = state.sessions.find(x => x.id === sid);
+  if (s) s.permission_mode = msg.permission_mode;
   if (sid === state.sessionId) modeDd.setValue(msg.permission_mode);
 }
 const thinkDd = makeDropdown($("sel-thinking"), {

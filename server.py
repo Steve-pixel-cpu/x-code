@@ -587,7 +587,10 @@ class WebSession:
         self.thinking_level = runtime_config.thinking_level()
         # 会话级权限模式: 初值取全局默认; 下拉框切换只影响本会话,
         # 全局设置页改的是"新会话的默认值"
-        self.permission_mode = app_state.permission_mode
+        # 会话级权限模式: 持久值优先（重启不丢）, 没有记录回落全局默认;
+        # 下拉框切换只影响本会话, 全局设置页改的是"新会话的默认值"
+        persisted_mode = NAME_TO_MODE.get(store.get_permission_mode(session_id) or "")
+        self.permission_mode = persisted_mode or app_state.permission_mode
         self.prompter: Optional[WebPermissionPrompter] = None
         # 排队区: 本轮进行中用户追加的后续消息（事件循环线程读写）,
         # 当前轮结束后由 _start_pending_turn 接力开跑。
@@ -1114,6 +1117,15 @@ async def api_post_icon(request: dict):
 
 @app.get("/api/sessions")
 async def api_list_sessions():
+    def _mode_name_for(sid: str) -> str:
+        """列表回显的会话权限模式: 存活会话取运行值, 否则取持久值,
+        再否则全局默认——前端下拉框据此跟随各会话, 不再停留在上一个会话的值。"""
+        live = _sessions.get(sid)
+        if live is not None:
+            return MODE_TO_NAME[live.permission_mode]
+        persisted = NAME_TO_MODE.get(store.get_permission_mode(sid) or "")
+        return MODE_TO_NAME[persisted or app_state.permission_mode]
+
     on_disk = set(store.list_sessions())
     # 已落盘的会话由 store 覆盖，pending 里不再需要；未落盘的保持 pending
     _pending_sessions.difference_update(on_disk)
@@ -1124,12 +1136,14 @@ async def api_list_sessions():
             "message_count": store.count_messages(sid),
             # 项目归属: 会话的工作目录(WorkdirRecord, 取最新一条); 未设置时 None
             "workdir": store.get_workdir(sid),
+            "permission_mode": _mode_name_for(sid),
         }
         for sid in on_disk
     ]
     for sid in _pending_sessions:
         items.append({"id": sid, "title": UNTITLED, "message_count": 0,
-                      "workdir": None})
+                      "workdir": None,
+                      "permission_mode": _mode_name_for(sid)})
     items.sort(key=lambda item: item["id"], reverse=True)  # 时间戳字典序即时间序，最新在前
     return {"sessions": items}
 
@@ -1514,6 +1528,8 @@ async def ws_endpoint(websocket: WebSocket, session_id: str):
                     emit_error(f"未知或不可用的权限模式: {raw.get('mode')!r}")
                     continue
                 web_session.permission_mode = mode
+                # 持久化: 重启后该会话保持自己的模式, 不回落全局默认
+                store.set_permission_mode(web_session.session_id, mode_name)
                 if web_session.runtime is not None:
                     web_session.runtime.set_permission_mode(mode)
                 web_session.broadcast({
