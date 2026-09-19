@@ -9,6 +9,7 @@ from compact import compact_session, CompactionConfig
 from hooks import HookRunner, HookResult
 from models import Message, TextContentBlock, AnyContentBlock, ToolContentBlock, Session
 from permissions import PermissionMode, PermissionPolicy, PermissionPrompter, PermissionDecision
+from prompt import PLAN_MODE_SECTION, SYSTEM_PROMPT_DYNAMIC_BOUNDARY
 
 DEFAULT_MAX_ITERATIONS = 128
 # auto-compact 触发阈值: 必须明显低于模型真实上下文窗口——一次请求还要
@@ -171,21 +172,9 @@ class TurnSummary(BaseModel):
 # 内容是给模型的行为规范——研究期只读、计划经 present_plan 提交、
 # 批准后才开始写。与 permissions.py 的硬授权互为表里: 提示词管"该做
 # 什么", 授权层管"能做什么"。
-PLAN_MODE_INSTRUCTION = (
-    "# Plan mode (active)\n"
-    "\n"
-    "You are in plan mode. In this mode:\n"
-    " - Research the codebase first: read files, run read-only commands\n"
-    "   (ls / cat / grep / git log ...) to understand the task.\n"
-    " - Do NOT create, modify, or delete any files, and do not run\n"
-    "   commands with side effects (installs, writes, network mutations).\n"
-    " - When research is done, present your implementation plan with the\n"
-    "   present_plan tool: goal, affected files, step-by-step changes,\n"
-    "   and verification steps.\n"
-    " - The user will approve or reject. If approved, the mode switches\n"
-    "   automatically and you implement the plan right away. If rejected,\n"
-    "   revise the plan per the feedback and present again.\n"
-)
+# 兼容别名: 注入内容统一收敛到 prompt.PLAN_MODE_SECTION（由
+# _rebuild_effective_prompt 负责插进动态段）。旧测试/调用方仍可引用此名。
+PLAN_MODE_INSTRUCTION = PLAN_MODE_SECTION
 
 class ConversationRuntime:
     def __init__(self,
@@ -221,6 +210,24 @@ class ConversationRuntime:
         #   （如 Web 端 EmittingToolRegistry）看不到, 不通知前端工具卡
         #   会永远停在"运行中"直到轮次收尾
         self._on_tool_finalized = None
+        # 生效系统提示词: 基础段 + 计划模式段(仅 PLAN 模式)。模式切换时
+        # 重建, stream 调用一律用它——见 _rebuild_effective_prompt
+        self._rebuild_effective_prompt()
+
+    def _rebuild_effective_prompt(self) -> None:
+        """权限模式联动系统提示词。计划模式把 PLAN_MODE_SECTION 插进动态段
+        （边界之后; 无边界则追加尾部）——静态前缀逐字节不变, prompt caching
+        前缀继续命中。切回其他模式即移除。"""
+        base = self._system_prompt
+        if self._permission_policy.active_mode == PermissionMode.PLAN:
+            if SYSTEM_PROMPT_DYNAMIC_BOUNDARY in base:
+                idx = base.index(SYSTEM_PROMPT_DYNAMIC_BOUNDARY)
+                self._effective_system_prompt = (
+                    base[:idx + 1] + [PLAN_MODE_SECTION] + base[idx + 1:])
+            else:
+                self._effective_system_prompt = list(base) + [PLAN_MODE_SECTION]
+        else:
+            self._effective_system_prompt = list(base)
 
     def set_on_iterate(self, fn) -> "ConversationRuntime":
         self._on_iterate = fn
@@ -264,6 +271,7 @@ class ConversationRuntime:
 
     def set_permission_mode(self, mode: PermissionMode) -> None:
         self._permission_policy.set_mode(mode)
+        self._rebuild_effective_prompt()   # 计划模式段随模式增减
 
     def thinking_level(self) -> str:
         return self._thinking_level
@@ -426,13 +434,11 @@ class ConversationRuntime:
                 auto_compacted = True
 
             iterations += 1
-            # plan 模式: 动态追加计划指令段（位于缓存边界之后, 静态前缀
-            # 缓存不受影响; 段内容恒定, 同模式内动态段自身也稳定）
-            sys_prompt = self._system_prompt
-            if self._permission_policy.active_mode == PermissionMode.PLAN:
-                sys_prompt = list(self._system_prompt) + [PLAN_MODE_INSTRUCTION]
+            # 计划模式指令段的注入/移除在 set_permission_mode →
+            # _rebuild_effective_prompt 里完成, stream 一律用生效提示词
+            # （此前这里算过 sys_prompt 却没传给 stream, 等于从未生效）
             events = self._api_client.stream(
-                system_prompt=sys_prompt,
+                system_prompt=self._effective_system_prompt,
                 messages=curr_session.messages,
                 thinking_level=self._thinking_level,
             )

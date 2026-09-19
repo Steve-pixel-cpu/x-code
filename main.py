@@ -142,8 +142,10 @@ present_plan_spec = {
     "name": "present_plan",
     "description": (
         "Present your implementation plan to the user for review and "
-        "approval. Call this after you have finished researching the "
-        "codebase (plan mode). The plan is shown to the user as a card "
+        "approval. In plan mode, ALWAYS present your implementation plan "
+        "via this tool before attempting any changes. Call this after you "
+        "have finished researching the codebase (plan mode). The plan is "
+        "shown to the user as a card "
         "with approve/reject buttons; while waiting, do not make any "
         "changes. If rejected, revise the plan based on the feedback "
         "and present again."

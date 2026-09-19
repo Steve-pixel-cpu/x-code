@@ -33,6 +33,14 @@ class WorkdirRecord(BaseModel):
     timestamp: str
 
 
+class PermissionModeRecord(BaseModel):
+    """权限模式记录: 会话级隔离的持久化。追加式取最新一条;
+    没有记录的会话回落全局默认（app_state）。"""
+    type: Literal["permission_mode"] = "permission_mode"
+    mode: str
+    timestamp: str
+
+
 class SessionStore:
 
     def __init__(self, storage_dir: Path):
@@ -170,6 +178,24 @@ class SessionStore:
                 latest = entry.workdir
         return latest
 
+    def set_permission_mode(self, session_id: str, mode: str) -> None:
+        """追加一条权限模式记录（会话级隔离的持久化）。mode 为模式名
+        （MODE_TO_NAME 的值, 如 "plan"）; 非法值由调用方校验。"""
+        record = PermissionModeRecord(
+            mode=mode,
+            timestamp=datetime.now(timezone.utc).isoformat(),
+        )
+        self._append_entry(self._session_path(session_id), record)
+
+    def get_permission_mode(self, session_id: str) -> Optional[str]:
+        """返回会话权限模式名; 没有记录返回 None（调用方回落全局默认）。"""
+        entries = self._read_entries(self._session_path(session_id))
+        latest: Optional[str] = None
+        for entry in entries:
+            if isinstance(entry, PermissionModeRecord):
+                latest = entry.mode
+        return latest
+
     def _session_path(self, session_id: str) -> Path:
         return self._storage_dir / f"{session_id}.jsonl"
 
@@ -185,11 +211,13 @@ class SessionStore:
                 try:
 
                     data = json.loads(line)
-                    # title/workdir 记录与消息条目共存一个文件, 按类型分流
+                    # title/workdir/permission_mode 记录与消息条目共存一个文件, 按类型分流
                     if data.get("type") == "title":
                         result.append(TitleRecord.model_validate(data))
                     elif data.get("type") == "workdir":
                         result.append(WorkdirRecord.model_validate(data))
+                    elif data.get("type") == "permission_mode":
+                        result.append(PermissionModeRecord.model_validate(data))
                     else:
                         result.append(StorageEntry.model_validate(data))
                 except json.JSONDecodeError as e:
