@@ -4,7 +4,9 @@
 - TOOLS/registry 与 agent 工具的一致性（spec ↔ handler ↔ 白名单）
 - workdir 参数从 registry 流到 AgentJob（CLI None / Web 会话目录两条路径）
 - _tool_specs_for 规格过滤（递归防护的 API 层）
-- spawn → complete 后 agent_status 读回 result 的闭环
+- spawn → complete → status/reap 读回 result 的闭环
+- 收割机制: reap_ready / mark_delivered / reconcile_orphans
+- 会话隔离: A 会话不收 B 会话的结果
 - _AgentToolbox 单例与 set_api_config_provider 的注入/回落
 """
 import json
@@ -16,11 +18,15 @@ import pytest
 import agent_tools
 from agent_tools import (
     AGENT_TOOL_SPECS,
+    DEFAULT_SESSION,
     agent_list_tool,
     agent_status_tool,
+    bind_agent_to_session,
     get_orchestrator,
+    reap_ready_tool,
     register_agent_tools,
     spawn_agent_tool,
+    _session_bindings,
 )
 from main import TOOLS, build_registry
 from multi_agent import (
@@ -43,21 +49,23 @@ class RecordingSpawn:
         self.jobs.append(job)
 
 
-def use_fake_orchestrator(spawn_fn) -> AgentOrchestrator:
-    """把模块级单例临时换成假 spawn 的编排器（不真正起 worker 线程）。"""
+@pytest.fixture(autouse=True)
+def fake_orchestrator():
+    """每个用例: 单例换成假 spawn 的编排器 + 清空会话归属（不真正起线程）。"""
     tmp = tempfile.mkdtemp()
-    orch = AgentOrchestrator(Path(tmp), spawn_fn=spawn_fn)
+    orch = AgentOrchestrator(Path(tmp))
     agent_tools._toolbox._orchestrator = orch
-    return orch
+    _session_bindings.clear()
+    yield orch
 
 
 # ------------------------------------------------------------
 # 1. spec ↔ registry ↔ 白名单 一致性
 # ------------------------------------------------------------
 
-def test_tools_include_agent_trio():
+def test_tools_include_agent_quartet():
     names = [s["name"] for s in TOOLS]
-    assert names[-3:] == ["agent_tool", "agent_status", "agent_list"]
+    assert names[-4:] == ["agent_tool", "agent_status", "agent_reap", "agent_list"]
 
 
 def test_agent_tool_specs_match_registry_handlers():
@@ -69,7 +77,7 @@ def test_agent_tool_specs_match_registry_handlers():
 def test_agent_tools_absent_from_worker_whitelists():
     """递归防护: 任何角色的白名单都不含 agent 工具（名字层面）。"""
     for role, tools in TOOL_WHITELIST.items():
-        for t in ("agent_tool", "agent_status", "agent_list"):
+        for t in ("agent_tool", "agent_status", "agent_reap", "agent_list"):
             assert t not in tools, f"{role}/{t}"
 
 
@@ -97,23 +105,19 @@ def test_tool_specs_for_unknown_tool_is_skipped():
 # ------------------------------------------------------------
 
 def test_status_unknown_id_returns_error_string():
-    use_fake_orchestrator(RecordingSpawn())
     out = agent_status_tool({"agent_id": "ghost"})
     assert "ERROR" in out and "ghost" in out
 
 
 def test_status_requires_agent_id():
-    use_fake_orchestrator(RecordingSpawn())
     assert "ERROR" in agent_status_tool({})
 
 
 def test_list_empty_state():
-    use_fake_orchestrator(RecordingSpawn())
     assert agent_list_tool({}) == "(no subagents yet)"
 
 
 def test_spawn_rejects_empty_input_via_tool_error():
-    use_fake_orchestrator(RecordingSpawn())
     out = spawn_agent_tool({"description": "  ", "prompt": "p"})
     assert out.startswith("ERROR:")
 
@@ -124,7 +128,8 @@ def test_spawn_rejects_empty_input_via_tool_error():
 
 def test_spawn_via_registry_passes_workdir_to_job():
     rec = RecordingSpawn()
-    use_fake_orchestrator(rec)
+    orch = AgentOrchestrator(Path(tempfile.mkdtemp()), spawn_fn=rec)
+    agent_tools._toolbox._orchestrator = orch
     registry = build_registry()
     out = registry.execute(
         "agent_tool",
@@ -138,7 +143,8 @@ def test_spawn_via_registry_passes_workdir_to_job():
 
 def test_spawn_without_workdir_defaults_to_none():
     rec = RecordingSpawn()
-    use_fake_orchestrator(rec)
+    agent_tools._toolbox._orchestrator = AgentOrchestrator(
+        Path(tempfile.mkdtemp()), spawn_fn=rec)
     spawn_agent_tool({"description": "d", "prompt": "p"}, workdir=None)
     assert rec.jobs[0].workdir is None
 
@@ -146,8 +152,8 @@ def test_spawn_without_workdir_defaults_to_none():
 def test_explicit_job_workdir_beats_orchestrator_default():
     """spawn_agent 的 workdir 参数优先于编排器构造时的默认值。"""
     rec = RecordingSpawn()
-    tmp = tempfile.mkdtemp()
-    orch = AgentOrchestrator(Path(tmp), spawn_fn=rec, workdir="D:/default")
+    orch = AgentOrchestrator(Path(tempfile.mkdtemp()),
+                             spawn_fn=rec, workdir="D:/default")
     orch.spawn_agent("d", "p", workdir="D:/override")
     assert rec.jobs[0].workdir == "D:/override"
     orch.spawn_agent("d", "p")
@@ -155,31 +161,27 @@ def test_explicit_job_workdir_beats_orchestrator_default():
 
 
 # ------------------------------------------------------------
-# 5. 闭环: spawn → complete → status 读回 result
+# 5. 闭环: spawn → complete → status / reap 读回 result
 # ------------------------------------------------------------
 
-def test_spawn_complete_status_roundtrip():
-    captured = {}
-
-    def real_lifecycle(job):
-        # 模拟 worker 线程的收尾（在 spawn 返回后由测试手动触发也可以,
-        # 这里直接在 spawn_fn 里闭环）
-        pass
-
-    orch = use_fake_orchestrator(RecordingSpawn())
-    out = spawn_agent_tool({"description": "调查登录bug", "prompt": "读代码"}, workdir=None)
+def _spawn_and_complete(description="调查登录bug", prompt="读代码", result="bug 在 auth.py:42"):
+    """spawn（经 handler, 会登记归属）→ 直接标记 completed（模拟 worker 收尾）。"""
+    out = spawn_agent_tool({"description": description, "prompt": prompt})
     agent_id = out.split("agent_id: ")[1].split("\n")[0]
+    fake_orchestrator_fixture = agent_tools._toolbox._orchestrator
+    fake_orchestrator_fixture.complete_agent(agent_id, result)
+    return agent_id
 
-    orch.complete_agent(agent_id, "bug 在 auth.py:42")
-    status_out = agent_status_tool({"agent_id": agent_id})
-    data = json.loads(status_out)
+
+def test_status_roundtrip_after_complete():
+    agent_id = _spawn_and_complete()
+    data = json.loads(agent_status_tool({"agent_id": agent_id}))
     assert data["status"] == "completed"
     assert data["result"] == "bug 在 auth.py:42"
-    assert "Still running" not in status_out
+    assert data["delivered"] is False   # 还没收割
 
 
 def test_status_running_state_hints_polling():
-    orch = use_fake_orchestrator(RecordingSpawn())
     out = spawn_agent_tool({"description": "d", "prompt": "p"})
     agent_id = out.split("agent_id: ")[1].split("\n")[0]
     status_out = agent_status_tool({"agent_id": agent_id})
@@ -187,37 +189,152 @@ def test_status_running_state_hints_polling():
     assert "Still running" in status_out
 
 
-def test_list_shows_completed_result():
-    orch = use_fake_orchestrator(RecordingSpawn())
-    out = spawn_agent_tool({"description": "查内存泄漏", "prompt": "p", "name": "leak-hunter"})
-    agent_id = out.split("agent_id: ")[1].split("\n")[0]
-    orch.complete_agent(agent_id, "泄漏在 cache.py")
+def test_list_shows_undelivered_marker():
+    _spawn_and_complete()
     listing = agent_list_tool({})
-    assert "leak-hunter" in listing
-    assert "泄漏在 cache.py" in listing
-    assert "查内存泄漏" in listing
+    assert "(undelivered)" in listing
+
+
+def test_list_after_reap_has_no_undelivered_marker():
+    _spawn_and_complete()
+    reap_ready_tool({})
+    assert "(undelivered)" not in agent_list_tool({})
 
 
 # ------------------------------------------------------------
-# 6. API 配置工厂: 注入与回落
+# 6. 收割机制
 # ------------------------------------------------------------
 
-def test_set_api_config_provider_overrides(monkeypatch):
-    calls = []
-    set_api_config_provider(lambda: calls.append(1) or ("k", "http://x", "m-1"))
+def test_reap_returns_result_and_marks_delivered():
+    agent_id = _spawn_and_complete(result="结论: 内存泄漏在 cache.py")
+    out = reap_ready_tool({})
+    assert agent_id in out
+    assert "内存泄漏在 cache.py" in out
+    # 再收一次: 已标记 delivered, 不重复注入
+    out2 = reap_ready_tool({})
+    assert "no pending results" in out2
+    # manifest 落盘状态正确
+    data = json.loads(agent_status_tool({"agent_id": agent_id}))
+    assert data["delivered"] is True
+
+
+def test_reap_empty_state_message():
+    assert "no pending results" in reap_ready_tool({})
+
+
+def test_reap_skips_running_agents():
+    spawn_agent_tool({"description": "慢任务", "prompt": "p"})   # 保持 running
+    out = reap_ready_tool({})
+    assert "no pending results" in out
+
+
+def test_reap_collects_multiple_results():
+    _spawn_and_complete(description="任务一", result="结果一")
+    _spawn_and_complete(description="任务二", result="结果二")
+    out = reap_ready_tool({})
+    assert "结果一" in out and "结果二" in out
+
+
+def test_reap_worker_with_empty_result():
+    _spawn_and_complete(description="哑任务", result="")
+    out = reap_ready_tool({})
+    assert "returned no text" in out
+
+
+# ------------------------------------------------------------
+# 7. 会话隔离
+# ------------------------------------------------------------
+
+def test_reap_isolated_by_session(monkeypatch):
+    """Web 多会话: A 会话派的任务, B 会话收不到。"""
+    monkeypatch.setattr(agent_tools, "current_session_id", lambda: "sess-A")
+    agent_id_a = _spawn_and_complete(result="A 的结果")
+
+    monkeypatch.setattr(agent_tools, "current_session_id", lambda: "sess-B")
+    out_b = reap_ready_tool({})
+    assert "no pending results" in out_b       # B 收不到 A 的
+    assert "A 的结果" not in out_b
+
+    monkeypatch.setattr(agent_tools, "current_session_id", lambda: "sess-A")
+    out_a = reap_ready_tool({})
+    assert "A 的结果" in out_a
+    assert agent_id_a in out_a
+
+
+def test_cli_session_uses_default_bucket(monkeypatch):
+    """CLI（current_session_id=None）的 spawn/reap 都走 DEFAULT_SESSION。"""
+    monkeypatch.setattr(agent_tools, "current_session_id", lambda: None)
+    agent_id = _spawn_and_complete(result="cli 结果")
+    assert agent_id in _session_bindings[DEFAULT_SESSION]
+    out = reap_ready_tool({})
+    assert "cli 结果" in out
+
+
+def test_current_session_id_reads_real_dispatch_binding():
+    """回归钉子: 不 monkeypatch, 走真实 server.dispatch 绑定链路。
+
+    曾经 TurnDispatch 没有 current_session_id 方法, AttributeError 被
+    agent_tools 的兜底 except 吞掉恒返回 None——Web 端所有会话的 worker
+    都落进 cli 桶, 会话隔离静默失效。"""
+    from server import dispatch
+    dispatch.bind(emit=lambda p: None, session_id="sess-real")
+    try:
+        assert agent_tools.current_session_id() == "sess-real"
+    finally:
+        dispatch.unbind()
+    assert agent_tools.current_session_id() is None
+
+
+# ------------------------------------------------------------
+# 8. 孤儿对账（multi_agent.reconcile_orphans）
+# ------------------------------------------------------------
+
+def test_reconcile_marks_running_as_failed():
+    orch = agent_tools._toolbox._orchestrator
+    rec = RecordingSpawn()
+    orch2 = AgentOrchestrator(orch._store_dir, spawn_fn=rec)
+    m1 = orch2.spawn_agent("孤儿一", "p")
+    m2 = orch2.spawn_agent("孤儿二", "p")
+    n = orch.reconcile_orphans()
+    assert n == 2
+    s1 = orch.get_status(m1.agent_id)
+    assert s1.status == "failed"
+    assert "重启" in s1.error
+    assert orch.get_status(m2.agent_id).status == "failed"
+
+
+def test_reconcile_keeps_terminal_states():
+    agent_id = _spawn_and_complete()
+    orch = agent_tools._toolbox._orchestrator
+    n = orch.reconcile_orphans()
+    assert n == 0
+    assert orch.get_status(agent_id).status == "completed"
+
+
+def test_reap_ready_ignores_delivered():
+    orch = agent_tools._toolbox._orchestrator
+    agent_id = _spawn_and_complete()
+    assert len(orch.reap_ready()) == 1
+    orch.mark_delivered([agent_id])
+    assert orch.reap_ready() == []
+    # delivered 重复标记幂等
+    assert orch.mark_delivered([agent_id]) == 1
+
+
+# ------------------------------------------------------------
+# 9. API 配置工厂: 注入与回落
+# ------------------------------------------------------------
+
+def test_set_api_config_provider_overrides():
+    set_api_config_provider(lambda: ("k", "http://x", "m-1"))
     from multi_agent import _api_config_provider
-    key, url, model = _api_config_provider()
-    assert (key, url, model) == ("k", "http://x", "m-1")
+    assert _api_config_provider() == ("k", "http://x", "m-1")
     set_api_config_provider(_default_api_config)   # 还原
 
 
-def test_default_api_config_raises_without_key(monkeypatch):
-    monkeypatch.delenv("API_KEY", raising=False)
-    monkeypatch.setenv("API_KEY", "")   # load_dotenv 可能读 .env, 显式置空串
-    import multi_agent
-    # 置空串后 _default 里 None 检查不触发 —— 确认行为: 空串被当作"有值"。
-    # 这里只锁行为不锁实现: 有 key（哪怕空串）不抛 RuntimeError
-    try:
-        multi_agent._default_api_config()
-    except RuntimeError:
-        pytest.fail("空串 key 不应触发 RuntimeError（只有缺失才触发）")
+def test_default_api_config_tolerates_empty_key(monkeypatch):
+    """空串 key（Web 初始化页场景）不抛 RuntimeError, 只有缺失才抛。"""
+    monkeypatch.setenv("API_KEY", "")
+    from multi_agent import _default_api_config
+    key, url, model = _default_api_config()
+    assert key == ""

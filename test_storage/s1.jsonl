@@ -1,4 +1,0 @@
-{"uuid": "018225f7-88f5-4647-b2cf-9afe16f94f36", "parent_uuid": null, "message": {"role": "user", "content": [{"type": "text", "text": "你好"}]}, "timestamp": 1789355359.446831}
-{"uuid": "a9319d5a-7f09-4e5c-a726-2a75da4804b8", "parent_uuid": "018225f7-88f5-4647-b2cf-9afe16f94f36", "message": {"role": "user", "content": [{"type": "text", "text": "在吗"}]}, "timestamp": 1789355359.4475594}
-{"uuid": "267b81c4-e302-4dc5-93e7-128293b9bad1", "parent_uuid": null, "message": {"role": "user", "content": [{"type": "text", "text": "你好"}]}, "timestamp": "2026-09-14T03:16:22.667133+00:00"}
-{"uuid": "37d567b5-98b5-49a1-aa7d-287feb9a4680", "parent_uuid": "267b81c4-e302-4dc5-93e7-128293b9bad1", "message": {"role": "user", "content": [{"type": "text", "text": "在吗"}]}, "timestamp": "2026-09-14T03:16:22.667760+00:00"}

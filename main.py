@@ -25,7 +25,7 @@ from prompt import SystemPromptBuilder
 from runtime import ConversationRuntime
 from storage import SessionStore
 from tools import ToolRegistry, bash_tool, read_tool, write_tool, powershell_tool, git_bash_unavailable_reason
-from agent_tools import AGENT_TOOL_SPECS, register_agent_tools
+from agent_tools import AGENT_TOOL_SPECS, get_orchestrator, register_agent_tools
 
 DEFAULT_MODEL = "glm-5.3-flash"
 bash_spec = {
@@ -644,6 +644,12 @@ def start(session_store:SessionStore,session_id:str):
     if api_key is None:
         print(c_red("✗ API_KEY not set!"))
         return
+
+    # 启动对账: 上次进程死亡遗留的 running 孤儿标记为 failed
+    # （reconcile 假设此刻本进程尚无 running worker, 只能在启动时调一次）
+    n = get_orchestrator().reconcile_orphans()
+    if n:
+        print(c_dim(f"启动对账: {n} 个上次遗留的 running agent 已标记为 failed"))
 
     registry = build_registry()
 

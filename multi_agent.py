@@ -42,6 +42,9 @@ class AgentManifest(BaseModel):
     completed_at: Optional[str]
     error: Optional[str]
     result: Optional[str] = None   # 终态结果文本（completed 时 = worker 汇报原文）
+    # True = 结果已注入 Leader 对话（收割过）。与 status 解耦: completed 只说明
+    # worker 跑完, delivered 才说明结果进了对话——两者之间可能隔着 Leader 忘轮询。
+    delivered: bool = False
 
 class AgentJob(BaseModel):
     manifest: AgentManifest
@@ -309,6 +312,51 @@ class AgentOrchestrator:
     def complete_agent(self, agent_id: str, result:str):
         manifest = self.get_status(agent_id)
         self._persist_terminal_state(manifest=manifest, status=AgentStatus.COMPLETED.value,result=result, error=None)
+
+
+    # --- 收割: 把"跑完了但结果没进对话"的 worker 交给 Leader ---
+
+    def reap_ready(self) -> list[AgentManifest]:
+        """completed 且未 delivered 的 worker 列表（只读快照, 不改状态）。"""
+        ready = []
+        for m in self.list_agents():
+            if m.status == AgentStatus.COMPLETED.value and not m.delivered:
+                ready.append(m)
+        return ready
+
+    def mark_delivered(self, agent_ids: list[str]) -> int:
+        """把结果标记为已交付（tmp + os.replace 原子写回）。返回成功数。
+
+        与 worker 线程的终态写并发时两侧都走原子替换, 读者不会撞见半截
+        文件; 极端交错下最坏是多标一次 delivered, 幂等无害。"""
+        ok = 0
+        for agent_id in agent_ids:
+            try:
+                manifest = self.get_status(agent_id)
+            except FileNotFoundError:
+                continue
+            new_manifest = manifest.model_copy(update={"delivered": True})
+            json_path = self._store_dir / f"{agent_id}.json"
+            tmp_path = json_path.with_suffix(".json.tmp")
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                f.write(new_manifest.model_dump_json())
+            os.replace(tmp_path, json_path)
+            ok += 1
+        return ok
+
+    def reconcile_orphans(self) -> int:
+        """启动对账: 进程死亡时 daemon worker 随之消失, manifest 永远停在
+        running——把 running 一律标记 failed。
+
+        简化假设: 对账只在进程启动时调用一次, 此刻本进程不可能有 running
+        worker（_default_spawn_fn 还没跑过）, 所有 running 都是上次进程的
+        孤儿。运行期绝不能调用。"""
+        orphans = [m for m in self.list_agents()
+                   if m.status == AgentStatus.RUNNING.value]
+        for m in orphans:
+            self.fail_agent(m.agent_id,
+                            "进程重启时该 worker 仍在运行, 已标记为失败（结果未产出）")
+        return len(orphans)
 
 
     def fail_agent(self, agent_id: str, error: str) :

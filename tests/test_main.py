@@ -127,3 +127,37 @@ def test_build_runtime_assembles_and_preserves_session():
     )
 
     assert runtime.session() is session  # 装配点不偷换对象
+
+
+# ------------------------------------------------------------
+# 启动对账接线 — start() 进 REPL 前对账上次遗留的 running 孤儿
+# ------------------------------------------------------------
+
+def test_start_reconciles_orphans(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+
+    import main as main_mod
+    from storage import SessionStore
+
+    order = []
+    monkeypatch.setenv("API_KEY", "test-key")
+    monkeypatch.setattr(main_mod, "get_orchestrator", lambda: SimpleNamespace(
+        reconcile_orphans=lambda: order.append("reconcile") or 0))
+    monkeypatch.setattr(main_mod, "run_repl", lambda **kw: order.append("run_repl"))
+
+    main_mod.start(session_store=SessionStore(storage_dir=tmp_path),
+                   session_id="20260919-000000")
+    assert order == ["reconcile", "run_repl"]   # 对账先于 REPL
+
+
+# ------------------------------------------------------------
+# 系统提示词 — 子代理使用指引在静态段（缓存边界之前）
+# ------------------------------------------------------------
+
+def test_system_prompt_has_subagent_guidance_in_static_part():
+    from prompt import SYSTEM_PROMPT_DYNAMIC_BOUNDARY, SystemPromptBuilder
+
+    sections = SystemPromptBuilder().with_os("Windows", "10").build()
+    static = sections[:sections.index(SYSTEM_PROMPT_DYNAMIC_BOUNDARY)]
+    sub = next(s for s in static if "# Subagents" in s)
+    assert "agent_tool" in sub and "agent_reap" in sub

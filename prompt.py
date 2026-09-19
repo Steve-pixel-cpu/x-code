@@ -288,6 +288,20 @@ class SystemPromptBuilder:
             "Actions that affect shared systems should be explicitly authorized."
         )
 
+    @staticmethod
+    def _subagents_section() -> str:
+        return (
+            "# Subagents\n"
+            "For self-contained subtasks (investigation, planning, running "
+            "checks) you can spawn a worker with agent_tool and keep working "
+            "in parallel. The worker cannot see this conversation, so its "
+            "prompt must be fully self-contained: file paths, expected "
+            "output, constraints. Poll agent_status to check on a worker; "
+            "before finishing, call agent_reap to collect results you have "
+            "not yet harvested. Do small tasks yourself — spawn workers only "
+            "when a subtask benefits from isolation or parallelism."
+        )
+
     def _environment_section(self) -> str:
         """源码: prompt.rs:163-184"""
         ctx = self._project_context
@@ -314,11 +328,12 @@ class SystemPromptBuilder:
             [2] 系统规则
             [3] 任务指南
             [4] 行动准则
+            [5] 子代理使用指南
             ─── DYNAMIC BOUNDARY ───  ← 缓存边界
-            [5] 环境信息（日期、CWD、平台）
-            [6] 项目上下文（git status、git diff）
-            [7] 指令文件（CLAUDE.md 内容）
-            [8+] 追加的自定义 section
+            [6] 环境信息（日期、CWD、平台）
+            [7] 项目上下文（git status、git diff）
+            [8] 指令文件（CLAUDE.md 内容）
+            [9+] 追加的自定义 section
         """
         sections = []
 
@@ -327,6 +342,7 @@ class SystemPromptBuilder:
         sections.append(self._system_section())
         sections.append(self._doing_tasks_section())
         sections.append(self._actions_section())
+        sections.append(self._subagents_section())
 
         # ══════ 缓存边界 ══════
         # 这个标记告诉 API 客户端:

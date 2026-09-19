@@ -498,3 +498,22 @@ def test_request_stop_清空排队区():
 
     server.request_stop(s)               # 叫停 = 彻底停: 排队区一并撤回
     assert s.stop_requested is True and s.pending == []
+
+
+# ------------------------------------------------------------
+# 启动对账接线 — startup 事件经 get_orchestrator 调 reconcile_orphans
+# （曾经 get_orchestrator 只 import 未使用, 对账从未发生）
+# ------------------------------------------------------------
+
+def test_startup_reconciles_orphan_agents(monkeypatch):
+    from types import SimpleNamespace
+
+    calls = []
+    monkeypatch.setattr(server, "get_orchestrator", lambda: SimpleNamespace(
+        reconcile_orphans=lambda: calls.append(1) or 2))
+
+    server._reconcile_orphan_agents()
+
+    assert calls == [1]
+    # 处理函数确实挂在 startup 事件上（TestClient 不进 lifespan, 测试不触发它）
+    assert server._reconcile_orphan_agents in server.app.router.on_startup

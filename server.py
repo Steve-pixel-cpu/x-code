@@ -164,10 +164,11 @@ _CANCEL_SENTINEL = "__cancelled__"
 
 @dataclass
 class _TurnBinding:
-    """一轮对话挂在工作线程上的三件套。"""
+    """一轮对话挂在工作线程上的绑定四件套。"""
     emit: Callable
     workdir: Optional[str] = None
     should_stop: Optional[Callable[[], bool]] = None
+    session_id: Optional[str] = None
 
 
 _binding_var: ContextVar[Optional[_TurnBinding]] = ContextVar(
@@ -191,9 +192,11 @@ class TurnDispatch:
     """
 
     def bind(self, emit: Callable, workdir: Optional[str] = None,
-             should_stop: Optional[Callable[[], bool]] = None) -> None:
+             should_stop: Optional[Callable[[], bool]] = None,
+             session_id: Optional[str] = None) -> None:
         _binding_var.set(_TurnBinding(emit=emit, workdir=workdir,
-                                      should_stop=should_stop))
+                                      should_stop=should_stop,
+                                      session_id=session_id))
 
     def unbind(self) -> None:
         _binding_var.set(None)
@@ -209,6 +212,10 @@ class TurnDispatch:
     def current_should_stop(self) -> Optional[Callable[[], bool]]:
         binding = _binding_var.get()
         return binding.should_stop if binding else None
+
+    def current_session_id(self) -> Optional[str]:
+        binding = _binding_var.get()
+        return binding.session_id if binding else None
 
 
 dispatch = TurnDispatch()
@@ -371,6 +378,19 @@ def _subagent_api_config() -> tuple[str, Optional[str], str]:
 
 _provider_cfg = load_providers()
 _apply_provider_config(_provider_cfg)
+
+
+def _reconcile_orphan_agents() -> None:
+    """启动对账: 上次进程死亡遗留的 running 孤儿标记为 failed。
+
+    挂 startup 事件而非 import 时执行: 测试的 TestClient 不进 lifespan,
+    跑测试不会动真实的 agents 目录。"""
+    n = get_orchestrator().reconcile_orphans()
+    if n:
+        print(f"[x-code] 启动对账: {n} 个上次进程遗留的 running agent 已标记为 failed")
+
+
+app.router.add_event_handler("startup", _reconcile_orphan_agents)
 
 
 class EmittingToolRegistry(ToolRegistry):
@@ -714,8 +734,11 @@ def _spawn_turn_thread(web_session: WebSession, text: str,
     """真正起工作线程跑一轮。槽位已由调用方持有。"""
 
     def worker():
-        # 必须在工作线程内绑定（按线程号路由）; should_stop 让流式代理逐事件检查打断
-        dispatch.bind(emitter, web_session.workdir, lambda: web_session.stop_requested)
+        # 必须在工作线程内绑定（按线程号路由）; should_stop 让流式代理逐事件检查打断;
+        # session_id 给 agent 工具做收割的会话隔离（A 会话不收 B 会话的结果）
+        dispatch.bind(emitter, web_session.workdir,
+                      lambda: web_session.stop_requested,
+                      session_id=web_session.session_id)
         try:
             summary = web_session.runtime.run_turn(text, prompter)
         except TurnInterrupted:
