@@ -162,6 +162,19 @@
     <div id="sug-dock"></div>
   </div>
 
+  <!-- ============ 右侧计划面板: present_plan 的审阅视图 ============ -->
+  <aside id="plan-panel" hidden>
+    <header id="plan-head">
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 3h6l1 3h3v15H5V6h3l1-3z"/><path d="M9 12h6M9 16h4"/></svg>
+      <span id="plan-title">实施计划</span>
+      <button type="button" id="plan-close" data-tip="收起面板">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 6l12 12M18 6L6 18"/></svg>
+      </button>
+    </header>
+    <div id="plan-body"></div>
+    <footer id="plan-actions"></footer>
+  </aside>
+
     <!-- ============ 初始化引导页 = 欢迎页: 全屏只显示这张卡片 ============ -->
     <div id="onboarding-page">
       <div class="ob-card">

@@ -1924,34 +1924,40 @@ function onPermissionRequest(msg, sid) {
  * markdown 渲染计划全文, 单选批准/拒绝; 批准后端自动升级模式并继续,
  * 拒绝则收起选择区、标记"已拒绝"，模型会修订后再次提交。 */
 function renderPlanCard(msg, sid2, run) {
-  const active = sid2 === state.sessionId;
-  const card = document.createElement("div");
-  card.className = "plan-card";
-  card.dataset.reqId = msg.request_id;
-
-  const head = document.createElement("div");
-  head.className = "plan-head";
-  head.innerHTML = '<span class="pr-ico">' + ICON_MODE_PLAN + '</span>' +
-    '<span class="plan-title">实施计划</span>';
-  card.appendChild(head);
-
-  const body = document.createElement("div");
-  body.className = "plan-body bubble";
+  // 右侧计划面板: 计划全文 + 审批按钮独立成栏; 聊天流只留一张轻量回执卡
   let planText = "";
   try {
     const data = JSON.parse(msg.input || "{}");
     planText = typeof data.plan === "string" ? data.plan : String(msg.input || "");
   } catch (e) { planText = String(msg.input || ""); }
-  body._raw = planText;
+
+  const pane = $("pane");
+  const body = $("plan-body");
   body.innerHTML = renderMd(planText);
   decorateCode(body);
-  card.appendChild(body);
+  const actions = $("plan-actions");
+  actions.innerHTML = "";
+  actions.dataset.reqId = msg.request_id;
+  actions.appendChild(buildPermChoices(msg.request_id, sid2, "批准并实施", "拒绝"));
+  pane.classList.add("plan-open");
 
+  // 聊天流轻量卡: 面板被收起时也能就地批准/拒绝
+  const active = sid2 === state.sessionId;
+  const card = document.createElement("div");
+  card.className = "plan-card";
+  card.dataset.reqId = msg.request_id;
+  const head = document.createElement("div");
+  head.className = "plan-head";
+  head.innerHTML = '<span class="pr-ico">' + ICON_MODE_PLAN + '</span>' +
+    '<span class="plan-title">实施计划</span>' +
+    '<span class="pr-hint"><i class="pr-dot"></i>等待确认（已 在右侧面板打开）</span>';
+  card.appendChild(head);
   card.appendChild(buildPermChoices(msg.request_id, sid2, "批准并实施", "拒绝"));
-
   colOf(sid2).appendChild(card);
   if (active) scrollToBottom();
 }
+
+$("plan-close").onclick = () => $("pane").classList.remove("plan-open");
 
 function respondPermission(requestId, approved, sid) {
   const run = runOf(sid);
@@ -1959,9 +1965,8 @@ function respondPermission(requestId, approved, sid) {
   delete run.pendingPerms[requestId];
   sendWs({ type: "permission_response", request_id: requestId, approved }, sid);
   // 卡片定格: 撤按钮, 标记结果
-  const card = colOf(sid).querySelector(
-    `.perm-row[data-req-id="${requestId}"], .plan-card[data-req-id="${requestId}"]`);
-  if (card) {
+  const markCard = card => {
+    if (!card) return;
     card.classList.add(approved ? "allowed" : "denied");
     const choices = card.querySelector(".pr-choices");
     if (choices) choices.remove();
@@ -1970,6 +1975,15 @@ function respondPermission(requestId, approved, sid) {
         ? (card.classList.contains("plan-card") ? "已批准 · 开始实施" : "已允许")
         : "已拒绝",
       approved));
+  };
+  colOf(sid).querySelectorAll(
+    `.perm-row[data-req-id="${requestId}"], .plan-card[data-req-id="${requestId}"]`
+  ).forEach(markCard);
+  // 右侧面板脚注同步定格
+  const pa = $("plan-actions");
+  if (pa.dataset.reqId === requestId) {
+    pa.innerHTML = "";
+    pa.appendChild(makePrMark(approved ? "已批准 · 开始实施" : "已拒绝", approved));
   }
 }
 
