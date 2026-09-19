@@ -1965,6 +1965,7 @@ function addUserBubble(text, attachments, col) {
       thumb.alt = im.name || "";
       thumb.loading = "lazy";
       thumb.src = "data:" + (im.media_type || "image/png") + ";base64," + (im.data || "");
+      thumb.onclick = () => openLightbox(im);
       grid.appendChild(thumb);
     }
     b.appendChild(grid);
@@ -1974,6 +1975,30 @@ function addUserBubble(text, attachments, col) {
   (col || msgCol()).appendChild(div);
   scrollToBottom();
   return b;
+}
+
+/* ---------- 图片灯箱: 点击气泡缩略图看原图, 点击任意处/Esc 关闭 ---------- */
+let _lightbox = null;
+function openLightbox(att) {
+  if (_lightbox) _lightbox.remove();
+  const ov = document.createElement("div");
+  ov.id = "img-lightbox";
+  const img = document.createElement("img");
+  img.alt = att.name || "";
+  img.src = "data:" + (att.media_type || "image/png") + ";base64," + (att.data || "");
+  ov.appendChild(img);
+  if (att.name) {
+    const cap = document.createElement("div");
+    cap.className = "lb-cap";
+    cap.textContent = att.name;
+    ov.appendChild(cap);
+  }
+  const close = () => { document.removeEventListener("keydown", onEsc); ov.remove(); _lightbox = null; };
+  const onEsc = e => { if (e.key === "Escape") close(); };
+  ov.onclick = close;
+  document.addEventListener("keydown", onEsc);
+  document.body.appendChild(ov);
+  _lightbox = ov;
 }
 
 /* ---------- 待发送卡片: ↑立即(插队) / 编辑(放回输入框) / 删除 ---------- */
