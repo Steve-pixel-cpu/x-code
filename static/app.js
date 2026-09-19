@@ -1481,16 +1481,15 @@ function handleServerMessage(msg, sid) {
       run.queued = false;
       // 未决审批卡定格: 服务端已收口（打断/断连都朝安全侧 DENY）
       for (const rid of Object.keys(run.pendingPerms)) {
-        const card = colOf(sid).querySelector(`.perm-card[data-req-id="${rid}"]`);
+        const card = colOf(sid).querySelector(`.perm-row[data-req-id="${rid}"]`);
         if (card && !card.classList.contains("allowed") && !card.classList.contains("denied")) {
           card.classList.add("denied");
-          const btns = card.querySelector(".pc-btns");
-          if (btns) btns.remove();
-          const head = card.querySelector(".pc-head");
+          const choices = card.querySelector(".pr-choices");
+          if (choices) choices.remove();
           const mark = document.createElement("span");
-          mark.className = "pc-mark";
+          mark.className = "pr-mark";
           mark.textContent = "已拒绝";
-          if (head) head.appendChild(mark); else card.appendChild(mark);
+          card.appendChild(mark);
         }
       }
       run.pendingPerms = {};
@@ -1776,46 +1775,44 @@ function onPermissionRequest(msg, sid) {
   bumpUnread(sid2);
 
   const meta = TOOL_META[msg.tool_name] || { label: msg.tool_name, icon: ICON_TOOL };
-  const card = document.createElement("div");
-  card.className = "perm-card";
-  card.dataset.reqId = msg.request_id;
+  const row = document.createElement("div");
+  row.className = "perm-row";
+  row.dataset.reqId = msg.request_id;
 
-  // 头行: 工具图标 + 「读取文件 · 需要确认」, 与工具行观感一致
-  const head = document.createElement("div");
-  head.className = "pc-head";
+  // 一行式: 图标 + 工具标签 + 命令摘要 + 单选框(选中即决定)
   const ico = document.createElement("span");
-  ico.className = "pc-ico";
+  ico.className = "pr-ico";
   ico.innerHTML = meta.icon;
   const title = document.createElement("span");
-  title.className = "pc-title";
+  title.className = "pr-title";
   title.textContent = meta.label;
-  const ask = document.createElement("span");
-  ask.className = "pc-ask";
-  ask.textContent = "需要你的确认";
-  head.appendChild(ico); head.appendChild(title); head.appendChild(ask);
-  card.appendChild(head);
-
-  // 内容: 命令/路径原文优先（与工具行摘要同源）, JSON 原始串兜底折叠
   const body = describeInput(msg.input) || "(无参数)";
-  const pre = document.createElement("div");
-  pre.className = "pc-body";
-  pre.textContent = body;
-  pre.title = body;   // 悬停看全文
-  card.appendChild(pre);
+  const cmd = document.createElement("span");
+  cmd.className = "pr-cmd";
+  cmd.textContent = body;
+  cmd.title = body;   // 悬停看全文
+  row.appendChild(ico); row.appendChild(title); row.appendChild(cmd);
 
-  // 操作行: 右对齐两个按钮
-  const btns = document.createElement("div");
-  btns.className = "pc-btns";
-  const deny = document.createElement("button");
-  deny.type = "button"; deny.className = "pc-deny"; deny.textContent = "拒绝";
-  const allow = document.createElement("button");
-  allow.type = "button"; allow.className = "pc-allow"; allow.textContent = "允许";
-  deny.onclick = () => respondPermission(msg.request_id, false, sid2);
-  allow.onclick = () => respondPermission(msg.request_id, true, sid2);
-  btns.appendChild(deny); btns.appendChild(allow);
-  card.appendChild(btns);
+  const choices = document.createElement("span");
+  choices.className = "pr-choices";
+  const groupName = "perm-" + msg.request_id;
+  for (const pair of [[true, "allow", "允许"], [false, "deny", "拒绝"]]) {
+    const val = pair[0], cls = pair[1], label = pair[2];
+    const lab = document.createElement("label");
+    lab.className = "pr-opt " + cls;
+    const radio = document.createElement("input");
+    radio.type = "radio"; radio.name = groupName;
+    radio.onchange = function () {
+      if (radio.checked) respondPermission(msg.request_id, val, sid2);
+    };
+    const txt = document.createElement("span");
+    txt.textContent = label;
+    lab.appendChild(radio); lab.appendChild(txt);
+    choices.appendChild(lab);
+  }
+  row.appendChild(choices);
 
-  colOf(sid2).appendChild(card);
+  colOf(sid2).appendChild(row);
   if (sid2 === state.sessionId) scrollToBottom();
 }
 
@@ -1825,17 +1822,15 @@ function respondPermission(requestId, approved, sid) {
   delete run.pendingPerms[requestId];
   sendWs({ type: "permission_response", request_id: requestId, approved }, sid);
   // 卡片定格: 撤按钮, 标记结果
-  const card = colOf(sid).querySelector(`.perm-card[data-req-id="${requestId}"]`);
+  const card = colOf(sid).querySelector(`.perm-row[data-req-id="${requestId}"]`);
   if (card) {
     card.classList.add(approved ? "allowed" : "denied");
-    const btns = card.querySelector(".pc-btns");
-    if (btns) btns.remove();
-    // 决定标记放头行右侧, 与标题同排
-    const head = card.querySelector(".pc-head");
+    const choices = card.querySelector(".pr-choices");
+    if (choices) choices.remove();
     const mark = document.createElement("span");
-    mark.className = "pc-mark";
+    mark.className = "pr-mark";
     mark.textContent = approved ? "已允许" : "已拒绝";
-    if (head) head.appendChild(mark); else card.appendChild(mark);
+    card.appendChild(mark);
   }
 }
 

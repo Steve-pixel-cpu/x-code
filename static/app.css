@@ -1213,54 +1213,51 @@
   }
   #dir-pick:hover { filter: brightness(1.08); }
 
-  /* ============ 权限审批: 聊天流内联卡片 ============ */
-  /* 与工具行同缩进; 卡身低调, 靠左侧琥珀条 + 图标提示"需要你", 不抢正文 */
-  .perm-card {
-    max-width: 620px; margin: -4px 0 14px 38px;
-    background: var(--surface-2);
-    border: 1px solid var(--border);
-    border-left: 3px solid var(--warn);
-    border-radius: var(--r-md);
-    padding: 9px 12px 9px 14px; font-size: 12.5px;
+  /* ============ 权限审批: 无框单选行 ============ */
+  /* 与工具行同缩进同气质: 无边框无底色, 琥珀图标提示待确认, 点单选即决定 */
+  .perm-row {
+    display: flex; align-items: center; gap: 7px;
+    margin: 2px 0 10px 38px; padding: 3px 9px;
+    font-size: 12.5px; color: var(--text-3);
     animation: msg-in .22s ease;
   }
-  .perm-card .pc-head { display: flex; align-items: center; gap: 7px; margin-bottom: 6px; }
-  .perm-card .pc-ico { flex: none; display: inline-flex; color: var(--warn); }
-  .perm-card .pc-title { flex: none; font-weight: 600; color: var(--text-2); }
-  .perm-card .pc-ask {
-    flex: none; margin-left: 2px; padding: 1.5px 8px;
-    font-size: 11px; font-weight: 600; border-radius: 999px;
-    color: var(--warn); background: var(--warn-soft);
-    border: 1px solid color-mix(in srgb, var(--warn) 30%, transparent);
-  }
-  .perm-card .pc-body {
-    font-family: var(--font-mono); font-size: 12px; color: var(--text);
-    background: var(--code-bg); border: 1px solid var(--border);
-    border-radius: 8px; padding: 7px 10px;
+  .perm-row .pr-ico { flex: none; display: inline-flex; color: var(--warn); }
+  .perm-row .pr-title { flex: none; color: var(--text-2); font-weight: 600; }
+  .perm-row .pr-cmd {
+    flex: 0 1 auto; min-width: 0;
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-    margin-bottom: 9px;
+    font-family: var(--font-mono); font-size: 11.5px;
   }
-  .perm-card .pc-btns { display: flex; gap: 8px; justify-content: flex-end; }
-  .perm-card .pc-btns button {
-    padding: 4.5px 18px; border-radius: 999px; font-size: 12.5px; font-weight: 600;
-    border: 1px solid var(--border-strong); background: transparent; color: var(--text-2);
-    transition: all .12s; cursor: pointer;
+  .perm-row .pr-choices { flex: none; display: inline-flex; gap: 12px; margin-left: 6px; }
+  .perm-row .pr-opt {
+    display: inline-flex; align-items: center; gap: 5px;
+    cursor: pointer; color: var(--text-2); user-select: none;
   }
-  .perm-card .pc-btns button:hover { background: var(--hover); color: var(--text); }
-  .perm-card .pc-allow {
-    background: linear-gradient(135deg, var(--accent), var(--accent-deep)) !important;
-    border-color: transparent !important; color: #fff !important;
-    box-shadow: 0 2px 10px var(--accent-soft);
+  .perm-row .pr-opt:hover { color: var(--text); }
+  .perm-row .pr-opt input {
+    appearance: none; -webkit-appearance: none;
+    width: 13px; height: 13px; margin: 0;
+    border: 1.5px solid var(--border-strong); border-radius: 50%;
+    display: inline-grid; place-content: center;
+    cursor: pointer; transition: border-color .12s;
+    background: var(--surface);
   }
-  .perm-card .pc-allow:hover { filter: brightness(1.08) !important; color: #fff !important; }
-  .perm-card .pc-deny:hover { color: var(--err) !important; border-color: var(--err) !important; background: var(--err-soft) !important; }
-  /* 定格态: 已决定 → 整卡降调, 去警示色 */
-  .perm-card.allowed, .perm-card.denied { border-left-color: var(--border-strong); opacity: .62; }
-  .perm-card.allowed .pc-ico, .perm-card.denied .pc-ico { color: var(--text-3); }
-  .perm-card.allowed .pc-ask, .perm-card.denied .pc-ask { display: none; }
-  .perm-card .pc-mark { margin-left: auto; font-weight: 600; font-size: 12px; }
-  .perm-card.allowed .pc-mark { color: var(--accent); }
-  .perm-card.denied .pc-mark { color: var(--err); }
+  .perm-row .pr-opt input::before {
+    content: ""; width: 6px; height: 6px; border-radius: 50%;
+    transform: scale(0); transition: transform .12s;
+  }
+  .perm-row .pr-opt.allow input:checked { border-color: var(--accent); }
+  .perm-row .pr-opt.allow input:checked::before { transform: scale(1); background: var(--accent); }
+  .perm-row .pr-opt.deny input:checked { border-color: var(--err); }
+  .perm-row .pr-opt.deny input:checked::before { transform: scale(1); background: var(--err); }
+  .perm-row .pr-opt.allow:has(input:checked) { color: var(--accent); font-weight: 600; }
+  .perm-row .pr-opt.deny:has(input:checked) { color: var(--err); font-weight: 600; }
+  /* 定格: 决定后整行降调 */
+  .perm-row.allowed, .perm-row.denied { opacity: .58; }
+  .perm-row.allowed .pr-ico, .perm-row.denied .pr-ico { color: var(--text-3); }
+  .perm-row .pr-mark { flex: none; font-weight: 600; font-size: 12px; }
+  .perm-row.allowed .pr-mark { color: var(--accent); }
+  .perm-row.denied .pr-mark { color: var(--err); }
 
   /* 通用确认弹窗（替代原生 confirm——WebView2 的 confirm 带难看的源地址头） */
   #confirm-overlay {
