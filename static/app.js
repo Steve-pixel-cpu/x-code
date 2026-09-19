@@ -3097,43 +3097,54 @@ mqDark.addEventListener("change", () => {
   syncAccentInput();
 });
 
-/* ---------- 界面 / 代码字号: 比例写入 --fs-ui / --fs-code, CSS 端 calc 全局生效 ---------- */
+/* ---------- 界面 / 代码字号: 直接输入像素值, 换算成比例写入 --fs-ui / --fs-code ---------- */
 const FS_UI_KEY = "xc-fs-ui";
 const FS_CODE_KEY = "xc-fs-code";
-const FS_UI_ITEMS = [
-  { value: "0.9",  label: "小（90%）" },
-  { value: "1",    label: "标准（100%）" },
-  { value: "1.1",  label: "大（110%）" },
-  { value: "1.25", label: "特大（125%）" },
-];
-const FS_CODE_ITEMS = [
-  { value: "0.9",  label: "小（90%）" },
-  { value: "1",    label: "标准（100%）" },
-  { value: "1.15", label: "大（115%）" },
-  { value: "1.3",  label: "特大（130%）" },
-];
-function fsUiPref()   { return localStorage.getItem(FS_UI_KEY) || "1"; }
-function fsCodePref() { return localStorage.getItem(FS_CODE_KEY) || "1"; }
+const FS_UI_BASE = 14;      // CSS 基准: 正文/界面基础字号
+const FS_CODE_BASE = 12.5;  // CSS 基准: 代码块字号
+const FS_UI_RANGE = [10, 24];
+const FS_CODE_RANGE = [8, 28];
+function fsPref(key, base, range) {
+  const v = parseFloat(localStorage.getItem(key));
+  return Number.isFinite(v) && v >= range[0] && v <= range[1] ? v : base;
+}
+function fsUiPref()   { return fsPref(FS_UI_KEY, FS_UI_BASE, FS_UI_RANGE); }
+function fsCodePref() { return fsPref(FS_CODE_KEY, FS_CODE_BASE, FS_CODE_RANGE); }
 function applyFontSize() {
   const st = document.documentElement.style;
-  st.setProperty("--fs-ui", fsUiPref());
-  st.setProperty("--fs-code", fsCodePref());
+  st.setProperty("--fs-ui", (fsUiPref() / FS_UI_BASE).toFixed(4));
+  st.setProperty("--fs-code", (fsCodePref() / FS_CODE_BASE).toFixed(4));
 }
-const fsUiDd = makeDropdown($("sel-fs-ui"), {
-  items: FS_UI_ITEMS, value: fsUiPref(),
-  onChange: v => { localStorage.setItem(FS_UI_KEY, v); applyFontSize(); },
-});
-const fsCodeDd = makeDropdown($("sel-fs-code"), {
-  items: FS_CODE_ITEMS, value: fsCodePref(),
-  onChange: v => { localStorage.setItem(FS_CODE_KEY, v); applyFontSize(); },
-});
+/* 输入即时生效; 清空或非法值在失焦时回退默认并回显 */
+function bindFsInput(inpId, key, base, range) {
+  const inp = $(inpId);
+  inp.addEventListener("input", () => {
+    const v = parseFloat(inp.value.trim());
+    const ok = Number.isFinite(v) && v >= range[0] && v <= range[1];
+    inp.classList.toggle("invalid", !ok);
+    if (ok) { localStorage.setItem(key, String(v)); applyFontSize(); }
+  });
+  inp.addEventListener("keydown", ev => {
+    ev.stopPropagation();   // 别让 Enter/Esc 冒泡成全局快捷键
+    if (ev.key === "Enter") ev.target.blur();
+  });
+  inp.addEventListener("blur", () => {
+    const v = parseFloat(inp.value.trim());
+    if (!(Number.isFinite(v) && v >= range[0] && v <= range[1])) localStorage.removeItem(key);
+    inp.value = String(fsPref(key, base, range));
+    inp.classList.remove("invalid");
+    applyFontSize();
+  });
+}
+bindFsInput("fs-ui-input", FS_UI_KEY, FS_UI_BASE, FS_UI_RANGE);
+bindFsInput("fs-code-input", FS_CODE_KEY, FS_CODE_BASE, FS_CODE_RANGE);
 applyFontSize();
 
 /* ---------- 设置页视图切换: 侧栏换设置导航, 主区换设置内容 ---------- */
 function openSettings() {
   themeDd.setValue(themePref());   // 每次打开回显当前值
-  fsUiDd.setValue(fsUiPref());
-  fsCodeDd.setValue(fsCodePref());
+  $("fs-ui-input").value = String(fsUiPref());
+  $("fs-code-input").value = String(fsCodePref());
   syncAccentInput();
   loadProviders().then(renderProviderSettings);   // 拉取供应商配置并渲染
   $("sidebar").classList.add("settings-view");

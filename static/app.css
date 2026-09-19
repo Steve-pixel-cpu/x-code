@@ -1064,6 +1064,8 @@
   }
   .hex-input:focus { outline: none; border-color: var(--accent-border); }
   .hex-input.invalid { border-color: var(--err); }
+  /* 字号输入: 复用 hex-input 底样式, 收窄放数字 */
+  .num-input { width: 64px; }
   /* 强调色预览块: 实时反映当前生效的 --accent, 点击调出系统取色器 */
   .accent-swatch {
     flex: none; width: 30px; height: 30px; padding: 0;
