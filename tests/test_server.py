@@ -868,3 +868,78 @@ def test_settings_permission_mode_unwritable_degrades(settings_file, monkeypatch
     assert r.status_code == 200
     assert r.json()["permission_mode"] == "read-only"   # 请求不受影响
     assert not real_write_text(settings_file, "", encoding="utf-8") or True
+
+
+# ------------------------------------------------------------
+# 权限模式: 会话级隔离（WS set_permission_mode 只切本会话）
+# ------------------------------------------------------------
+
+def test_ws_set_permission_mode_session_scoped(client, isolated_store):
+    """切 A 会话的模式不影响 B; 广播带 mode_changed。"""
+    a = server.get_or_create_web_session("s-mode-a")
+    b = server.get_or_create_web_session("s-mode-b")
+    a.permission_mode = server.NAME_TO_MODE["prompt"]
+    b.permission_mode = server.NAME_TO_MODE["prompt"]
+    try:
+        with client.websocket_connect("/ws/s-mode-a") as ws:
+            ws.send_json({"type": "set_permission_mode", "mode": "workspace-write"})
+            reply = json.loads(ws.receive_text())
+            assert reply["type"] == "mode_changed"
+            assert reply["permission_mode"] == "workspace-write"
+        assert a.permission_mode == server.PermissionMode.WORKSPACE_WRITE
+        assert b.permission_mode == server.PermissionMode.PROMPT   # B 不受影响
+    finally:
+        server._sessions.clear()
+
+
+def test_ws_set_permission_mode_allow_rejected(client, isolated_store):
+    with client.websocket_connect("/ws/s-mode-allow") as ws:
+        ws.send_json({"type": "set_permission_mode", "mode": "allow"})
+        reply = json.loads(ws.receive_text())
+        assert reply["type"] == "error"
+    web_session = server._sessions.get("s-mode-allow")
+    assert web_session is not None
+    try:
+        assert web_session.permission_mode != server.PermissionMode.ALLOW
+    finally:
+        server._sessions.clear()
+
+
+def test_ws_set_permission_mode_applies_to_running_runtime(client, isolated_store):
+    """会话 runtime 已存在时, 切模式立即作用到 runtime（本轮即生效）。"""
+    web_session = server.get_or_create_web_session("s-mode-rt")
+    web_session.permission_mode = server.NAME_TO_MODE["prompt"]
+
+    class _Rt:
+        def __init__(self):
+            self.modes = []
+        def set_permission_mode(self, m):
+            self.modes.append(m)
+
+    web_session.runtime = _Rt()
+    try:
+        with client.websocket_connect("/ws/s-mode-rt") as ws:
+            ws.send_json({"type": "set_permission_mode", "mode": "read-only"})
+            reply = json.loads(ws.receive_text())
+            assert reply["type"] == "mode_changed"
+        assert web_session.runtime.modes == [server.PermissionMode.READ_ONLY]
+    finally:
+        server._sessions.clear()
+
+
+def test_settings_permission_mode_only_changes_default(client, isolated_store):
+    """REST 设置只改全局默认值, 存活会话的模式不动（会话隔离）。"""
+    web_session = server.get_or_create_web_session("s-mode-keep")
+    web_session.permission_mode = server.PermissionMode.PROMPT
+    try:
+        settings_file = None
+        import config as _config
+        import pathlib
+        settings_file = pathlib.Path(_config.__file__).parent  # 仅占位; 真隔离靠 monkeypatch 的用例
+        tc = TestClient(server.app)
+        r = tc.post("/api/settings", json={"permission_mode": "read-only"})
+        assert r.status_code == 200
+        assert web_session.permission_mode == server.PermissionMode.PROMPT
+        assert server.app_state.permission_mode == server.PermissionMode.READ_ONLY
+    finally:
+        server._sessions.clear()

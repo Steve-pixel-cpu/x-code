@@ -569,6 +569,9 @@ class WebSession:
         self.workdir = store.get_workdir(session_id)  # 会话工作目录（项目）
         # 会话级思考等级: 初值取全局默认; 切换只影响本会话（runtime 注入）
         self.thinking_level = runtime_config.thinking_level()
+        # 会话级权限模式: 初值取全局默认; 下拉框切换只影响本会话,
+        # 全局设置页改的是"新会话的默认值"
+        self.permission_mode = app_state.permission_mode
         self.prompter: Optional[WebPermissionPrompter] = None
         # 排队区: 本轮进行中用户追加的后续消息（事件循环线程读写）,
         # 当前轮结束后由 _start_pending_turn 接力开跑。
@@ -634,7 +637,7 @@ def load_runtime_for(web_session: WebSession) -> None:
         registry=registry,
         system_prompt=system_prompt,
         hooks_config=runtime_config,
-        permission_mode=app_state.permission_mode,
+        permission_mode=web_session.permission_mode,
     )
     web_session.runtime.set_thinking_level(web_session.thinking_level)
     web_session.last_uuid = last_uuid
@@ -1214,14 +1217,13 @@ async def api_post_settings(request: dict):
             )
         if mode == ALLOW_MODE:
             # 与 CLI 配置口径一致: allow 连将来需要问的工具也一并放行,
-            # 不允许从设置界面进入（REPL /mode allow 临时开启不受影响）
+            # 不允许从设置进入（REPL /mode allow 临时开启不受影响）
             raise HTTPException(status_code=400, detail="allow 模式不允许从设置进入")
         app_state.set_permission_mode(mode)
         _save_permission_mode(mode)
-        # 存活中的会话 runtime 也一并切换（与 CLI /mode 即时生效对齐）
-        for web_session in _sessions.values():
-            if web_session.runtime is not None:
-                web_session.runtime.set_permission_mode(mode)
+        # 只改全局默认（新会话的初值）: 权限模式是会话级的, 存活会话
+        # 各自持有, 由会话内的下拉框 / WS set_permission_mode 单独切换
+        # ——与 thinking_level 的会话隔离语义对齐
 
     # 切换激活模型（来自输入框模型下拉）
     provider_id = request.get("provider_id")
@@ -1440,6 +1442,21 @@ async def ws_endpoint(websocket: WebSocket, session_id: str):
                         if it.get("qid") != qid
                     ]
 
+            elif msg_type == "set_permission_mode":
+                # 会话内下拉框: 只切本会话（全局默认值走 REST /api/settings）
+                mode = NAME_TO_MODE.get(str(raw.get("mode") or "").strip().lower())
+                if mode is None or mode == ALLOW_MODE:
+                    emit_error(f"未知或不可用的权限模式: {raw.get('mode')!r}")
+                    continue
+                web_session.permission_mode = mode
+                if web_session.runtime is not None:
+                    web_session.runtime.set_permission_mode(mode)
+                web_session.broadcast({
+                    "type": "mode_changed",
+                    "session_id": web_session.session_id,
+                    "permission_mode": MODE_TO_NAME[mode],
+                })
+
             elif msg_type == "permission_response":
                 prompter = web_session.prompter
                 if prompter is None:
@@ -1451,7 +1468,7 @@ async def ws_endpoint(websocket: WebSocket, session_id: str):
                 request_stop(web_session)
 
             else:
-                emit_error(f"未知消息类型: {msg_type!r}（已知: user / queue_promote / queue_remove / permission_response / stop）")
+                emit_error(f"未知消息类型: {msg_type!r}（已知: user / queue_promote / queue_remove / set_permission_mode / permission_response / stop）")
 
     except WebSocketDisconnect:
         # 断连但一轮对话可能还在跑: 朝安全侧叫停；落盘由工作线程完成

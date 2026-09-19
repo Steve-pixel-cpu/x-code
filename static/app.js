@@ -58,6 +58,7 @@ function runOf(id) {
       pendingSends: [],       // WS 建立期间待发的消息（onopen 后冲刷）
       queue: [],              // 待发送消息（本轮进行中追加, 停在输入框上方卡片）
       unread: 0,              // 后台完成/待审批的未读计数
+      permissionMode: null,   // 该会话生效的权限模式（mode_changed / 切会话回显）
       loaded: false,          // 历史是否已加载过（首次切入必拉）
       loading: false,         // 历史加载进行中（防并发重复拉取）
       everConnected: false,   // 该会话 WS 是否成功连过（区分首次连接与断线重连）
@@ -1156,6 +1157,7 @@ async function selectSession(id) {
   renderSessionList();
   refreshWorkdirTag();
   setBusyUi(run.busy);
+  if (run.permissionMode) modeDd.setValue(run.permissionMode);
   syncThinkingIndicator();   // 切会话必须重算: 转圈只属于"正在等待输出的那个会话"
   setConn(run.ws && run.ws.readyState === 1 ? "on" : "", run.ws ? (run.ws.readyState === 1 ? "已连接" : "连接中…") : "未连接");
   restoreCurrentInput();        // 输入框恢复成该会话未发送的内容
@@ -1469,6 +1471,7 @@ function handleServerMessage(msg, sid) {
     else if (msg.type === "tool_use") onToolUse(msg, sid);
     else if (msg.type === "tool_result") onToolResult(msg, sid);
     else if (msg.type === "await_output") run.awaiting = run.busy;
+    else if (msg.type === "mode_changed") onModeChanged(msg, sid);
 
     else if (msg.type === "tool_result") bumpUnread(sid);
     else if (msg.type === "turn_done" || msg.type === "error") {
@@ -1526,6 +1529,7 @@ function handleServerMessage(msg, sid) {
     case "await_output":       onAwaitOutput(msg, state.sessionId); break;
     case "rate_limited_retry": onRateLimitedRetry(msg, sid); break;
     case "permission_request": onPermissionRequest(msg, sid); break;
+    case "mode_changed":       onModeChanged(msg, sid); break;
     case "turn_done":          onTurnDone(msg); break;
     case "session_renamed":    onSessionRenamed(msg); break;
     case "error":              onError(msg); break;
@@ -2517,7 +2521,6 @@ const ICON_MODE_EYE = '<svg width="15" height="15" viewBox="0 0 24 24" fill="non
 const ICON_MODE_HAND = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M8 12.5V5.5a1.5 1.5 0 013 0V11m0-5.5v-1a1.5 1.5 0 013 0V11m0-4.5a1.5 1.5 0 013 0V12m-9 .5l-2.4-2.2c-.9-.8-2.2-.4-2.5.8-.1.5 0 1 .3 1.4L10 19c1 1.3 2.3 2 4.2 2 3.2 0 4.8-2 4.8-5v-3.5"/></svg>';
 const ICON_MODE_PENCIL = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20l4.5-1L20 7.5 16.5 4 5 15.5 4 20z"/></svg>';
 const ICON_MODE_SHIELD = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l7 2.8v5.4c0 4.4-2.9 7.8-7 9.8-4.1-2-7-5.4-7-9.8V5.8L12 3z"/></svg>';
-const ICON_MODE_ALLOW = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>';
 const MODE_ITEMS = [
   { value: "read-only", label: "只读", icon: ICON_MODE_EYE,
     desc: "只查看和分析，不执行任何修改。" },
@@ -2527,8 +2530,8 @@ const MODE_ITEMS = [
     desc: "自动编辑工作区内的文件。" },
   { value: "danger-full-access", label: "完全访问", icon: ICON_MODE_SHIELD,
     desc: "减少确认次数，放开全部权限。" },
-  { value: "allow", label: "全部允许", icon: ICON_MODE_ALLOW,
-    desc: "所有工具直接放行，不再询问。" },
+  // allow 不提供: 后端拒绝从设置/会话进入（连将来需要问的工具也一并放行,
+  // 只允许 CLI REPL /mode allow 临时开启）
 ];
 const THINK_ITEMS = [
   { value: "low", label: "低" },
@@ -2538,8 +2541,18 @@ const THINK_ITEMS = [
 ];
 const modeDd = makeDropdown($("sel-mode"), {
   items: MODE_ITEMS, value: "prompt",
-  onChange: v => saveSettings({ permission_mode: v }),
+  onChange: v => {
+    // 会话级: 切的是当前会话的模式（全局默认值在设置页改, 是新会话初值）
+    const run = curRun();
+    if (run) run.permissionMode = v;
+    sendWs({ type: "set_permission_mode", mode: v });
+  },
 });
+function onModeChanged(msg, sid) {
+  const run = runOf(sid);
+  run.permissionMode = msg.permission_mode;
+  if (sid === state.sessionId) modeDd.setValue(msg.permission_mode);
+}
 const thinkDd = makeDropdown($("sel-thinking"), {
   items: THINK_ITEMS, value: "medium",
   onChange: v => saveSettings({ thinking_level: v }),
@@ -2837,8 +2850,8 @@ async function saveSettings(patch) {
       return;
     }
     const s = await r.json();
-    modeDd.setValue(s.permission_mode);
     thinkDd.setValue(s.thinking_level);
+    if (!state.sessionId) modeDd.setValue(s.permission_mode);   // 草稿态: 无会话, 显示全局默认
   } catch (e) { toast("设置失败: " + e.message); }
 }
 
