@@ -266,19 +266,58 @@ async fn pick_folder() -> Option<String> {
     .flatten()
 }
 
+// ---------- 自绘标题栏的窗口控制（decorations: false 后自己实现） ----------
+
+#[tauri::command]
+fn minimize_main(app: AppHandle) {
+    if let Some(win) = app.get_webview_window("main") {
+        let _ = win.minimize();
+    }
+}
+
+#[tauri::command]
+fn toggle_maximize_main(app: AppHandle) {
+    if let Some(win) = app.get_webview_window("main") {
+        let _ = win.is_maximized()
+            .map(|max| if max { win.unmaximize() } else { win.maximize() });
+    }
+}
+
+#[tauri::command]
+fn close_main(app: AppHandle) {
+    if let Some(win) = app.get_webview_window("main") {
+        let _ = win.close();
+    }
+}
+
+#[tauri::command]
+fn start_drag_main(app: AppHandle) {
+    if let Some(win) = app.get_webview_window("main") {
+        let _ = win.start_dragging();
+    }
+}
+
 // ---------- 注入页面的桥（对齐 electron/preload.js） ----------
 
-/// 对齐 preload.js: window.xcodeDesktop 标记（app.js 入口守卫依赖）+
-/// window.xcodePickFolder() 原生选文件夹桥
+/// 桌面桥: window.xcodeDesktop 标记（app.js 入口守卫依赖）+
+/// window.xcodePickFolder() 原生选文件夹桥 + 掐掉浏览器行为。
+/// 幂等（__xcodeBridgeInstalled 哨兵）: initialization_script 之外,
+/// on_page_load 还会 eval 重申一次——注入偶发失效时兜底。
 const BRIDGE_JS: &str = r#"
 (() => {
+  if (window.__xcodeBridgeInstalled) return;
+  window.__xcodeBridgeInstalled = true;
   Object.defineProperty(window, 'xcodeDesktop', { value: true });
-  // 桌面应用形态: 用自建右键菜单（按上下文 复制/粘贴/全选, 见 app.js）替代
-  // WebView2 默认菜单——默认菜单带"刷新/后退"等浏览器项。文件拖入不导航。
-  document.addEventListener('contextmenu', e => {
-    e.preventDefault();
-    if (window.__xcodeCtxMenu) window.__xcodeCtxMenu(e);
-  });
+  document.documentElement.classList.add('xcode-desktop');   // 显示自绘标题栏
+  // 桌面应用形态, 三层配合:
+  // 1) Rust: SetAreDefaultContextMenusEnabled(false) + SetAreBrowserAcceleratorKeysEnabled(false)
+  // 2) 这里: contextmenu 捕获阶段 preventDefault（右键菜单由 app.js 自建）
+  // 3) 这里: F5/Ctrl+R 兜底拦截——设置应用前的窗口期也不许刷新
+  document.addEventListener('contextmenu', e => e.preventDefault(), true);
+  document.addEventListener('keydown', e => {
+    const isReload = e.key === 'F5' || (e.ctrlKey && e.key.toLowerCase() === 'r');
+    if (isReload) { e.preventDefault(); e.stopPropagation(); }
+  }, true);
   ['dragover', 'drop'].forEach(t =>
     document.addEventListener(t, e => e.preventDefault()));
   window.xcodePickFolder = async () => {
@@ -304,7 +343,13 @@ fn main() {
             }
         }))
         .manage(())
-        .invoke_handler(tauri::generate_handler![pick_folder])
+        .invoke_handler(tauri::generate_handler![
+            pick_folder,
+            minimize_main,
+            toggle_maximize_main,
+            close_main,
+            start_drag_main
+        ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(move |app, event| match event {
@@ -366,8 +411,9 @@ fn create_main_window(app: &AppHandle) -> Result<(), String> {
     // 此前窗口要等后端就绪才创建——Python 冷启动约 3s, 用户对着空白。
     // 现在窗口秒开, bootstrap 完成后由启动线程导航到真正的应用地址。
     let app_for_nav = app.clone();   // 闭包要求 'static: 捕获克隆而非函数引用
-    let win = WebviewWindowBuilder::new(app, "main", WebviewUrl::App("loading.html".into()))
+    WebviewWindowBuilder::new(app, "main", WebviewUrl::App("loading.html".into()))
         .title("x-code")
+        .decorations(false)   // 自绘标题栏: 高度可控, 主题跟随应用深浅色
         .inner_size(1440.0, 900.0)
         .min_inner_size(960.0, 600.0)
         .visible(false) // 页面就绪后再显示, 避免白屏闪烁
@@ -395,37 +441,79 @@ fn create_main_window(app: &AppHandle) -> Result<(), String> {
             if payload.event() == tauri::webview::PageLoadEvent::Finished {
                 let _ = win.show();
                 let _ = win.set_focus();
+                // 桥的重申: initialization_script 偶发不注入时在此兜底
+                let _ = win.eval(BRIDGE_JS);
+                apply_desktop_webview_settings(&win);
             }
         })
         .build()
         .map_err(|e| e.to_string())?;
 
-    // 关闭 WebView2 浏览器快捷键（F5/Ctrl+R/Ctrl+F/Ctrl+P/Ctrl+± 等）:
-    // 桌面应用不该有"刷新页面"。tauri 未透传该设置, 经 with_webview 拿
-    // 原生控制器直接写 ICoreWebView2Settings3。
-    #[cfg(windows)]
-    {
-        use webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2Settings3;
-        use windows::core::Interface;
-        win.with_webview(|wv| unsafe {
-            if let Ok(core) = wv.controller().CoreWebView2() {
-                if let Ok(settings) = core.Settings() {
-                    if let Ok(s3) = settings.cast::<ICoreWebView2Settings3>() {
-                        let _ = s3.SetAreBrowserAcceleratorKeysEnabled(false);
-                    }
-                }
-            }
-        })
-        .map_err(|e| e.to_string())?;
-    }
-
     Ok(())
+}
+
+/// 把 WebView2 的浏览器行为关成桌面应用形态:
+/// - 默认右键菜单（"刷新/返回/打印"等浏览器项）→ 前端自建菜单替代
+/// - 浏览器加速键（F5/Ctrl+R 刷新、Ctrl+P 打印、Ctrl+F 查找等）
+///
+/// 每次页面加载完成都调用: 一次性 with_webview 在窗口创建期有竞态
+/// （实测偶发不执行, debug-nav.txt 里可见）, on_page_load 则必然触发;
+/// Set* 幂等, 重复只是重申。设置是 webview 级的, 导航后持续生效。
+#[cfg(windows)]
+fn apply_desktop_webview_settings(win: &tauri::WebviewWindow) {
+    use webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2Settings3;
+    use windows::core::Interface;
+
+    let scheduled = win.with_webview(|wv| {
+        let r = unsafe {
+            (|| -> windows::core::Result<()> {
+                let core = wv.controller().CoreWebView2()?;
+                let settings = core.Settings()?;
+                settings.SetAreDefaultContextMenusEnabled(false)?;
+                let s3 = settings.cast::<ICoreWebView2Settings3>()?;
+                s3.SetAreBrowserAcceleratorKeysEnabled(false)?;
+                Ok(())
+            })()
+        };
+        if let Some(err) = r.err() {
+            diag_log(&format!("webview-settings error: {err}"));
+        }
+    });
+    if let Err(e) = scheduled {
+        diag_log(&format!("webview-settings schedule error: {e}"));
+    }
+}
+
+#[cfg(not(windows))]
+fn apply_desktop_webview_settings(_win: &tauri::WebviewWindow) {}
+
+/// 壳的诊断日志: ~/.x-code/debug-nav.txt（排查原生菜单/刷新复发用）
+fn diag_log(msg: &str) {
+    use std::io::Write as _;
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(data_dir().join("debug-nav.txt"))
+    {
+        let _ = writeln!(f, "{msg}");
+    }
 }
 
 /// 应用真实入口: 本地 FastAPI 服务（页面/静态/API/WS 同源）。
 /// 必须在 bootstrap 之后再调——端口以后端避让后写出的 port 文件为准。
 fn app_url(token: &str) -> String {
-    format!("http://127.0.0.1:{}/?token={}", read_port(), urlencode(token))
+    // cb 时间戳: 每次 launches URL 唯一, 绕开 WebView2 对主文档的启发式
+    // 缓存——后端虽发 no-cache, 实测同 URL 导航仍可能吃旧缓存
+    let cb = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    format!(
+        "http://127.0.0.1:{}/?token={}&desktop=1&cb={}",
+        read_port(),
+        urlencode(token),
+        cb
+    )
 }
 
 fn urlencode(s: &str) -> String {

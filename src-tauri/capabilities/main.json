@@ -8,6 +8,10 @@
   "permissions": [
     "core:default",
     "allow-pick-folder",
+    "allow-minimize-main",
+    "allow-toggle-maximize-main",
+    "allow-close-main",
+    "allow-start-drag-main",
     "clipboard-manager:allow-read-text"
   ]
 }

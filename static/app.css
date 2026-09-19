@@ -376,6 +376,28 @@
   .msg-col, .msg-col *, input, textarea, #input {
     user-select: text; -webkit-user-select: text;
   }
+  /* 自绘标题栏: 高度 42px, 颜色走主题变量——深浅色模式自动协调。
+     默认显示（桌面壳唯一入口）; 浏览器模式入口守卫整页替换, 无影响 */
+  #titlebar {
+    display: flex; position: fixed; top: 0; left: 0; right: 0;
+    height: 42px; z-index: 900;
+    align-items: center; gap: 9px; padding-left: 14px;
+    background: var(--bg-side); border-bottom: 1px solid var(--border);
+  }
+  body { padding-top: 42px; }
+  .tb-icon { width: 17px; height: 17px; pointer-events: none; }
+  .tb-name {
+    font-size: 12.5px; font-weight: 600; color: var(--text-2);
+    letter-spacing: .2px; flex: 1;
+  }
+  .tb-controls { display: flex; height: 100%; }
+  .tb-btn {
+    width: 46px; border: none; background: none; color: var(--text-2);
+    display: flex; align-items: center; justify-content: center; cursor: default;
+    transition: background .1s, color .1s;
+  }
+  .tb-btn:hover { background: var(--hover); color: var(--text); }
+  .tb-btn.tb-close:hover { background: var(--err); color: #fff; }
 
   /* 欢迎态（新建任务）: 消息区收缩为内容高度, 与输入卡一起在主区垂直居中;
      上下 auto 外边距均分剩余空间, 空间不足时自动退化为贴顶排列。
@@ -1182,18 +1204,27 @@
   }
   #confirm-actions button.danger:hover { filter: brightness(1.08); background: var(--err); }
 
-  /* 桌面端右键菜单（复制/粘贴/全选, 由 BRIDGE_JS 触发 app.js 构建） */
+  /* 桌面端右键菜单（复制/粘贴, app.js 自注册弹出） */
   #ctx-pop {
-    position: fixed; z-index: 350; min-width: 132px;
-    background: var(--surface); border: 1px solid var(--border);
+    position: fixed; z-index: 350; min-width: 168px;
+    background: var(--surface-2); border: 1px solid var(--border-strong);
     border-radius: 10px; box-shadow: var(--shadow-pop); overflow: hidden;
     padding: 4px; animation: rise .12s cubic-bezier(.16, 1, .3, 1);
   }
   #ctx-pop .ctx-item {
-    padding: 8px 14px; border-radius: 7px; font-size: 12.5px;
+    display: flex; justify-content: space-between; align-items: center;
+    gap: 28px; padding: 8px 12px; border-radius: 7px; font-size: 12.5px;
     color: var(--text); cursor: pointer; transition: background .1s;
   }
   #ctx-pop .ctx-item:hover { background: var(--hover); }
+  #ctx-pop .ctx-item.disabled { opacity: .38; pointer-events: none; }
+  #ctx-pop .ctx-sep {
+    height: 1px; margin: 4px 8px; background: var(--border);
+  }
+  #ctx-pop .ctx-key {
+    color: var(--text-3); font-size: 11px;
+    font-family: Consolas, "Courier New", monospace;
+  }
 
   /* 轻提示 */
   #toast {

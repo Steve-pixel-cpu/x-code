@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-close-main"
+description = "Enables the close_main command without any pre-configured scope."
+commands.allow = ["close_main"]
+
+[[permission]]
+identifier = "deny-close-main"
+description = "Denies the close_main command without any pre-configured scope."
+commands.deny = ["close_main"]

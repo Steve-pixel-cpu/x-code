@@ -3,7 +3,12 @@
 <head>
 <meta charset="utf-8">
 <title>x-code</title>
+<script>/* 与 index.html 一致的主题预置, 避免深色系统下加载页白闪 */
+  (function(){var p;try{p=localStorage.getItem("xc-theme")||"system";}catch(e){p="system";}
+   var d=p==="dark"||(p==="system"&&window.matchMedia("(prefers-color-scheme: dark)").matches);
+   document.documentElement.classList.toggle("dark",d);})();</script>
 <style>
+  :root { color-scheme: dark light; }
   html, body { height: 100%; margin: 0; }
   body {
     display: flex; flex-direction: column; align-items: center; justify-content: center;
@@ -11,19 +16,75 @@
     font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
     user-select: none;
   }
+  html.dark body { background: #191919; color: #d7d3cc; }
   .spin {
     width: 34px; height: 34px; border-radius: 50%;
     border: 3px solid #ddd6cb; border-top-color: #b45309;
     animation: r 0.9s linear infinite;
   }
+  html.dark .spin { border-color: #333; border-top-color: #d97706; }
   @keyframes r { to { transform: rotate(360deg); } }
   .t1 { font-size: 15px; }
   .t2 { font-size: 12px; color: #a8a29e; }
+  html.dark .t2 { color: #6b6862; }
+  /* 自绘标题栏: 与应用内同款（BRIDGE_JS 注入的 html.xcode-desktop 类） */
+  #titlebar {
+    display: none; position: fixed; top: 0; left: 0; right: 0;
+    height: 42px; align-items: center; gap: 9px; padding-left: 14px;
+    background: #efedeb; border-bottom: 1px solid #ddd6cb;
+  }
+  html.xcode-desktop #titlebar { display: flex; }
+  html.xcode-desktop body { padding-top: 42px; box-sizing: border-box; }
+  html.dark #titlebar { background: #232323; border-bottom-color: #333; }
+  .tb-icon { width: 17px; height: 17px; pointer-events: none; }
+  .tb-name { font-size: 12.5px; font-weight: 600; color: #78716c; flex: 1; }
+  html.dark .tb-name { color: #a8a29e; }
+  .tb-controls { display: flex; height: 100%; }
+  .tb-btn {
+    width: 46px; border: none; background: none; color: #78716c;
+    display: flex; align-items: center; justify-content: center; cursor: default;
+  }
+  .tb-btn:hover { background: #e2dfda; color: #44403c; }
+  html.dark .tb-btn:hover { background: #2e2e2e; color: #e7e5e4; }
+  .tb-btn.tb-close:hover { background: #dc2626; color: #fff; }
 </style>
 </head>
 <body>
+  <div id="titlebar">
+    <img class="tb-icon" src="/static/icon.png" alt="" draggable="false">
+    <span class="tb-name">x-code</span>
+    <div class="tb-controls">
+      <button class="tb-btn" id="tb-min" title="最小化">
+        <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.1"><path d="M0.5 5.2h9"/></svg>
+      </button>
+      <button class="tb-btn" id="tb-max" title="最大化">
+        <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.1"><rect x="0.7" y="0.7" width="8.6" height="8.6" rx="1"/></svg>
+      </button>
+      <button class="tb-btn tb-close" id="tb-close" title="关闭">
+        <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.1"><path d="M0.7 0.7l8.6 8.6M9.3 0.7l-8.6 8.6"/></svg>
+      </button>
+    </div>
+  </div>
   <div class="spin"></div>
   <div class="t1">正在启动 x-code…</div>
   <div class="t2">首次启动需要初始化本地服务，通常几秒钟</div>
+  <script>
+    // BRIDGE_JS 注入 xcode-desktop 类; 窗口控制按钮直接走命令
+    if (window.__TAURI_INTERNALS__) {
+      const inv = c => window.__TAURI_INTERNALS__.invoke(c).catch(() => {});
+      document.getElementById("tb-min").onclick = () => inv("minimize_main");
+      document.getElementById("tb-max").onclick = () => inv("toggle_maximize_main");
+      document.getElementById("tb-close").onclick = () => inv("close_main");
+      const tb = document.getElementById("titlebar");
+      tb.addEventListener("mousedown", e => {
+        if (e.button !== 0 || e.target.closest(".tb-btn")) return;
+        inv("start_drag_main");
+      });
+      tb.addEventListener("dblclick", e => {
+        if (e.target.closest(".tb-btn")) return;
+        inv("toggle_maximize_main");
+      });
+    }
+  </script>
 </body>
 </html>

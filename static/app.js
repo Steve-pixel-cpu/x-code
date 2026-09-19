@@ -1,10 +1,14 @@
 "use strict";
+/* 桌面态判定: 壳注入的标记优先, URL 参数 desktop=1 兜底——
+ * initialization_script 偶发不注入时菜单/标题栏照常工作 */
+const DESKTOP = window.xcodeDesktop
+  || new URLSearchParams(location.search).has("desktop");
 /* ============================================================
  * 入口守卫: 网页入口已关闭, 仅允许 x-code 桌面壳打开
- * （桌面壳的 preload 会注入 window.xcodeDesktop 标记;
+ * （桌面壳注入 window.xcodeDesktop 标记或 URL 带 desktop=1;
  *   浏览器直接访问 127.0.0.1:8000 只会看到提示, 应用不初始化）
  * ============================================================ */
-if (!window.xcodeDesktop) {
+if (!DESKTOP) {
   document.documentElement.innerHTML =
     '<head><meta charset="UTF-8"><title>x-code</title></head>' +
     '<body style="margin:0;background:#101014">' +
@@ -16,6 +20,7 @@ if (!window.xcodeDesktop) {
     "<div>请通过 x-code 桌面应用打开</div></div></body>";
   throw new Error("x-code: 网页入口已关闭, 请使用桌面应用");
 }
+if (DESKTOP) document.documentElement.classList.add("xcode-desktop");
 /* ============================================================
  * 状态
  * ============================================================ */
@@ -295,78 +300,134 @@ function confirmDialog(msg, { title = "确认操作", okText = "确定", danger 
 }
 
 /* ============================================================
- * 桌面端右键菜单 — 按上下文提供 复制/粘贴/全选。
- * 由壳的 BRIDGE_JS 在 contextmenu 时调用（已 preventDefault 原生菜单,
- * 原生菜单带"刷新"等浏览器项, 与桌面应用形态不符）。
- * 粘贴经 clipboard 插件在 Rust 侧读系统剪贴板, 避开浏览器权限弹窗。
+ * 桌面端右键菜单 — 复制/粘贴, 只显示当前可用的项:
+ * 有选中文字 → 复制; 右键输入框/可编辑区 → 粘贴; 都没有 → 不弹。
+ * 自注册 contextmenu 监听（松开右键时触发, 与原生菜单同时机）:
+ * 原生菜单由 Rust 设置层掐掉, preventDefault 只作双保险。
+ * 复制走 execCommand（复制用户当前选区, 无需剪贴板写权限）;
+ * 粘贴经 clipboard 插件在 Rust 侧读系统剪贴板, insertText 走编辑
+ * 命令栈——可撤销, 且正常触发 input 事件。
  * ============================================================ */
-window.__xcodeCtxMenu = function (ev) {
-  const old = $("ctx-pop");
-  if (old) old.remove();
-  // 复制仅限聊天文本: 选区起止必须都在同一消息列（.msg-col）内,
-  // 否则选中的会混入侧栏/标题等界面文字（如整页 Ctrl+A）
-  const withinChat = (() => {
-    const sel = window.getSelection();
-    if (!sel || !sel.rangeCount) return false;
-    const elOf = n => (n ? (n.nodeType === 1 ? n : n.parentElement) : null);
-    const a = elOf(sel.anchorNode), b = elOf(sel.focusNode);
-    if (!a || !b) return false;
-    const ca = a.closest(".msg-col"), cb = b.closest(".msg-col");
-    return !!(ca && cb && ca === cb);
-  })();
-  const selText = withinChat && window.getSelection().toString();
+function closeCtxMenu() {
+  const pop = $("ctx-pop");
+  if (pop) pop.remove();
+  document.removeEventListener("mousedown", onCtxAway, true);
+  document.removeEventListener("keydown", onCtxEsc, true);
+}
+function onCtxAway(e) {
+  if (!e.target.closest || !e.target.closest("#ctx-pop")) closeCtxMenu();
+}
+function onCtxEsc(e) {
+  if (e.key === "Escape") closeCtxMenu();
+}
+
+function showDesktopCtxMenu(ev) {
+  closeCtxMenu();
+  const selText = String(window.getSelection() || "");
   const t = ev.target;
   const editable = t.closest
     ? (t.closest("textarea, input") || (t.isContentEditable ? t : null))
     : null;
-  const items = [];
-  if (selText) items.push(["复制", () => { document.execCommand("copy"); }]);
+
+  const pop = document.createElement("div");
+  pop.id = "ctx-pop";
+  const item = (label, key, enabled, fn) => {
+    const it = document.createElement("div");
+    it.className = "ctx-item" + (enabled ? "" : " disabled");
+    const name = document.createElement("span");
+    name.textContent = label;
+    const hint = document.createElement("span");
+    hint.className = "ctx-key";
+    hint.textContent = key;
+    it.append(name, hint);
+    if (enabled) {
+      // mousedown 不给默认行为: 不抢焦点、不冲掉选区, 等 click 再执行
+      it.addEventListener("mousedown", e => e.preventDefault());
+      it.onclick = () => { closeCtxMenu(); fn(); };
+    }
+    pop.appendChild(it);
+  };
+  const sep = () => {
+    const s = document.createElement("div");
+    s.className = "ctx-sep";
+    pop.appendChild(s);
+  };
+
   if (editable) {
-    items.push(["粘贴", async () => {
+    // 输入框: 完整编辑菜单（撤销/重做 | 剪切/复制/粘贴/删除 | 全选）
+    const hasSel = editable.setSelectionRange
+      ? editable.selectionStart !== editable.selectionEnd
+      : (() => {
+          const s = window.getSelection();
+          return !!s && !s.isCollapsed && editable.contains(s.anchorNode);
+        })();
+    const edit = cmd => () => {
+      editable.focus();
+      document.execCommand(cmd);
+    };
+    item("撤销", "Ctrl+Z", true, edit("undo"));
+    item("重做", "Ctrl+Y", true, edit("redo"));
+    sep();
+    item("剪切", "Ctrl+X", hasSel, edit("cut"));
+    item("复制", "Ctrl+C", hasSel, edit("copy"));
+    item("粘贴", "Ctrl+V", true, async () => {
       try {
-        const text = await window.__TAURI_INTERNALS__.invoke(
-          "plugin:clipboard-manager|read_text");
+        const text = (await window.__TAURI_INTERNALS__.invoke(
+          "plugin:clipboard-manager|read_text")) || "";
         editable.focus();
-        if (!document.execCommand("insertText", false, text || "")) {
-          toast("粘贴失败");
-        }
+        if (!document.execCommand("insertText", false, text)) toast("粘贴失败");
       } catch (e) { toast("粘贴失败"); }
-    }]);
-    items.push(["全选", () => {
+    });
+    item("删除", "Del", hasSel, edit("delete"));
+    sep();
+    item("全选", "Ctrl+A", true, () => {
       editable.focus();
       if (editable.select) editable.select();
       else document.execCommand("selectAll");
-    }]);
+    });
+  } else if (selText) {
+    // 消息文本: 只有复制一件事可做
+    item("复制", "Ctrl+C", true, () => document.execCommand("copy"));
+  } else {
+    return;   // 无可做的事情就不弹（原生菜单也已被抑制）
   }
-  if (!items.length) return;
-  const pop = document.createElement("div");
-  pop.id = "ctx-pop";
-  items.forEach(([label, fn]) => {
-    const it = document.createElement("div");
-    it.className = "ctx-item";
-    it.textContent = label;
-    it.onclick = () => { pop.remove(); fn(); };
-    pop.appendChild(it);
-  });
+
   document.body.appendChild(pop);
   const W = pop.offsetWidth, H = pop.offsetHeight;
   pop.style.left = Math.max(8, Math.min(ev.clientX, window.innerWidth - W - 8)) + "px";
   pop.style.top = Math.max(8, Math.min(ev.clientY, window.innerHeight - H - 8)) + "px";
-  setTimeout(() => {
-    document.addEventListener("mousedown", function h(e) {
-      if (!pop.contains(e.target)) {
-        pop.remove();
-        document.removeEventListener("mousedown", h);
-      }
-    });
-    document.addEventListener("keydown", function k(e) {
-      if (e.key === "Escape") {
-        pop.remove();
-        document.removeEventListener("keydown", k);
-      }
-    });
+  setTimeout(() => {   // 当次右键的 mouseup 不许把刚弹出的菜单关掉
+    document.addEventListener("mousedown", onCtxAway, true);
+    document.addEventListener("keydown", onCtxEsc, true);
   }, 0);
-};
+}
+
+// 桌面态由 DESKTOP（注入标记或 URL 参数）直接判定, 注入时序不影响菜单
+if (DESKTOP) {
+  document.addEventListener("contextmenu", ev => {
+    ev.preventDefault();
+    showDesktopCtxMenu(ev);
+  }, true);
+}
+
+/* ============================================================
+ * 自绘标题栏（仅桌面壳）— 拖拽/双击最大化/窗口控制按钮
+ * ============================================================ */
+if (DESKTOP) {
+  const tbInvoke = cmd => window.__TAURI_INTERNALS__.invoke(cmd).catch(() => {});
+  $("tb-min").onclick = () => tbInvoke("minimize_main");
+  $("tb-max").onclick = () => tbInvoke("toggle_maximize_main");
+  $("tb-close").onclick = () => tbInvoke("close_main");
+  const tbar = $("titlebar");
+  tbar.addEventListener("mousedown", e => {
+    if (e.button !== 0 || e.target.closest(".tb-btn")) return;
+    tbInvoke("start_drag_main");
+  });
+  tbar.addEventListener("dblclick", e => {
+    if (e.target.closest(".tb-btn")) return;
+    tbInvoke("toggle_maximize_main");
+  });
+}
 
 /* ============================================================
  * 滚动: 贴底自动跟随; 用户上翻时不拽人, 悬浮钮一键回底
@@ -1958,7 +2019,7 @@ document.body.appendChild(ctxMenu);
 function hideCtxMenu() { ctxMenu.style.display = "none"; }
 document.addEventListener("contextmenu", ev => {
   hideCtxMenu();
-  if (window.xcodeDesktop) return;   // Electron 桌面端: 主进程弹原生菜单（preload 桥标记）
+  if (DESKTOP) return;   // 桌面端: 自建右键菜单已挂, 浏览器版弹层不用
   const sel = window.getSelection();
   if (!sel || sel.isCollapsed || sel.rangeCount === 0
       || !$("messages").contains(sel.getRangeAt(0).commonAncestorContainer)) {

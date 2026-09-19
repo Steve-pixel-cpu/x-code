@@ -12,9 +12,26 @@
 <script src="https://cdn.jsdelivr.net/npm/@highlightjs/cdn-assets@11.9.0/highlight.min.js"></script>
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
 <script src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
-<link rel="stylesheet" href="/static/app.css?v=20260918n">
+<link rel="stylesheet" href="/static/app.css?v=20260920d">
 </head>
 <body>
+
+<!-- ============ 自绘标题栏（仅桌面壳显示, 高度/主题跟随应用） ============ -->
+<div id="titlebar">
+  <img class="tb-icon" src="/static/icon.png" alt="" draggable="false">
+  <span class="tb-name">x-code</span>
+  <div class="tb-controls">
+    <button class="tb-btn" id="tb-min" title="最小化">
+      <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.1"><path d="M0.5 5.2h9"/></svg>
+    </button>
+    <button class="tb-btn" id="tb-max" title="最大化">
+      <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.1"><rect x="0.7" y="0.7" width="8.6" height="8.6" rx="1"/></svg>
+    </button>
+    <button class="tb-btn tb-close" id="tb-close" title="关闭">
+      <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.1"><path d="M0.7 0.7l8.6 8.6M9.3 0.7l-8.6 8.6"/></svg>
+    </button>
+  </div>
+</div>
 
 <!-- ============ 左侧栏 ============ -->
 <aside id="sidebar">
@@ -263,6 +280,6 @@
   </div>
 </div>
 
-<script src="/static/app.js?v=20260918o" defer></script>
+<script src="/static/app.js?v=20260920d" defer></script>
 </body>
 </html>
