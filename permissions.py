@@ -162,9 +162,15 @@ class PermissionPolicy:
                                     f"from {current.as_str()} to {required.as_str()}")
 
         # 其他情况: 权限不足，直接拒绝
+        # 计划模式下(典型: bash 默认 DANGER 档, PLAN→DANGER 跨两档)附带
+        # 教学指引——拒绝本身是对模型的一次纠正, 否则它不知道自己在计划
+        # 模式, 只会反复换命令撞墙
+        plan_hint = (" Plan mode is active: do not execute or modify anything. "
+                     "Research with read_file, then call present_plan with "
+                     "your implementation plan.")
         return PermissionResult(
                     decision= PermissionDecision.DENY,
                     reason = f"tool '{tool_name}' requires {required.as_str()} " 
-                    f"permission; current mode is {current.as_str()}"
+                    f"permission; current mode is {current.as_str()}" + (plan_hint if current == PermissionMode.PLAN else "")
                 )
 

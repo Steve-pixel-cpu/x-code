@@ -9,6 +9,27 @@ SYSTEM_PROMPT_DYNAMIC_BOUNDARY = "__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__"
 MAX_INSTRUCTION_FILE_CHARS = 4_000
 MAX_TOTAL_INSTRUCTION_CHARS = 12_000
 
+# 计划模式提示段: 权限层会硬拒有副作用的工具, 但模型若不知情只会反复撞墙
+# （命令被拒→换命令→再被拒）。挂进动态段逐字告诉它规则与出路:
+# 只读调研 → present_plan 提交计划 → 批准后自动升级再实施。
+PLAN_MODE_SECTION = (
+    "# Plan Mode (ACTIVE)\n"
+    "You are currently in PLAN MODE. This is the research and planning phase "
+    "of the task — the user wants to review your approach BEFORE any change "
+    "is made.\n"
+    " - Allowed: read-only research (read_file) and answering questions.\n"
+    " - Denied: bash/powershell and every tool that writes or mutates "
+    "anything. They will be rejected by the permission system — do NOT "
+    "attempt them and do NOT retry after a denial.\n"
+    " - Required: when your research is done, call the `present_plan` tool "
+    "with a concise step-by-step implementation plan (files to change, what "
+    "to change, how to verify) and STOP. The user will approve or reject it.\n"
+    " - On approval the session automatically upgrades to workspace-write; "
+    "only then do you implement.\n"
+    " - If requirements are ambiguous, state your assumptions inside the "
+    "plan instead of guessing silently."
+)
+
 FRONTIER_MODEL_NAME = "Claude Opus 4.6"
 
 class ContextFile(BaseModel):

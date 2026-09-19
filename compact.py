@@ -44,6 +44,15 @@ def should_compact(msgs: List[Message], config: CompactionConfig) -> bool:
     return len(msgs) > config.preserve_recent_messages and estimate_session_tokens(msgs) > config.max_estimated_tokens
 
 
+def _clean_snippet(text: str, limit: int) -> str:
+    """摘要片段净化: 工具输出里常有无法解码的字节（解码器以 U+FFFD 替代,
+    压缩摘要直接截取就会带出一串乱码）和多行内容——剔除替换符、压平空白
+    后再截断, 超长以省略号结尾。"""
+    text = text.replace("\ufffd", "")
+    text = " ".join(text.split())
+    return text[:limit] + ("…" if len(text) > limit else "")
+
+
 def summarize_messages(msgs: List[Message]) -> str:
     """
     将一组消息压缩成摘要。
@@ -78,8 +87,7 @@ def summarize_messages(msgs: List[Message]) -> str:
         if msg.role == "user":
             for block in msg.content:
                 if isinstance(block, TextContentBlock) and block.text.strip():
-                    text = block.text[:160] + "..." if len(block.text) > 160 else block.text
-                    recent_requests.append(text)
+                    recent_requests.append(_clean_snippet(block.text, 160))
                     if len(recent_requests) >= 3:
                         break
         if len(recent_requests) >= 3:
@@ -93,8 +101,7 @@ def summarize_messages(msgs: List[Message]) -> str:
             if isinstance(block, TextContentBlock):
                 lower = block.text.lower()
                 if any(kw in lower for kw in ["todo", "next", "pending", "remaining"]):
-                    text = block.text[:160] + "..." if len(block.text) > 160 else block.text
-                    pending_work.append(text)
+                    pending_work.append(_clean_snippet(block.text, 160))
         if len(pending_work) >= 3:
             break
     pending_work.reverse()
@@ -147,13 +154,12 @@ def summarize_messages(msgs: List[Message]) -> str:
         parts = []
         for block in msg.content:
             if isinstance(block, TextContentBlock):
-                text = block.text[:80].replace("\n", " ")
-                parts.append(text)
+                parts.append(_clean_snippet(block.text, 80))
             elif isinstance(block, ToolContentBlock):
-                parts.append(f"tool_use {block.name}({block.input[:40]})")
+                parts.append(f"tool_use {block.name}({_clean_snippet(block.input, 40)})")
             elif isinstance(block, ToolResultContentBlock):
                 status = "error " if block.is_error else ""
-                parts.append(f"tool_result {block.name}: {status}{block.output[:40]}")
+                parts.append(f"tool_result {block.name}: {status}{_clean_snippet(block.output, 40)}")
             elif isinstance(block, ImageContentBlock):
                 parts.append("[图片]")
             elif isinstance(block, FileContentBlock):
