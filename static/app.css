@@ -139,6 +139,8 @@
   ::-webkit-scrollbar-thumb {
     background: var(--border-strong); border-radius: 5px;
     border: 2px solid transparent; background-clip: content-box;
+    min-height: 22px;   /* 纵向滑块最小长度(含2px透明边距, 可见约40px), 内容再长也不缩成一小截 */
+    min-width: 22px;    /* 横向滑块同规则 */
   }
   ::-webkit-scrollbar-thumb:hover { background: var(--text-3); border: 2px solid transparent; background-clip: content-box; }
   ::-webkit-scrollbar-track { background: transparent; }
@@ -368,6 +370,8 @@
 
   /* ============ 聊天区 ============ */
   #messages { flex: 1; overflow-y: auto; scroll-behavior: auto; }
+  /* 消息区滚动条: 隐藏原生条, 改用自绘固定长度滑块(#msg-scrollbar) */
+  #messages::-webkit-scrollbar { width: 0; height: 0; }
   /* 每个会话一个常驻消息列, 切换只是显隐: 后台会话的流式输出继续写进
      自己的隐藏列, 切回时原样恢复——流式中的回复不丢字、不冻结 */
   .msg-col { width: var(--content-w); margin: 0 auto; padding: 28px 32px 12px; display: none; }
@@ -425,7 +429,10 @@
   /* 欢迎页（新建任务）: 水印 + 问候 + 工作区选择 */
   .empty-state.welcome h2 { font-size: calc(22px * var(--fs-ui)); margin-top: 4px; }
   .empty-state .watermark {
-    display: block; width: 180px; margin: 0 auto -14px;
+    /* 固定方盒 + contain: 用户上传的图标可能是满幅无透明(JPEG 常见),
+       尺寸随图自适应会让下方问候语位置漂移甚至压到图上 */
+    display: block; width: 180px; height: 180px; object-fit: contain;
+    margin: 0 auto 10px;
     user-select: none;
   }
   /* 草稿态: 工作区选择条作为输入卡的顶部一条（同宽, 下缘分隔线） */
@@ -710,6 +717,25 @@
   .note.rl-note { animation: msg-in .22s ease, rl-pulse 1.6s ease-in-out .22s infinite; }
   @keyframes rl-pulse { 50% { opacity: .5; } }
 
+  /* 自绘固定长度滚动条滑块(消息区专用):
+     平时 5px 细条半透明常驻, hover/拖拽加粗到 9px; 长度恒定 64px 不随内容缩放 */
+  #msg-scrollbar {
+    position: absolute; right: 0; top: 0; height: 100%; width: 9px;
+    z-index: 20; cursor: default;
+  }
+  #msg-scrollbar[hidden] { display: none; }
+  #msg-scrollbar .thumb {
+    position: absolute; right: 2px; width: 5px; height: 64px;   /* 固定长度 */
+    border-radius: 3px;
+    background: var(--border-strong); opacity: .55;
+    transition: height .15s, width .15s, right .15s, opacity .15s, background .15s;
+  }
+  #msg-scrollbar:hover .thumb, #msg-scrollbar.dragging .thumb {
+    width: 9px; right: 0; opacity: 1; background: var(--text-3);
+  }
+  #msg-scrollbar.dragging .thumb { background: var(--text-3); }
+  #msg-scrollbar.dragging .thumb { transition: none; }
+
   /* 回到底部悬浮钮 */
   #scroll-btn {
     position: absolute; right: 34px; bottom: 168px; z-index: 5;
@@ -846,6 +872,7 @@
   #pane[data-view="settings"] > #doc-header,
   #pane[data-view="settings"] > #messages,
   #pane[data-view="settings"] > #scroll-btn,
+  #pane[data-view="settings"] > #msg-scrollbar,
   #pane[data-view="settings"] > #composer { display: none; }
   #settings-page {
     display: none; flex: 1; flex-direction: column;
@@ -858,6 +885,7 @@
   #pane[data-view="onboarding"] > #doc-header,
   #pane[data-view="onboarding"] > #messages,
   #pane[data-view="onboarding"] > #scroll-btn,
+  #pane[data-view="onboarding"] > #msg-scrollbar,
   #pane[data-view="onboarding"] > #composer { display: none; }
   body:has(#pane[data-view="onboarding"]) > #sidebar { display: none; }
   #onboarding-page {
@@ -1218,28 +1246,29 @@
   #dir-pick:hover { filter: brightness(1.08); }
 
   /* ============ 权限审批: 内联确认卡 ============ */
-  /* 琥珀色卡片从灰色工具行里跳出来; 头行/命令/按钮分行, 点按钮即决定 */
+  /* 配色走强调色令牌(--accent 系列): 跟随设置里的强调颜色(预设/自定义一致);
+     头行/命令/按钮分行, 点按钮即决定 */
   .perm-row {
     display: flex; flex-direction: column; gap: 9px;
     margin: 6px 0 14px 38px; padding: 11px 13px 12px;
     max-width: min(680px, 100%);
     font-size: calc(12.5px * var(--fs-ui)); color: var(--text-2);
-    border: 1px solid color-mix(in srgb, var(--warn) 32%, transparent);
+    border: 1px solid var(--accent-border);
     border-radius: var(--r-md);
-    background: var(--warn-soft);
+    background: var(--accent-soft);
     animation: msg-in .22s ease;
   }
   .perm-row .pr-head { display: flex; align-items: center; gap: 7px; min-width: 0; }
-  .perm-row .pr-ico { flex: none; display: inline-flex; color: var(--warn); }
+  .perm-row .pr-ico { flex: none; display: inline-flex; color: var(--accent); }
   .perm-row .pr-title { flex: none; color: var(--text); font-weight: 600; }
   .perm-row .pr-hint {
     margin-left: auto; flex: none;
     display: inline-flex; align-items: center; gap: 6px;
-    color: var(--warn); font-size: calc(11.5px * var(--fs-ui)); user-select: none;
+    color: var(--accent); font-size: calc(11.5px * var(--fs-ui)); user-select: none;
   }
   .perm-row .pr-dot {
     width: 6px; height: 6px; border-radius: 50%;
-    background: var(--warn); animation: pulse 1.2s infinite;
+    background: var(--accent); animation: pulse 1.2s infinite;
   }
   .perm-row .pr-cmd {
     min-width: 0;

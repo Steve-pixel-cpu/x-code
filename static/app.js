@@ -649,6 +649,7 @@ $("messages").addEventListener("scroll", () => {
   const el = $("messages");
   nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 120;
   $("scroll-btn").classList.toggle("show", !nearBottom);
+  updateMsgThumb();
 });
 $("scroll-btn").onclick = () => {
   nearBottom = true;
@@ -659,6 +660,66 @@ function scrollToBottom(force) {
   const el = $("messages");
   el.scrollTop = el.scrollHeight;
 }
+
+/* ---------- 自绘固定长度滚动条(消息区) ----------
+ * 原生滑块长度随内容比例缩放, 无法恒定; 这里隐藏原生条,
+ * 滑块固定 64px, 位置按滚动比例映射。拖拽/点轨道反算 scrollTop。 */
+const MSG_THUMB_H = 64;
+const msgThumb = $("msg-scrollbar");
+const msgThumbBar = msgThumb.querySelector(".thumb");
+
+function updateMsgThumb() {
+  const el = $("messages");
+  const sh = el.scrollHeight, ch = el.clientHeight;
+  if (sh - ch <= 2) { msgThumb.hidden = true; return; }   // 不可滚动
+  msgThumb.hidden = false;
+  /* 轨道与消息区盒子对齐(上下有文档头/输入卡, 不能直接铺满 pane) */
+  msgThumb.style.top = el.offsetTop + "px";
+  msgThumb.style.height = el.clientHeight + "px";
+  const track = msgThumb.clientHeight - MSG_THUMB_H;      // 可移动范围(轨道高-滑块长)
+  const max = sh - ch;
+  const top = el.scrollTop >= max - 2 ? track             // 贴底判定: 完整显示
+    : Math.min(track, Math.round(el.scrollTop / max * track));
+  msgThumbBar.style.top = top + "px";
+}
+
+/* 内容尺寸变化(流式输出/切会话/窗口变化)时同步滑块 */
+new ResizeObserver(updateMsgThumb).observe($("messages"));
+window.addEventListener("resize", updateMsgThumb);
+
+/* 拖拽滑块: 按位移比例反算 scrollTop */
+msgThumbBar.addEventListener("pointerdown", ev => {
+  ev.preventDefault();
+  msgThumb.classList.add("dragging");
+  msgThumbBar.setPointerCapture(ev.pointerId);
+  const el = $("messages");
+  const startY = ev.clientY;
+  const startScroll = el.scrollTop;
+  const track = msgThumb.clientHeight - MSG_THUMB_H;
+  const max = el.scrollHeight - el.clientHeight;
+  const onMove = e2 => {
+    if (track <= 0 || max <= 0) return;
+    el.scrollTop = startScroll + (e2.clientY - startY) / track * max;
+  };
+  const onUp = () => {
+    msgThumb.classList.remove("dragging");
+    msgThumbBar.removeEventListener("pointermove", onMove);
+    msgThumbBar.removeEventListener("pointerup", onUp);
+  };
+  msgThumbBar.addEventListener("pointermove", onMove);
+  msgThumbBar.addEventListener("pointerup", onUp);
+});
+
+/* 点击轨道空白: 跳到对应位置(与原生行为一致) */
+msgThumb.addEventListener("pointerdown", ev => {
+  if (ev.target === msgThumbBar) return;   // 滑块自身走拖拽
+  const el = $("messages");
+  const track = msgThumb.clientHeight - MSG_THUMB_H;
+  const max = el.scrollHeight - el.clientHeight;
+  if (track <= 0 || max <= 0) return;
+  const y = ev.clientY - msgThumb.getBoundingClientRect().top - MSG_THUMB_H / 2;
+  el.scrollTop = Math.max(0, Math.min(track, y)) / track * max;
+});
 
 /* ============================================================
  * 侧栏会话列表（项目 / 分组 两种模式 + 搜索过滤）
