@@ -1213,53 +1213,49 @@
   }
   #dir-pick:hover { filter: brightness(1.08); }
 
-  /* ============ 权限审批 ============ */
-  #perm-overlay {
-    display: none; position: fixed; inset: 0; z-index: 100;
-    background: var(--overlay); backdrop-filter: blur(3px);
-    align-items: center; justify-content: center;
-  }
-  #perm-modal {
-    width: min(560px, 92vw);
+  /* ============ 权限审批: 聊天流内联卡片 ============ */
+  .perm-card {
+    max-width: 640px; margin: 8px 0;
     background: var(--surface);
-    background: color-mix(in srgb, var(--surface) 92%, transparent);
-    -webkit-backdrop-filter: blur(20px) saturate(1.4); backdrop-filter: blur(20px) saturate(1.4);
-    border: 1px solid var(--border);
-    border-radius: var(--r-lg); box-shadow: var(--shadow-pop);
-    padding: 20px 22px; animation: rise .2s cubic-bezier(.16, 1, .3, 1);
+    border: 1px solid var(--accent-border);
+    border-left: 3px solid var(--accent);
+    border-radius: var(--r-md);
+    padding: 10px 14px; font-size: 12.5px;
+    animation: rise .2s cubic-bezier(.16, 1, .3, 1);
   }
-  @keyframes rise { from { transform: translateY(6px) scale(.97); opacity: 0; } to { transform: none; opacity: 1; } }
-  #perm-modal h3 {
-    font-size: 15px; margin-bottom: 14px; color: var(--text);
-    display: flex; align-items: center; gap: 8px;
+  .perm-card .pc-head {
+    display: flex; align-items: center; gap: 7px;
+    font-weight: 600; color: var(--text); margin-bottom: 7px;
   }
-  #perm-modal h3 svg { color: var(--accent); }
-  #perm-modal .field { margin-bottom: 10px; font-size: 13px; }
-  #perm-modal .field .k {
-    display: inline-block; min-width: 42px; color: var(--text-3); margin-right: 10px;
-  }
-  #perm-modal pre {
+  .perm-card .pc-head svg { color: var(--accent); flex: none; }
+  .perm-card pre {
     background: var(--code-bg); border: 1px solid var(--border);
-    border-radius: 8px; padding: 9px 11px;
-    max-height: 220px; overflow: auto; font-size: 12px;
+    border-radius: 8px; padding: 8px 10px;
+    max-height: 180px; overflow: auto; font-size: 11.5px;
     font-family: var(--font-mono); white-space: pre-wrap; word-break: break-all;
-    margin-top: 5px;
+    margin: 0 0 9px; color: var(--text-2);
   }
-  #perm-modal .btns { display: flex; gap: 10px; justify-content: flex-end; margin-top: 16px; }
-  #perm-modal .btns button {
-    padding: 8px 24px; border-radius: var(--r-sm); font-size: 13.5px; font-weight: 600;
+  .perm-card .pc-btns { display: flex; gap: 8px; justify-content: flex-end; }
+  .perm-card .pc-btns button {
+    padding: 5.5px 20px; border-radius: var(--r-sm); font-size: 12.5px; font-weight: 600;
     border: 1px solid var(--border-strong); background: transparent; color: var(--text);
-    transition: all .12s;
+    transition: all .12s; cursor: pointer;
   }
-  #perm-modal .btns button:hover { background: var(--hover); }
-  #btn-allow {
+  .perm-card .pc-btns button:hover { background: var(--hover); }
+  .perm-card .pc-deny { color: var(--err) !important; border-color: var(--err) !important; }
+  .perm-card .pc-deny:hover { background: var(--err-soft) !important; }
+  .perm-card .pc-allow {
     background: linear-gradient(135deg, var(--accent), var(--accent-deep)) !important;
     border-color: transparent !important; color: #fff !important;
     box-shadow: 0 2px 10px var(--accent-soft);
   }
-  #btn-allow:hover { filter: brightness(1.08) !important; background: linear-gradient(135deg, var(--accent), var(--accent-deep)) !important; }
-  #btn-deny { color: var(--err) !important; border-color: var(--err) !important; }
-  #btn-deny:hover { background: var(--err-soft) !important; }
+  .perm-card .pc-allow:hover { filter: brightness(1.08) !important; }
+  /* 定格态: 已决定 */
+  .perm-card.allowed { border-left-color: var(--accent); opacity: .82; }
+  .perm-card.denied { border-left-color: var(--err); opacity: .72; }
+  .perm-card .pc-mark { font-weight: 600; font-size: 12px; }
+  .perm-card.allowed .pc-mark { color: var(--accent); }
+  .perm-card.denied .pc-mark { color: var(--err); }
 
   /* 通用确认弹窗（替代原生 confirm——WebView2 的 confirm 带难看的源地址头） */
   #confirm-overlay {

@@ -46,7 +46,7 @@ function runOf(id) {
       ws: null,               // 该会话的 WebSocket
       busy: false,            // 一轮对话进行中（含排队等待槽位）
       queued: false,          // 在全局并发队列中等待槽位
-      pendingPerm: null,      // 待审批的 permission_request
+      pendingPerms: {},       // 待审批的 permission_request: request_id → msg
       activeToolCard: null,   // 当前流式中的工具卡片（配对 tool_result）
       liveToolCards: {},      // 流式中全部待完成工具卡: tool_use id → 卡片（防乱序/丢事件漏配）
       curBubble: null,        // 当前流式中的正文气泡
@@ -1158,8 +1158,6 @@ async function selectSession(id) {
   setBusyUi(run.busy);
   syncThinkingIndicator();   // 切会话必须重算: 转圈只属于"正在等待输出的那个会话"
   setConn(run.ws && run.ws.readyState === 1 ? "on" : "", run.ws ? (run.ws.readyState === 1 ? "已连接" : "连接中…") : "未连接");
-  // 有挂着的审批请求: 重新弹出
-  if (id === state.sessionId && run.pendingPerm) onPermissionRequest(run.pendingPerm);
   restoreCurrentInput();        // 输入框恢复成该会话未发送的内容
   scrollToBottom(true);
 }
@@ -1472,14 +1470,22 @@ function handleServerMessage(msg, sid) {
     else if (msg.type === "tool_result") onToolResult(msg, sid);
     else if (msg.type === "await_output") run.awaiting = run.busy;
 
-    if (msg.type === "permission_request") { bumpUnread(sid); run.pendingPerm = msg; }
     else if (msg.type === "tool_result") bumpUnread(sid);
     else if (msg.type === "turn_done" || msg.type === "error") {
       bumpUnread(sid);
       run.busy = false;
       run.awaiting = false;
       run.queued = false;
-      run.pendingPerm = null;
+      // 未决审批卡定格: 服务端已收口（打断/断连都朝安全侧 DENY）
+      for (const rid of Object.keys(run.pendingPerms)) {
+        const card = colOf(sid).querySelector(`.perm-card[data-req-id="${rid}"]`);
+        if (card && !card.classList.contains("allowed") && !card.classList.contains("denied")) {
+          card.classList.add("denied");
+          const btns = card.querySelector(".pc-btns");
+          if (btns) btns.remove();
+        }
+      }
+      run.pendingPerms = {};
       // 轮次收口: 悬空工具行标"已中断", 清掉流式指针
       sweepPendingToolCards(run);
       clearRateLimitNote(run);   // 限流退避提示一并撤下
@@ -1519,7 +1525,7 @@ function handleServerMessage(msg, sid) {
     case "turn_queue_cleared": onQueueCleared(sid); break;
     case "await_output":       onAwaitOutput(msg, state.sessionId); break;
     case "rate_limited_retry": onRateLimitedRetry(msg, sid); break;
-    case "permission_request": onPermissionRequest(msg); break;
+    case "permission_request": onPermissionRequest(msg, sid); break;
     case "turn_done":          onTurnDone(msg); break;
     case "session_renamed":    onSessionRenamed(msg); break;
     case "error":              onError(msg); break;
@@ -1749,40 +1755,65 @@ function sweepPendingToolCards(run) {
   run.activeToolCard = null;
 }
 
-/* ---------- 权限审批 ---------- */
-function onPermissionRequest(msg) {
-  const run = curRun();
-  run.pendingPerm = msg;
-  const s = state.sessions.find(x => x.id === state.sessionId);
-  $("perm-title").textContent =
-    "需要授权" + (s ? ` — ${displayTitle(s)}` : "");
-  $("perm-tool").textContent = msg.tool_name;
-  $("perm-mode").textContent = `${msg.required_mode}（当前 ${msg.current_mode}）`;
-  $("perm-input").textContent = msg.input;
-  $("perm-overlay").style.display = "flex";
-  $("btn-allow").focus();
+/* ---------- 权限审批: 聊天流内联卡片（替代旧模态弹窗） ---------- */
+const PERM_ICONS = { bash: "⌨", powershell: "⌨", write_file: "✎", read_file: "📄" };
+
+function onPermissionRequest(msg, sid) {
+  // sid 缺省 = 当前会话（旧事件流路径）: WS 分发处总是带 sid
+  const sid2 = sid || state.sessionId;
+  const run = runOf(sid2);
+  if (run.pendingPerms[msg.request_id]) return;   // 重放/重连重复事件: 忽略
+  run.pendingPerms[msg.request_id] = msg;
+  bumpUnread(sid2);
+
+  const card = document.createElement("div");
+  card.className = "perm-card";
+  card.dataset.reqId = msg.request_id;
+  const head = document.createElement("div");
+  head.className = "pc-head";
+  head.innerHTML =
+    '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linejoin="round"><path d="M12 3l7 2.8v5.4c0 4.4-2.9 7.8-7 9.8-4.1-2-7-5.4-7-9.8V5.8L12 3z"/></svg>';
+  const t = document.createElement("span");
+  t.textContent = "需要授权 — " + (msg.tool_name || "");
+  head.appendChild(t);
+  card.appendChild(head);
+
+  const pre = document.createElement("pre");
+  pre.textContent = String(msg.input || "");
+  card.appendChild(pre);
+
+  const btns = document.createElement("div");
+  btns.className = "pc-btns";
+  const deny = document.createElement("button");
+  deny.type = "button"; deny.className = "pc-deny"; deny.textContent = "拒绝";
+  const allow = document.createElement("button");
+  allow.type = "button"; allow.className = "pc-allow"; allow.textContent = "允许";
+  deny.onclick = () => respondPermission(msg.request_id, false, sid2);
+  allow.onclick = () => respondPermission(msg.request_id, true, sid2);
+  btns.appendChild(deny); btns.appendChild(allow);
+  card.appendChild(btns);
+
+  colOf(sid2).appendChild(card);
+  if (sid2 === state.sessionId) scrollToBottom();
 }
 
-function respondPermission(approved) {
-  const run = curRun();
-  if (!run || !run.pendingPerm) return;
-  sendWs({
-    type: "permission_response",
-    request_id: run.pendingPerm.request_id,
-    approved,
-  });
-  run.pendingPerm = null;
-  $("perm-overlay").style.display = "none";
+function respondPermission(requestId, approved, sid) {
+  const run = runOf(sid);
+  if (!run || !run.pendingPerms[requestId]) return;
+  delete run.pendingPerms[requestId];
+  sendWs({ type: "permission_response", request_id: requestId, approved }, sid);
+  // 卡片定格: 撤按钮, 标记结果
+  const card = colOf(sid).querySelector(`.perm-card[data-req-id="${requestId}"]`);
+  if (card) {
+    card.classList.add(approved ? "allowed" : "denied");
+    const btns = card.querySelector(".pc-btns");
+    if (btns) btns.remove();
+    const mark = document.createElement("span");
+    mark.className = "pc-mark";
+    mark.textContent = approved ? "已允许" : "已拒绝";
+    card.appendChild(mark);
+  }
 }
-
-$("btn-allow").onclick = () => respondPermission(true);
-$("btn-deny").onclick = () => respondPermission(false);
-/* 弹窗快捷键: Enter 允许 / Esc 拒绝 */
-document.addEventListener("keydown", ev => {
-  if ($("perm-overlay").style.display !== "flex") return;
-  if (ev.key === "Enter") { ev.preventDefault(); respondPermission(true); }
-  else if (ev.key === "Escape") { ev.preventDefault(); respondPermission(false); }
-});
 
 /* ---------- 轮次结束 / 错误 ---------- */
 function endTurnUiReset() {
@@ -2209,8 +2240,8 @@ async function sendCurrent() {
   sendWs({ type: "user", text, attachments, workdir: firstWorkdir, qid });
 }
 
-function sendWs(obj) {
-  const run = curRun();
+function sendWs(obj, sid) {
+  const run = sid ? runOf(sid) : curRun();
   if (!run) return;
   if (run.ws && run.ws.readyState === 1) {
     run.ws.send(JSON.stringify(obj));

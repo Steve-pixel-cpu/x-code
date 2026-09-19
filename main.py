@@ -17,6 +17,7 @@ from hooks import HookRunner
 from models import Message, Session, TextContentBlock, ToolContentBlock
 from permissions import (
     DANGER_FULL_ACCESS_MODE,
+    READ_ONLY_MODE, WORKSPACE_WRITE_MODE,
     ALLOW_MODE, MODE_TO_NAME, NAME_TO_MODE,
 )
 from permissions import PermissionRequest, PermissionResult, PermissionMode, PermissionPolicy, PermissionDecision, \
@@ -344,6 +345,8 @@ def build_runtime(session: Session,
     permission_policy = PermissionPolicy(
         active_mode = permission_mode,
     )
+    for tool_name, required in TOOL_REQUIREMENTS.items():
+        permission_policy.with_tool_requirement(tool_name, required)
     hook_runner = HookRunner.from_config(hooks_config)
 
     running_time = ConversationRuntime(
@@ -627,6 +630,19 @@ def run_repl(runtime: ConversationRuntime,
                 )
             idx_before = len(runtime.session().messages) - 1
             titled = maybe_auto_title(runtime, store, session_id, titled)
+
+
+# 工具 -> 权限要求档位。分级原则: 只读不落盘 = READ_ONLY; 本地写 =
+# WORKSPACE_WRITE; 可执行任意命令/触达共享系统 = DANGER_FULL_ACCESS(默认,
+# 不必登记——bash/powershell 走 required_mode_for 的 fallback)。
+# 消费点: build_runtime 的 PermissionPolicy.with_tool_requirement。
+TOOL_REQUIREMENTS = {
+    "read_file": READ_ONLY_MODE,        # 读文件无副作用
+    "agent_status": READ_ONLY_MODE,     # 看 subagent 状态
+    "agent_list": READ_ONLY_MODE,       # 列 subagent
+    "write_file": WORKSPACE_WRITE_MODE, # 落盘文件（本地写）
+    "agent_tool": WORKSPACE_WRITE_MODE, # 派生 subagent（写 agents 状态目录）
+}
 
 
 def build_registry() -> ToolRegistry:
