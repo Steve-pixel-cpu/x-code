@@ -215,6 +215,12 @@ class ConversationRuntime:
         #   失准, 调用方需要重写存储（见 storage.rewrite_session）
         self._on_iterate = None
         self._on_compacted = None
+        # 事件镜像钩子（Web 端工具卡片闭合用, CLI 默认 None 行为不变）:
+        # - on_tool_finalized: 工具未经执行就被终局（权限拒绝 / hook 拦截 /
+        #   prompter 拒绝）时触发——这条路径不经过 tool_executor, 镜像方
+        #   （如 Web 端 EmittingToolRegistry）看不到, 不通知前端工具卡
+        #   会永远停在"运行中"直到轮次收尾
+        self._on_tool_finalized = None
 
     def set_on_iterate(self, fn) -> "ConversationRuntime":
         self._on_iterate = fn
@@ -222,6 +228,10 @@ class ConversationRuntime:
 
     def set_on_compacted(self, fn) -> "ConversationRuntime":
         self._on_compacted = fn
+        return self
+
+    def set_on_tool_finalized(self, fn) -> "ConversationRuntime":
+        self._on_tool_finalized = fn
         return self
 
     def _notify_iterate(self) -> None:
@@ -271,6 +281,7 @@ class ConversationRuntime:
             tool_name=tool_block.name,
             input=tool_block.input,
             prompter=prompter,
+            tool_use_id=tool_block.id,
         )
         if result.decision == PermissionDecision.DENY:
             return Message.tool_result(
@@ -449,6 +460,13 @@ class ConversationRuntime:
                 done, pre_res = self._authorize_tool_use(block, prompter)
                 if done is not None:
                     finalized[i] = done
+                    # 未经执行就被终局（拒绝/拦截）: 通知镜像方补发结果,
+                    # 前端工具卡才能闭合。回调异常不阻断轮次。
+                    if self._on_tool_finalized is not None:
+                        try:
+                            self._on_tool_finalized(block, done)
+                        except Exception as e:
+                            print(f"[WARN] tool-finalized hook failed: {e}")
                 else:
                     pending.append((i, block, pre_res))
 

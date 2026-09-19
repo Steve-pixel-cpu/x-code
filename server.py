@@ -556,21 +556,10 @@ class WebPermissionPrompter:
         self._responses.put((_CANCEL_SENTINEL, False))
 
     def _finish_deny(self, request: PermissionRequest, reason: str) -> PermissionResult:
-        # 拒绝结果也推一条 tool_result，让前端工具卡片能闭合显示"已拒绝"。
-        # present_plan: 拒绝理由必须回流给模型（它要据此修订计划）, 所以
-        # tool_result 照推, 但带 plan_rejected 标记——前端计划卡自己渲染
-        # 拒绝态, 收到该标记不再补一张失败工具卡。
-        payload = {
-            "type": "tool_result",
-            "name": request.tool_name,
-            "input": request.input,
-            "output": reason,
-            "is_error": True,
-            "denied": True,
-        }
-        if request.tool_name == "present_plan":
-            payload["plan_rejected"] = True
-        self._emit(payload)
+        # 拒绝结果的 tool_result 镜像不再从这里发: 终局结果统一由
+        # runtime 的 on_tool_finalized 回调发射（带显式 tool_use_id,
+        # 多工具批次下 FIFO 补 id 会错位配对）。present_plan 的
+        # plan_rejected 标记同样移到回调侧（见 _emit_finalized_tool_result）。
         return _deny(request.tool_name, reason)
 
 
@@ -653,6 +642,31 @@ def get_or_create_web_session(session_id: str) -> WebSession:
     return _sessions[session_id]
 
 
+def _emit_finalized_tool_result(tool_block, result_msg) -> None:
+    """runtime 终局回调: 拒绝/拦截的 tool_result 镜像（带显式 id 精确配对）。
+
+    工作线程内调用, dispatch.current() 拿到本轮 TurnEmitter; CLI/无绑定时
+    静默。present_plan 被拒保留 plan_rejected 标记——前端计划卡自渲染拒绝态,
+    收到该标记不再补失败工具卡。"""
+    emit = dispatch.current()
+    if emit is None:
+        return
+    outputs = [b.output for b in result_msg.content
+               if isinstance(b, ToolResultContentBlock)]
+    payload = {
+        "type": "tool_result",
+        "id": tool_block.id,
+        "name": tool_block.name,
+        "input": tool_block.input,
+        "output": "\n".join(outputs),
+        "is_error": True,
+        "denied": True,
+    }
+    if tool_block.name == "present_plan":
+        payload["plan_rejected"] = True
+    emit(payload)
+
+
 def load_runtime_for(web_session: WebSession) -> None:
     """组装 runtime: 有历史则先恢复（与 CLI 共享同一份存储）。"""
     if web_session.runtime is not None:
@@ -667,6 +681,10 @@ def load_runtime_for(web_session: WebSession) -> None:
         permission_mode=web_session.permission_mode,
     )
     web_session.runtime.set_thinking_level(web_session.thinking_level)
+    # 未经执行就被终局的工具（权限拒绝 / hook 拦截 / prompter 拒绝）:
+    # 补发 tool_result 镜像, 前端工具卡才能闭合——否则永远"运行中"。
+    # executed 路径不经此处（EmittingToolRegistry 已发）, 不会双发。
+    web_session.runtime.set_on_tool_finalized(_emit_finalized_tool_result)
     web_session.last_uuid = last_uuid
     # 增量落盘: 历史一致点即写盘, 输出中强杀/崩溃最多丢最后一次一致点
     # 之后的内容, 不再是整轮。压缩会重写内存历史使追加式存储失准,

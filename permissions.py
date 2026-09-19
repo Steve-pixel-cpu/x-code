@@ -68,6 +68,8 @@ class PermissionRequest(BaseModel):
     input: str
     current_mode: PermissionMode
     required_mode: PermissionMode
+    # 镜像方（如 Web 端）配对工具卡用: 授权询问/拒绝时知道结果该落到哪张卡
+    tool_use_id: Optional[str] = None
 
 # Prompter 接口 — 用 Protocol 不用 ABC
 # Protocol 不需要继承，只要有 decide() 方法就行（鸭子类型）
@@ -100,7 +102,8 @@ class PermissionPolicy:
         self._active_mode = mode
         return self
 
-    def authorize(self, tool_name: str, input: str, prompter: Optional[PermissionPrompter] = None,) -> PermissionResult:
+    def authorize(self, tool_name: str, input: str, prompter: Optional[PermissionPrompter] = None,
+                  tool_use_id: Optional[str] = None) -> PermissionResult:
         current = self.active_mode
         required = self.required_mode_for(tool_name)
 
@@ -114,7 +117,8 @@ class PermissionPolicy:
             request = PermissionRequest(tool_name = tool_name,
                                         input = input,
                                         current_mode= current,
-                                        required_mode = required )
+                                        required_mode = required,
+                                        tool_use_id = tool_use_id )
             if prompter is not None:
                 return prompter.decide(request)
             return PermissionResult(decision= PermissionDecision.DENY,
@@ -126,7 +130,8 @@ class PermissionPolicy:
         request = PermissionRequest(tool_name = tool_name,
                                     input = input,
                                     current_mode= current,
-                                    required_mode = required )
+                                    required_mode = required,
+                                    tool_use_id = tool_use_id )
 
 
         # "可升级弹问"分支（相邻档位）: 当前档差一档且目标可议时交给

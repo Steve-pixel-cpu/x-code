@@ -262,16 +262,40 @@ def test_web_prompter_plan_rejection_returns_revision_reason(client, isolated_st
         prompter.resolve(events[0]["request_id"], False)
         th.join(timeout=2)
         # decide 返回值在线程里拿不到, 断言拒绝路径的副作用:
-        # 升级回调未跑 + denied tool_result 不推（计划卡自己渲染拒绝态）
+        # 升级回调未跑; prompter 本身不再推 denied tool_result——
+        # 该镜像统一由 runtime 的 on_tool_finalized 回调发射
+        # （server._emit_finalized_tool_result, 见下方专用测试）
         assert ran == []
-        # 拒绝理由必须回流给模型: tool_result 照推, 但带 plan_rejected
-        # 标记（前端计划卡自己渲染拒绝态, 不再补失败工具卡）
-        denied = [e for e in events if e.get("denied")]
-        assert len(denied) == 1
-        assert denied[0]["plan_rejected"] is True
-        assert "Revise" in denied[0]["output"] or "revise" in denied[0]["output"]
+        assert [e for e in events if e["type"] == "tool_result"] == []
     finally:
         server._sessions.clear()
+
+
+def test_finalize_callback_emits_plan_rejected_marker(client, isolated_store):
+    """present_plan 被拒: 终局回调发的 tool_result 带 plan_rejected 标记
+    （前端计划卡自己渲染拒绝态, 不再补失败工具卡）, 理由回流给模型。"""
+    import server
+    from models import Message, ToolContentBlock
+
+    out = []
+    server.dispatch.bind(out.append)
+    try:
+        block = ToolContentBlock(id="plan-1", name="present_plan",
+                                 input="{}")
+        result = Message.tool_result(id="plan-1", name="present_plan",
+                                     output="Plan rejected by the user. "
+                                     "Revise the plan per the feedback.",
+                                     is_error=True)
+        server._emit_finalized_tool_result(block, result)
+    finally:
+        server.dispatch.unbind()
+    assert len(out) == 1
+    payload = out[0]
+    assert payload["type"] == "tool_result"
+    assert payload["id"] == "plan-1"
+    assert payload["plan_rejected"] is True
+    assert payload["is_error"] is True
+    assert "Revise" in payload["output"] or "revise" in payload["output"]
 
 
 def test_start_turn_wires_upgrade_callback(client, isolated_store, monkeypatch):
