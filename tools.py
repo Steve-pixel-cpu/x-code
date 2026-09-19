@@ -237,8 +237,10 @@ def write_tool(params: dict, workdir: Optional[str] = None) -> str:
 
 def present_plan_tool(params: dict, workdir: Optional[str] = None) -> str:
     """present_plan 的直通 handler: 正常流程在授权层就被拦截（plan 模式
-    弹问计划卡, 其余模式放行后模型继续干别的事）。防御性兜底: 真到执行
-    也返回确认文案, 让轮次平稳收束。"""
+    弹计划卡, 用户批准后才放行到这里; 其余模式直接放行）。能执行到这一步
+    就意味着计划已获批准——返回文案必须明确告诉模型开始实施, 否则它会
+    再次提交计划、停在"等待批准"。"""
     plan = str(params.get("plan", "")).strip()
     n = len(plan.splitlines()) if plan else 0
-    return f"Plan received ({n} lines)."
+    return (f"Plan received ({n} lines). The user has APPROVED your plan - "
+            "start implementing it right away. Do not call present_plan again.")
