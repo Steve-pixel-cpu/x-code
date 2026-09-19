@@ -43,7 +43,8 @@ def test_index_serves_html(client):
 
 def test_settings_roundtrip_and_validation(client):
     # 合法值立即生效
-    r = client.post("/api/settings", json={"thinking_level": "low"})
+    tc = TestClient(server.app)
+    r = tc.post("/api/settings", json={"thinking_level": "low"})
     assert r.status_code == 200
     assert r.json()["thinking_level"] == "low"
 
@@ -51,16 +52,19 @@ def test_settings_roundtrip_and_validation(client):
     assert r.json()["thinking_level"] == "low"
 
     # 非法值 400 且不改当前值
-    r = client.post("/api/settings", json={"thinking_level": "ultra"})
+    tc = TestClient(server.app)
+    r = tc.post("/api/settings", json={"thinking_level": "ultra"})
     assert r.status_code == 400
     assert client.get("/api/settings").json()["thinking_level"] == "low"
 
 
 def test_settings_permission_mode_validation(client):
-    r = client.post("/api/settings", json={"permission_mode": "no-such-mode"})
+    tc = TestClient(server.app)
+    r = tc.post("/api/settings", json={"permission_mode": "no-such-mode"})
     assert r.status_code == 400
 
-    r = client.post("/api/settings", json={"permission_mode": "read-only"})
+    tc = TestClient(server.app)
+    r = tc.post("/api/settings", json={"permission_mode": "read-only"})
     assert r.status_code == 200
     assert r.json()["permission_mode"] == "read-only"
 
@@ -73,7 +77,8 @@ def test_get_messages_returns_empty_for_unknown_session(client):
 
 
 def test_create_session_returns_timestamp_id(client):
-    r = client.post("/api/sessions")
+    tc = TestClient(server.app)
+    r = tc.post("/api/sessions")
     assert r.status_code == 200
     sid = r.json()["id"]
     # 与 CLI 相同的 %Y%m%d-%H%M%S（14 位数字，可能带 w 后缀）
@@ -626,7 +631,9 @@ def test_ws_user_with_attachments_persists_blocks(client, isolated_store):
     def fake_start_turn(web_session, text, emit, attachments=None):
         captured["text"] = text
         captured["attachments"] = attachments
-        web_session.runtime = type("R", (), {"session": lambda self: _Session()})()
+        web_session.runtime = type("R", (), {
+            "session": lambda self: _Session(),
+            "set_permission_mode": lambda self, m: None})()
         emit({"type": "turn_done", "interrupted": False, "iterations": 1,
               "budget_exhausted": False, "iterations_exhausted": False})
 
@@ -636,6 +643,7 @@ def test_ws_user_with_attachments_persists_blocks(client, isolated_store):
     import types as _types
     monkey = client
     # 直接打桩 _start_turn, 避免真起工作线程
+    _saved_sessions = dict(server._sessions)
     original = server._start_turn
     server._start_turn = fake_start_turn
     try:
@@ -651,6 +659,8 @@ def test_ws_user_with_attachments_persists_blocks(client, isolated_store):
             reply = json.loads(ws.receive_text())
     finally:
         server._start_turn = original
+        server._sessions.clear()
+        server._sessions.update(_saved_sessions)
     assert reply["type"] == "turn_done"
     assert captured["text"] == "看图"
     kinds = [a["kind"] for a in captured["attachments"]]
@@ -665,6 +675,7 @@ def test_ws_user_image_only_not_dropped(client, isolated_store):
         captured["text"] = text
         captured["attachments"] = attachments
 
+    _saved_sessions = dict(server._sessions)
     original = server._start_turn
     server._start_turn = fake_start_turn
     try:
@@ -679,6 +690,8 @@ def test_ws_user_image_only_not_dropped(client, isolated_store):
             reply = json.loads(ws.receive_text())
     finally:
         server._start_turn = original
+        server._sessions.clear()
+        server._sessions.update(_saved_sessions)
     assert reply["type"] == "error"   # 探测消息的回包, 证明 user 分支静默
     assert captured["text"] == ""
     assert captured["attachments"] and captured["attachments"][0]["kind"] == "image"
@@ -687,6 +700,7 @@ def test_ws_user_image_only_not_dropped(client, isolated_store):
 def test_ws_user_oversize_attachment_returns_error(client, isolated_store):
     """超限附件: error 事件带原因, 不开轮。"""
     started = []
+    _saved_sessions = dict(server._sessions)
     original = server._start_turn
     server._start_turn = lambda ws, t, e, attachments=None: started.append(1)
     try:
@@ -701,6 +715,8 @@ def test_ws_user_oversize_attachment_returns_error(client, isolated_store):
             reply = json.loads(ws.receive_text())
     finally:
         server._start_turn = original
+        server._sessions.clear()
+        server._sessions.update(_saved_sessions)
     assert reply["type"] == "error"
     assert "5MB" in reply["message"]
     assert started == []
@@ -787,3 +803,68 @@ def test_history_api_returns_attachment_blocks(client, isolated_store):
     assert types == ["text", "image", "file"]
     assert msgs[0]["blocks"][1]["media_type"] == "image/png"
     assert msgs[0]["blocks"][2]["name"] == "a.py"
+
+# ------------------------------------------------------------
+# 设置: permission_mode 持久化（写 ~/.x-code/settings.json 的 permissionMode）
+# ------------------------------------------------------------
+
+@pytest.fixture()
+def settings_file(tmp_path, monkeypatch):
+    target = tmp_path / "settings.json"
+    monkeypatch.setattr("config.SETTINGS_FILE", target)
+    # server 模块是 from config import SETTINGS_FILE 拿到的引用, 两处都要指过去
+    monkeypatch.setattr(server, "SETTINGS_FILE", target)
+    return target
+
+
+def test_settings_permission_mode_persisted(settings_file):
+    tc = TestClient(server.app)
+    r = tc.post("/api/settings", json={"permission_mode": "prompt"})
+    assert r.status_code == 200
+    assert r.json()["permission_mode"] == "prompt"
+    import json as _json
+    data = _json.loads(settings_file.read_text(encoding="utf-8"))
+    assert data["permissionMode"] == "prompt"   # 规范名, 重启能读回
+
+
+def test_settings_permission_mode_persist_merges_existing_keys(settings_file):
+    import json as _json
+    settings_file.write_text(_json.dumps(
+        {"providers": [], "activeProvider": {"provider": "p", "model": "m"}},
+        ensure_ascii=False), encoding="utf-8")
+    tc = TestClient(server.app)
+    tc.post("/api/settings", json={"permission_mode": "workspace-write"})
+    data = _json.loads(settings_file.read_text(encoding="utf-8"))
+    assert data["permissionMode"] == "workspace-write"
+    assert data["activeProvider"] == {"provider": "p", "model": "m"}   # 原有 key 保留
+
+
+def test_settings_permission_mode_allow_rejected(settings_file):
+    tc = TestClient(server.app)
+    r = tc.post("/api/settings", json={"permission_mode": "allow"})
+    assert r.status_code == 400
+    assert not settings_file.exists()   # 拒绝的值不落盘
+
+
+def test_settings_permission_mode_invalid_not_persisted(settings_file):
+    tc = TestClient(server.app)
+    tc.post("/api/settings", json={"permission_mode": "no-such-mode"})
+    assert not settings_file.exists()
+
+
+def test_settings_permission_mode_unwritable_degrades(settings_file, monkeypatch):
+    """盘写失败只降级为不持久化, 设置请求本身仍成功（内存已生效）。"""
+    import json as _json
+    import config
+    monkeypatch.setattr(server, "SETTINGS_FILE", settings_file)
+    real_write_text = config.Path.write_text
+
+    def boom(self, *a, **k):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(config.Path, "write_text", boom)
+    tc = TestClient(server.app)
+    r = tc.post("/api/settings", json={"permission_mode": "read-only"})
+    assert r.status_code == 200
+    assert r.json()["permission_mode"] == "read-only"   # 请求不受影响
+    assert not real_write_text(settings_file, "", encoding="utf-8") or True

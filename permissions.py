@@ -102,8 +102,23 @@ class PermissionPolicy:
         current = self.active_mode
         required = self.required_mode_for(tool_name)
 
-        # 快速路径: Allow 模式或当前权限足够
-        if current == PermissionMode.ALLOW or current >= required:
+        # 快速路径: Allow 模式跳过一切; 其余模式仅在"当前权限足够"时放行。
+        # PROMPT(4) 数值上 >= 大多数 required, 但它的语义是"每次都问",
+        # 不是"权限更高"——必须赶在 >= 比较之前拦截, 否则 prompt 模式
+        # 形同虚设(所有工具默认 required=DANGER_FULL_ACCESS < 4, 全被放行)。
+        if current == PermissionMode.ALLOW:
+            return PermissionResult(decision= PermissionDecision.ALLOW, reason= "")
+        if current == PermissionMode.PROMPT:
+            request = PermissionRequest(tool_name = tool_name,
+                                        input = input,
+                                        current_mode= current,
+                                        required_mode = required )
+            if prompter is not None:
+                return prompter.decide(request)
+            return PermissionResult(decision= PermissionDecision.DENY,
+                                    reason= f"tool '{tool_name}' requires approval "
+                                    f"(prompt mode) but no prompter is available")
+        if current >= required:
             return PermissionResult(decision= PermissionDecision.ALLOW, reason= "")
 
         request = PermissionRequest(tool_name = tool_name,
@@ -112,7 +127,7 @@ class PermissionPolicy:
                                     required_mode = required )
 
 
-        if current == PermissionMode.PROMPT or (current == PermissionMode.WORKSPACE_WRITE and required == PermissionMode.DANGER_FULL_ACCESS):
+        if current == PermissionMode.WORKSPACE_WRITE and required == PermissionMode.DANGER_FULL_ACCESS:
             if prompter is not None:
                 return prompter.decide(request)
             else:

@@ -1212,7 +1212,12 @@ async def api_post_settings(request: dict):
                 status_code=400,
                 detail=f"未知权限模式: {mode_name}（可选: {' | '.join(MODE_TO_NAME.values())}）",
             )
+        if mode == ALLOW_MODE:
+            # 与 CLI 配置口径一致: allow 连将来需要问的工具也一并放行,
+            # 不允许从设置界面进入（REPL /mode allow 临时开启不受影响）
+            raise HTTPException(status_code=400, detail="allow 模式不允许从设置进入")
         app_state.set_permission_mode(mode)
+        _save_permission_mode(mode)
         # 存活中的会话 runtime 也一并切换（与 CLI /mode 即时生效对齐）
         for web_session in _sessions.values():
             if web_session.runtime is not None:
@@ -1227,6 +1232,29 @@ async def api_post_settings(request: dict):
         _apply_provider_config(_provider_cfg)
 
     return await api_get_settings()
+
+
+def _save_permission_mode(mode: PermissionMode) -> None:
+    """权限模式持久化到 ~/.x-code/settings.json 的 permissionMode key。
+
+    值用 resolve_permission_mode / config mode_map 认的规范名, 重启后能原样
+    读回; 不写 "allow"（同 POST 入口, 配置口径拒绝它）。读写都走
+    config.SETTINGS_FILE, 测试 monkeypatch 该路径即可隔离。
+    失败只降级为不持久化（本轮内存里仍生效）, 不打断设置请求。
+    """
+    try:
+        data = json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            data = {}
+    except (OSError, ValueError):
+        data = {}
+    data["permissionMode"] = MODE_TO_NAME[mode]
+    try:
+        SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        SETTINGS_FILE.write_text(
+            json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    except OSError:
+        pass
 
 
 # ============================================================================
