@@ -2,7 +2,7 @@
 //   - 端口 8000 上已有 x-code 服务在跑 → 直接复用, 不拉进程、退出时不杀
 //   - 否则拉起 .venv 里的 python server.py 作为子进程, 退出时整树杀掉
 //   - 窗口只加载本地服务; 外部链接一律转交系统浏览器, 防止窗口被带跑
-const { app, BrowserWindow, shell, dialog, Menu, ipcMain, session } = require("electron");
+const { app, BrowserWindow, shell, dialog, Menu, ipcMain, session, clipboard } = require("electron");
 const { spawn } = require("child_process");
 const path = require("path");
 const fs = require("fs");
@@ -216,6 +216,8 @@ if (!gotLock) {
                     : await dialog.showOpenDialog(opts);
     return res.canceled ? null : res.filePaths[0];
   });
+  // 系统剪贴板文本（渲染层右键"粘贴"用; execCommand('paste') 在渲染层被禁）
+  ipcMain.handle("read-clipboard-text", () => clipboard.readText());
   app.on("second-instance", () => {
     if (win) {
       if (win.isMinimized()) win.restore();

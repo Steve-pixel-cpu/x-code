@@ -510,9 +510,9 @@ function confirmDialog(msg, { title = "确认操作", okText = "确定", danger 
  * 桌面端右键菜单 — 复制/粘贴, 只显示当前可用的项:
  * 有选中文字 → 复制; 右键输入框/可编辑区 → 粘贴; 都没有 → 不弹。
  * 自注册 contextmenu 监听（松开右键时触发, 与原生菜单同时机）:
- * 原生菜单由 Rust 设置层掐掉, preventDefault 只作双保险。
+ * Electron 壳无原生右键菜单, preventDefault 只是拦掉默认行为作双保险。
  * 复制走 execCommand（复制用户当前选区, 无需剪贴板写权限）;
- * 粘贴经 clipboard 插件在 Rust 侧读系统剪贴板, insertText 走编辑
+ * 粘贴经 preload 桥在主进程读系统剪贴板, insertText 走编辑
  * 命令栈——可撤销, 且正常触发 input 事件。
  * ============================================================ */
 function closeCtxMenu() {
@@ -579,9 +579,14 @@ function showDesktopCtxMenu(ev) {
     item("复制", "Ctrl+C", hasSel, edit("copy"));
     item("粘贴", "Ctrl+V", true, async () => {
       try {
-        const text = (await window.__TAURI_INTERNALS__.invoke(
-          "plugin:clipboard-manager|read_text")) || "";
+        // Electron: 经 preload 桥在主进程读系统剪贴板（渲染层 execCommand('paste')
+        // 受浏览器安全模型限制不可用）; 旧壳无桥时退回 async Clipboard API。
+        // insertText 走编辑命令栈——可撤销, 且正常触发 input 事件
+        const text = (window.xcodeReadClipboard
+          ? await window.xcodeReadClipboard()
+          : await navigator.clipboard.readText()) || "";
         editable.focus();
+        if (!text) { toast("剪贴板是空的"); return; }
         if (!document.execCommand("insertText", false, text)) toast("粘贴失败");
       } catch (e) { toast("粘贴失败"); }
     });
