@@ -339,13 +339,11 @@
   if (pref.dock) $("music-dock").hidden = false;
 
   $("btn-music").onclick = () => {
-    if ($("music-dock").hidden) {          // 第一次: 亮出停靠播放条
-      showDock(true);
-    } else if ($("music-panel").hidden) {
-      openMusicPanel();
-    } else {
-      closeMusicPanel();
-    }
+    // 二元开关: 有任何弹窗/播放条开着 → 一键全关; 全关 → 亮出播放条。
+    // 旧的三态循环(面板只关自己、播放条永远留着)回不到干净状态。
+    // showDock(false) 顺带关面板 + savePref, 重启后不再自动恢复。
+    const allClosed = $("music-dock").hidden && $("music-panel").hidden;
+    showDock(allClosed);
   };
   $("music-hide").onclick = () => showDock(false);
   $("music-toggle").onclick = () => {

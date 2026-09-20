@@ -76,6 +76,59 @@ state.customProjects = JSON.parse(localStorage.getItem("xc-projects") || "[]");
 state.collapsedProjects = new Set(JSON.parse(localStorage.getItem("xc-collapsed") || "[]"));
 state.draftInput = "";   // 草稿态未发送的输入
 
+/* ============================================================
+ * 侧栏拖拽调宽: 左会话栏(--side-w) / 右计划面板(--plan-w)
+ * 拖边实时改 CSS 变量, 松手存 localStorage, 双击手柄复位默认值
+ * ============================================================ */
+const SIDE_W = { min: 200, max: 480, reserve: 420, key: "xc-side-w", prop: "--side-w" };
+const PLAN_W = { min: 300, max: 720, reserve: 420, key: "xc-plan-w", prop: "--plan-w" };
+
+function applyColWidth(pref, px) {
+  const clamped = Math.max(pref.min,
+    Math.min(px, pref.max, window.innerWidth - pref.reserve));
+  document.documentElement.style.setProperty(pref.prop, Math.round(clamped) + "px");
+  return Math.round(clamped);
+}
+function restoreColWidth(pref) {
+  const saved = Number(localStorage.getItem(pref.key));
+  if (saved >= pref.min) {
+    document.documentElement.style.setProperty(pref.prop, saved + "px");
+  }
+}
+function attachColResize(handle, panel, pref, dir) {
+  if (!handle || !panel) return;   // loading 页等无此结构
+  handle.addEventListener("dblclick", () => {
+    localStorage.removeItem(pref.key);
+    document.documentElement.style.removeProperty(pref.prop);
+  });
+  handle.addEventListener("pointerdown", (e) => {
+    e.preventDefault();
+    handle.setPointerCapture(e.pointerId);
+    const startX = e.clientX;
+    const startW = panel.getBoundingClientRect().width;
+    handle.classList.add("dragging");
+    document.body.classList.add("col-resizing");
+    const move = (ev) =>
+      applyColWidth(pref, startW + (ev.clientX - startX) * dir);
+    const up = () => {
+      handle.classList.remove("dragging");
+      document.body.classList.remove("col-resizing");
+      handle.removeEventListener("pointermove", move);
+      handle.removeEventListener("pointerup", up);
+      handle.removeEventListener("pointercancel", up);
+      localStorage.setItem(pref.key, String(
+        panel.getBoundingClientRect().width));
+    };
+    handle.addEventListener("pointermove", move);
+    handle.addEventListener("pointerup", up);
+    handle.addEventListener("pointercancel", up);
+  });
+}
+restoreColWidth(SIDE_W);
+restoreColWidth(PLAN_W);
+attachColResize($("side-resize"), $("sidebar"), SIDE_W, +1);
+attachColResize($("plan-resize"), $("plan-panel"), PLAN_W, -1);
+
 /* 输入框内容跟随会话: 切走前保存, 切回后恢复 */
 function saveCurrentInput() {
   const v = $("input").value;
@@ -332,16 +385,16 @@ function resolvedTheme() {
   if (pref === "acrylic" || pref === "acrylic-light") return pref === "acrylic" ? "dark" : "light";
   return pref === "system" ? (mqDark.matches ? "dark" : "light") : pref;
 }
-/* 亚克力主题: 深浅底色之上的材质开关（半透明表面 + 全屏磨砂 + 壁纸透出）。
- * "跟随系统"时亚克力跟 resolvedTheme 走——深浅切换实时更新材质。 */
-const FX_KEY = "xc-fx";
-const fxPref = () => localStorage.getItem(FX_KEY) === "acrylic" ? "acrylic" : "";
+/* 亚克力主题: 半透明表面 + 窗口级 DWM 材质(桌面透出) + 壁纸透出。
+ * 是否亚克力由主题值直接派生(acrylic / acrylic-light), 无独立开关。 */
 /* 背景图开关状态: applyFx 启动早期就会经 syncBgLayers 读到, 必须先于此初始化 */
 const BG_KEY = "xc-bg";
 let bgVer = 0;
 function applyFx() {
-  const fx = fxPref();
-  if (fx) document.documentElement.dataset.fx = fx;
+  // 注意: 不能引入独立开关再读它——曾有过只读不写的 xc-fx key, 导致
+  // applyFx 恒走 else 分支把 head 预绘制脚本设置的 data-fx 删掉,
+  // 亚克力主题永远不生效。data-fx 的唯一事实来源 = 主题值。
+  if (themeIsAcrylic()) document.documentElement.dataset.fx = "acrylic";
   else delete document.documentElement.dataset.fx;
   // 背景图逻辑声明在文件后部; 函数声明会提升, 此时其状态变量已就绪, 可直接调
   syncBgLayers();

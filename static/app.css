@@ -120,14 +120,13 @@
   }
 
   /* ============ 亚克力主题: data-fx="acrylic" 叠加在当前深浅底色上 ============
-   * 表面令牌全部转为半透明, 让"壁纸 → 遮罩 → 磨砂"这三层透出来。
-   * 层次: 壁纸直接铺在 body 上（JS 写 inline background）, #bg-scrim 与
-   * #bg-frost 用 z-index:-1 垫在所有 UI 之下（负 z-index 绘制于普通流
-   * 内容之前）——磨砂由全屏 #bg-frost 一个元素统一提供, 不给每个表面
-   * 单独加 blur: 层叠模糊代价高, 嵌套 backdrop-filter 在 WebView2 上
-   * 表现也不一致。 */
+   * 磨砂主体是窗口级 DWM 材质（壳侧 transparent + Acrylic, 桌面透出）;
+   * 表面令牌全部转为半透明让材质/壁纸透出来。有壁纸时壁纸直接铺在
+   * body 上（JS 写 inline background）, #bg-scrim 与 #bg-frost 用
+   * z-index:-1 垫在所有 UI 之下, 由全屏 #bg-frost 一个元素统一柔化
+   * 壁纸——不给每个表面单独加 blur: 层叠模糊代价高, 嵌套
+   * backdrop-filter 在 WebView2 上表现也不一致。 */
   :root[data-fx="acrylic"] {
-    --bg-solid: #101014;                  /* body 垫底色（无壁纸时磨砂的模糊对象） */
     --bg: rgba(16, 16, 20, .72);
     --bg-side: rgba(11, 11, 15, .74);
     --surface: rgba(23, 23, 29, .78);
@@ -143,7 +142,6 @@
     --titlebar-tint: rgba(11, 11, 15, .66);
   }
   :root[data-theme="light"][data-fx="acrylic"] {
-    --bg-solid: #ffffff;
     --bg: rgba(255, 255, 255, .72);
     --bg-side: rgba(247, 247, 248, .76);
     --surface: rgba(255, 255, 255, .78);
@@ -158,7 +156,9 @@
     --header-tint: rgba(255, 255, 255, .56);
     --titlebar-tint: rgba(247, 247, 248, .68);
   }
-  :root[data-fx="acrylic"] body { background-color: var(--bg-solid); }
+  /* body 必须透明: 亚克力的磨砂来自 DWM 窗口材质(桌面透出), 页面画任何
+   * 不透明垫底色都会把材质挡住。 */
+  :root[data-fx="acrylic"] body { background: transparent; }
   :root[data-fx="acrylic"] #sidebar { background: var(--side-tint); }
   :root[data-fx="acrylic"] #pane { background: var(--pane-tint); }
   :root[data-fx="acrylic"] #titlebar { background: var(--titlebar-tint); }
@@ -188,7 +188,9 @@
   }
   :root[data-bg="1"] #bg-scrim { display: block; background: var(--bg-scrim); }
   #bg-frost { backdrop-filter: blur(46px) saturate(1.4); }
-  :root[data-fx="acrylic"] #bg-frost { display: block; }
+  /* 页面内磨砂只服务壁纸(backdrop-filter 够不到窗口外的桌面): 亚克力无壁纸
+   * 时模糊对象是透明窗外的 DWM 材质, 页面这层开着只会白耗 GPU。 */
+  :root[data-fx="acrylic"][data-bg="1"] #bg-frost { display: block; }
 
   * { box-sizing: border-box; margin: 0; padding: 0; }
   input[type="checkbox"], input[type="radio"] { accent-color: var(--accent); }
@@ -218,7 +220,8 @@
 
   /* ============ 左侧栏 ============ */
   #sidebar {
-    width: 268px; flex: none; display: flex; flex-direction: column;
+    width: var(--side-w, 268px); flex: none; display: flex; flex-direction: column;
+    position: relative;
     padding-top: 10px;   /* 顶部留白: 窗口标题栏已含应用名, 侧栏不再放品牌行 */
     background: var(--bg-side); border-right: 1px solid var(--border);
   }
@@ -1606,17 +1609,18 @@
 
 /* ============ 右侧计划面板: present_plan 审阅视图 ============
    #pane.plan-open 时主区切两栏网格(聊天列收窄), 计划全文+审批独立成栏,
-   对齐"计划内容渲染在页面右边"的交互。收起时布局与原先完全一致。 */
+   对齐"计划内容渲染在页面右边"的交互。收起时布局与原先完全一致。
+   面板宽度走 --plan-w(拖左缘手柄可调, 双击复位), 未拖过保持原 440px。 */
 #pane.plan-open {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) min(440px, 44%);
+  grid-template-columns: minmax(0, 1fr) var(--plan-w, min(440px, 44%));
   grid-template-rows: auto minmax(0, 1fr) auto;
 }
 #pane.plan-open > #doc-header { grid-column: 1; grid-row: 1; }
 #pane.plan-open > #messages { grid-column: 1; grid-row: 2; }
 #pane.plan-open > #composer { grid-column: 1; grid-row: 3; }
-#pane.plan-open > #scroll-btn { right: calc(min(440px, 44%) + 34px); }
-#pane.plan-open > #msg-scrollbar { right: calc(min(440px, 44%) + 10px); }
+#pane.plan-open > #scroll-btn { right: calc(var(--plan-w, min(440px, 44%)) + 34px); }
+#pane.plan-open > #msg-scrollbar { right: calc(var(--plan-w, min(440px, 44%)) + 10px); }
 
 #plan-panel {
   display: none;
@@ -1627,11 +1631,32 @@
   grid-row: 1 / -1;
   display: flex;
   flex-direction: column;
+  position: relative;
   min-width: 0;
   border-left: 1px solid var(--border-strong);
   background: var(--bg);
   animation: msg-in .22s ease;
 }
+
+/* ---- 拖拽调宽手柄: 贴边的透明竖条, hover/拖动中显强调色细线 ---- */
+#side-resize, #plan-resize {
+  position: absolute; top: 0; bottom: 0; width: 7px;
+  cursor: col-resize; z-index: 70; touch-action: none;
+}
+#side-resize { right: -4px; }
+#plan-resize { left: -4px; }
+#side-resize::after, #plan-resize::after {
+  content: ""; position: absolute; top: 0; bottom: 0; width: 2px;
+  background: transparent; transition: background .12s;
+}
+#side-resize::after { right: 2px; }
+#plan-resize::after { left: 2px; }
+#side-resize:hover::after, #side-resize.dragging::after,
+#plan-resize:hover::after, #plan-resize.dragging::after {
+  background: var(--accent);
+}
+/* 拖动中: 全局光标统一, 防止路过文本时变 I-beam */
+body.col-resizing, body.col-resizing * { cursor: col-resize !important; }
 #plan-head {
   display: flex; align-items: center; gap: 8px;
   padding: 12px 16px;

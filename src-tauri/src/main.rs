@@ -16,6 +16,7 @@ use std::process::{Child, Command, Stdio};
 use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
+use tauri::window::{Effect, WindowEffectsConfig};
 use tauri::{AppHandle, Manager, RunEvent, WebviewUrl, WebviewWindowBuilder};
 use tauri_plugin_opener::OpenerExt;
 
@@ -414,6 +415,18 @@ fn create_main_window(app: &AppHandle) -> Result<(), String> {
     WebviewWindowBuilder::new(app, "main", WebviewUrl::App("loading.html".into()))
         .title("x-code")
         .decorations(false)   // 自绘标题栏: 高度可控, 主题跟随应用深浅色
+        // 窗口级亚克力: 窗口与 WebView2 背景透明, 桌面经 DWM ACRYLICBLURBEHIND
+        // 模糊透出。材质无条件挂载是安全的——普通深浅主题页面画的是不透明
+        // 背景, 材质被盖住不可见; 只有切到亚克力主题(页面变透明)时才透出,
+        // 主题切换无需重启壳。Win10 已知取舍: 拖动窗口时材质有轻微滞后,
+        // 不能接受可把 Effect::Acrylic 换成 Effect::Blur(无滞后, 少质感)。
+        .transparent(true)
+        .effects(WindowEffectsConfig {
+            effects: vec![Effect::Acrylic],
+            state: None,
+            radius: None,
+            color: None,
+        })
         .inner_size(1440.0, 900.0)
         .min_inner_size(960.0, 600.0)
         .visible(false) // 页面就绪后再显示, 避免白屏闪烁
