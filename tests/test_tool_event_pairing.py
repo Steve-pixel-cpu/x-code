@@ -347,3 +347,28 @@ def test_mixed_batch_denied_and_executed_all_pair(client, isolated_store, monkey
     assert by_id["m-denied"]["denied"] is True
     assert not by_id["m-ok-1"].get("denied")
     assert not by_id["m-ok-2"].get("denied")
+
+
+def test_tool_use_started_镜像先于tool_use(client, isolated_store, monkeypatch):
+    """大参数的工具 JSON 流式期（content_block_start → stop 之间）可达几十秒,
+    此前前端在这段时间无任何活动指示（转圈已收、卡片未建）, 像卡死。
+    修复: 块开始即镜像 tool_use_started, 前端提前建"运行中"工具卡;
+    顺序必须是 started 在前、完整 tool_use 在后, id 一致。"""
+    _install(monkeypatch,
+             script=[_tool_turn(("tu-early", "echo_test", '{"n": 1}')), _text_turn()],
+             tool_results={})
+    with client.websocket_connect("/ws/s-early") as ws:
+        sid = "s-early"
+        ws.send_json({"type": "user", "text": "提前建卡"})
+        events = _drain_until_turn_done(ws, sid)
+
+    started_idx = next(i for i, e in enumerate(events)
+                       if e["type"] == "tool_use_started")
+    use_idx = next(i for i, e in enumerate(events)
+                   if e["type"] == "tool_use")
+    assert started_idx < use_idx                       # 先建卡, 后补全参数
+    started = events[started_idx]
+    assert started["id"] == "tu-early"
+    assert started["name"] == "echo_test"
+    assert "input" not in started or not started.get("input")   # 此刻参数还没传完
+    _assert_pairing(events)                            # 原有配对语义不受影响

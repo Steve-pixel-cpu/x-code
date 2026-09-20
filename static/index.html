@@ -14,7 +14,7 @@
 <script src="/static/vendor/highlight.min.js"></script>
 <link rel="stylesheet" href="/static/vendor/katex.min.css">
 <script src="/static/vendor/katex.min.js"></script>
-<link rel="stylesheet" href="/static/app.css?v=20260920i">
+<link rel="stylesheet" href="/static/app.css?v=20260921b">
 </head>
 <body>
 
@@ -66,6 +66,47 @@
     <div id="session-list"></div>
   </div>
 
+  <!-- 摸鱼电台: 侧栏底部迷你播放条（底栏音符图标开/关, 歌单面板从其上方弹出） -->
+  <div id="music-dock" hidden>
+    <div class="md-progress" id="music-seek"><span id="music-progress-fill"></span></div>
+    <div class="md-row">
+      <img id="music-cover" src="/static/icon.png" alt="" draggable="false">
+      <div class="md-meta">
+        <span id="music-title">未在播放</span>
+        <span id="music-artist"></span>
+      </div>
+      <button class="mb-btn" id="music-hide" data-tip="收起播放条">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>
+      </button>
+    </div>
+    <div class="md-ctrls">
+      <button class="mb-btn" id="music-mode-btn" data-tip="播放模式">
+        <svg class="ic-order" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h11M4 12h7M4 17h7"/><path d="M17 4l3 3-3 3M20 14l-3 3 3 3"/></svg>
+        <svg class="ic-one" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" style="display:none"><path d="M4 7h11M4 12h7M4 17h7"/><path d="M18 4l3 3-3 3"/><rect x="17" y="12" width="4" height="8" rx="1"/><path d="M17 14.5c.4-1 2.6-1 3 0"/></svg>
+        <svg class="ic-shuffle" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" style="display:none"><path d="M3 6h3.5c5.5 0 8 12 13.5 12H21M21 6h-1c-3.2 0-5.4 3-6.6 6M3 18h3.5c1.9 0 3.4-1.5 4.6-3.2"/><path d="M18 3l3 3-3 3M18 15l3 3-3 3"/></svg>
+      </button>
+      <button class="mb-btn" id="music-prev" data-tip="上一首">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><path d="M6 5h2.4v14H6zM20 5.8v12.4c0 .8-.9 1.3-1.6.8l-8.5-6.2c-.6-.4-.6-1.2 0-1.6l8.5-6.2c.7-.5 1.6 0 1.6.8z"/></svg>
+      </button>
+      <button class="mb-btn mb-play" id="music-toggle" data-tip="播放/暂停">
+        <svg class="ic-play" width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M7 4.8v14.4c0 .8.9 1.3 1.6.8l11-7.2c.6-.4.6-1.3 0-1.6l-11-7.2c-.7-.5-1.6 0-1.6.8z"/></svg>
+        <svg class="ic-pause" width="14" height="14" viewBox="0 0 24 24" fill="currentColor" style="display:none"><path d="M6 4h4v16H6zM14 4h4v16h-4z"/></svg>
+      </button>
+      <button class="mb-btn" id="music-next" data-tip="下一首">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><path d="M15.6 5H18v14h-2.4zM4 5.8v12.4c0 .8.9 1.3 1.6.8l8.5-6.2c.6-.4.6-1.2 0-1.6L5.6 5c-.7-.5-1.6 0-1.6.8z"/></svg>
+      </button>
+      <button class="mb-btn" id="music-list-btn" data-tip="播放列表">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><path d="M4 6h12M4 12h12M4 18h7"/><circle cx="17.5" cy="16.5" r="2.5"/><path d="M20 16.5V8l2-1"/></svg>
+      </button>
+      <span class="md-spacer"></span>
+      <span id="music-time">0:00</span>
+      <span class="mb-vol" data-tip="音量">
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M11 5L6 9H3v6h3l5 4V5z"/><path d="M15.5 8.5a5 5 0 010 7"/></svg>
+        <input type="range" id="music-vol" min="0" max="100" value="70">
+      </span>
+    </div>
+  </div>
+
   </div>
 
   <!-- 设置导航（进入设置页时替换会话列表, 新设置项往这里加） -->
@@ -94,6 +135,9 @@
       <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="8.5" r="3.5"/><path d="M5 20c1.2-3.4 4-5 7-5s5.8 1.6 7 5"/></svg>
     </span>
     <span id="conn-state"><span class="dot"></span><span id="conn-text">连接中…</span></span>
+    <button class="icon-btn" id="btn-music" data-tip="摸鱼电台">
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>
+    </button>
     <button class="icon-btn js-open-settings" id="btn-settings" data-tip="设置">
       <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3.2"/><path d="M19.4 15a1.7 1.7 0 00.34 1.87l.06.06a2 2 0 11-2.83 2.83l-.06-.06a1.7 1.7 0 00-1.87-.34 1.7 1.7 0 00-1.03 1.56V21a2 2 0 11-4 0v-.09a1.7 1.7 0 00-1.11-1.56 1.7 1.7 0 00-1.87.34l-.06.06a2 2 0 11-2.83-2.83l.06-.06a1.7 1.7 0 00.34-1.87 1.7 1.7 0 00-1.56-1.03H3a2 2 0 110-4h.09a1.7 1.7 0 001.56-1.11 1.7 1.7 0 00-.34-1.87l-.06-.06a2 2 0 112.83-2.83l.06.06a1.7 1.7 0 001.87.34h.08a1.7 1.7 0 001.03-1.56V3a2 2 0 114 0v.09a1.7 1.7 0 001.03 1.56 1.7 1.7 0 001.87-.34l.06-.06a2 2 0 112.83 2.83l-.06.06a1.7 1.7 0 00-.34 1.87v.08a1.7 1.7 0 001.56 1.03H21a2 2 0 110 4h-.09a1.7 1.7 0 00-1.51 1.03z"/></svg>
     </button>
@@ -278,7 +322,30 @@
 
 <!-- 本轮进行中追加的消息直接进入待发送区, 气泡上提供「立即」插队按钮 -->
 
+
+<div id="music-panel" hidden>
+  <div class="mp-tabs">
+    <button data-tab="hot" class="on">热歌榜</button>
+    <button data-tab="new">新歌榜</button>
+    <button data-tab="search">搜索</button>
+    <button data-tab="queue">播放列表</button>
+    <button id="music-close" data-tip="收起">
+      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>
+    </button>
+  </div>
+  <div class="mp-tab-body" data-tab-body="hot"></div>
+  <div class="mp-tab-body" data-tab-body="new" style="display:none"></div>
+  <div class="mp-tab-body" data-tab-body="search" style="display:none">
+    <div class="mp-search-row">
+      <input id="music-search-input" type="text" placeholder="搜歌名 / 歌手，回车搜索" spellcheck="false">
+    </div>
+    <div class="mp-search-results" id="music-search-results"></div>
+  </div>
+  <div class="mp-tab-body" data-tab-body="queue" style="display:none"></div>
+</div>
+
 <div id="toast"></div>
+
 
 <!-- 工作目录选择器（草稿态） -->
 <div id="dir-pop">
@@ -299,6 +366,7 @@
   </div>
 </div>
 
-<script src="/static/app.js?v=20260920f" defer></script>
+<script src="/static/app.js?v=20260921b" defer></script>
+<script src="/static/music.js?v=20260921b" defer></script>
 </body>
 </html>

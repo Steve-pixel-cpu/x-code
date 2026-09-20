@@ -8,6 +8,7 @@ from typing import Optional
 
 from pydantic import BaseModel, ValidationError
 
+from fsatomic import atomic_replace, read_text_with_retry, unique_tmp_path
 from models import Message
 
 
@@ -74,18 +75,30 @@ class SessionStore:
         用于上下文压缩后: 内存历史被替换为"摘要+保留区", 追加式落盘的
         persisted_count 从此失准——重写让磁盘与内存重新一致。
         标题/工作目录等非消息记录原样保留。返回 (消息数, 新链尾 uuid)。
+
+        临时文件唯一命名 + 替换带重试（fsatomic）: 重写发生在 turn 工作
+        线程（auto-compact 后）, 而 HTTP 读者（历史接口的 load_session）
+        可能正开着同一个会话文件——固定名 tmp 会被并发重写互踩, Windows
+        上目标被读者占住时 replace 抛 PermissionError, 由重试兜住。
         """
         file_path = self._session_path(session_id)
         others = [e for e in self._read_entries(file_path)
                   if not isinstance(e, StorageEntry)]
-        tmp = file_path.with_suffix(file_path.suffix + ".tmp")
-        tmp.write_text("", encoding="utf-8")
-        for e in others:
-            self._append_entry(tmp, e)
-        last: Optional[str] = None
-        for m in messages:
-            last = self.save_message_to(tmp, m, last)
-        os.replace(tmp, file_path)
+        tmp = unique_tmp_path(file_path)
+        try:
+            tmp.write_text("", encoding="utf-8")
+            for e in others:
+                self._append_entry(tmp, e)
+            last: Optional[str] = None
+            for m in messages:
+                last = self.save_message_to(tmp, m, last)
+            atomic_replace(tmp, file_path)
+        finally:
+            # 替换成功后 tmp 已不存在; 失败路径清掉残片
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
         return len(messages), last
 
     def save_message_to(self, path: Path, message: Message,
@@ -203,29 +216,29 @@ class SessionStore:
 
         result : list[StorageEntry] = []
         if not file_path.exists(): return result
-        with open(file_path, "r", encoding='utf-8') as f:
-
-            for line_no, line in enumerate(f, 1):
-                if line.strip() == "":
-                    continue
-                try:
-
-                    data = json.loads(line)
-                    # title/workdir/permission_mode 记录与消息条目共存一个文件, 按类型分流
-                    if data.get("type") == "title":
-                        result.append(TitleRecord.model_validate(data))
-                    elif data.get("type") == "workdir":
-                        result.append(WorkdirRecord.model_validate(data))
-                    elif data.get("type") == "permission_mode":
-                        result.append(PermissionModeRecord.model_validate(data))
-                    else:
-                        result.append(StorageEntry.model_validate(data))
-                except json.JSONDecodeError as e:
-                    print(f"[WARN] line {line_no}: JSON 解析失败 - {e}")
-                    continue
-                except ValidationError as e:
-                    print(f"[WARN] line {line_no}: 校验失败 - {e}")
-                    continue
+        # 读走重试: rewrite_session 的原子替换过渡窗口里, Windows 新开
+        # 读句柄会瞬时被拒（delete pending）; 整体读入再按行解析
+        text = read_text_with_retry(file_path)
+        for line_no, line in enumerate(text.splitlines(), 1):
+            if line.strip() == "":
+                continue
+            try:
+                data = json.loads(line)
+                # title/workdir/permission_mode 记录与消息条目共存一个文件, 按类型分流
+                if data.get("type") == "title":
+                    result.append(TitleRecord.model_validate(data))
+                elif data.get("type") == "workdir":
+                    result.append(WorkdirRecord.model_validate(data))
+                elif data.get("type") == "permission_mode":
+                    result.append(PermissionModeRecord.model_validate(data))
+                else:
+                    result.append(StorageEntry.model_validate(data))
+            except json.JSONDecodeError as e:
+                print(f"[WARN] line {line_no}: JSON 解析失败 - {e}")
+                continue
+            except ValidationError as e:
+                print(f"[WARN] line {line_no}: 校验失败 - {e}")
+                continue
         return result
 
     def detect_interruption(self, session_id: str) -> Optional[str]:

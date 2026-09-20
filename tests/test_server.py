@@ -16,6 +16,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import server
+import tools
 from models import Message
 from permissions import PermissionDecision, PermissionRequest, PermissionMode
 from storage import SessionStore
@@ -944,3 +945,64 @@ def test_settings_permission_mode_only_changes_default(client, isolated_store):
         assert server.app_state.permission_mode == server.PermissionMode.PLAN
     finally:
         server._sessions.clear()
+
+
+# ------------------------------------------------------------
+# 打断进工具执行: worker 的取消检查接线
+# ------------------------------------------------------------
+
+class _StubRuntime:
+    """记录 set_cancel_check 绑定的替身 runtime; run_turn 里翻转
+    stop_requested 并在轮内调用取消检查, 模拟"命令执行中用户点停止"。"""
+
+    def __init__(self, web_session, seen):
+        self._ws = web_session
+        self._seen = seen
+
+    def set_cancel_check(self, fn):
+        self._seen["cancel"] = fn
+        return self
+
+    def session(self):
+        class _S:
+            messages: list = []
+        return _S()
+
+    def run_turn(self, text, prompter, attachments=None):
+        self._ws.stop_requested = True           # 轮次中途用户点停止
+        self._seen["during_turn"] = self._seen["cancel"]()
+        self._seen["tool_cancel"] = tools.TOOL_CANCEL_CHECK.get()   # 池线程可见性靠 contextvar
+        summary = types.SimpleNamespace(iterations=1, budget_exhausted=False,
+                                        iterations_exhausted=False)
+        return summary
+
+
+def test_worker为轮次绑定取消检查(client, isolated_store, monkeypatch):
+    """修复钉: 打断必须能进工具执行——worker 开跑前把 should_stop 同时
+    绑到 runtime（一致点检查）与 tools.TOOL_CANCEL_CHECK（长命令等待
+    循环轮询, 经 copy_context 传入工具池线程）。"""
+    import types
+
+    import tools
+
+    web_session = server.get_or_create_web_session("s-cancel")
+    web_session.titled = True                  # 跳过 AI 命名（不发网络请求）
+    web_session.busy = True                    # 与 _start_turn 的约定一致
+    web_session.stop_requested = False
+    seen: dict = {}
+    stub = _StubRuntime(web_session, seen)
+    monkeypatch.setattr(web_session, "runtime", stub)
+
+    events: list = []
+    server._turn_slots.acquire()               # 平衡 worker finally 里的 release
+    server._spawn_turn_thread(web_session, "hello", [],
+                              server.TurnEmitter(events.append), None)
+    deadline = time.monotonic() + 10
+    while web_session.busy and time.monotonic() < deadline:
+        time.sleep(0.05)
+
+    assert web_session.busy is False           # 轮次正常收束
+    done = [e for e in events if e["type"] == "turn_done"]
+    assert done and done[-1]["interrupted"] is True   # 轮内 stop_requested 已置位
+    assert seen["during_turn"] is True         # 取消检查读到实时的 stop_requested
+    assert callable(seen["tool_cancel"])       # 工具侧 contextvar 已在本轮上下文绑定

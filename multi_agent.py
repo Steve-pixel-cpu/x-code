@@ -12,6 +12,7 @@ from dotenv import load_dotenv
 from pydantic import BaseModel
 
 from api_client import ClaudeApiClient
+from fsatomic import atomic_write_text, read_text_with_retry
 from models import Session, TextContentBlock
 from permissions import ALLOW_MODE, PermissionPolicy
 from runtime import ConversationRuntime
@@ -235,8 +236,9 @@ class AgentOrchestrator:
             f.write(md_content)
 
         manifest_content = manifest.model_dump_json()
-        with open(json_path, "w", encoding= "utf-8") as f:
-            f.write(manifest_content)
+        # 原子写: 其他会话的 reap/list 可能此刻正 glob *.json, 直写会让
+        # 读者看到半截 JSON（解析失败被吞, agent 凭空消失）
+        atomic_write_text(json_path, manifest_content)
 
         # workdir: 调用方显式传入优先（Web 按会话传）, 否则用编排器默认
         job = AgentJob(
@@ -261,8 +263,9 @@ class AgentOrchestrator:
         json_path = self._store_dir / f"{agent_id}.json"
         if not json_path.exists():
             raise FileNotFoundError(f"Agent {agent_id} not found")
-        with open(json_path, "r", encoding= "utf-8") as f:
-            manifest = AgentManifest.model_validate(json.load(f))
+        # 读走重试: replace 过渡窗口里新开读句柄在 Windows 上会瞬时被拒
+        manifest = AgentManifest.model_validate(
+            json.loads(read_text_with_retry(json_path)))
 
         return manifest
 
@@ -270,8 +273,8 @@ class AgentOrchestrator:
         result: list[AgentManifest] = []
         for manifest in self._store_dir.glob("*.json"):
             try:
-                with open(manifest, "r", encoding="utf-8") as f:
-                    result.append(AgentManifest.model_validate(json.load(f)))
+                result.append(AgentManifest.model_validate(
+                    json.loads(read_text_with_retry(manifest))))
             except Exception as e:
                 continue
 
@@ -280,10 +283,13 @@ class AgentOrchestrator:
     def _persist_terminal_state(self, manifest: AgentManifest, status: str, result: Optional[str], error:Optional[str]):
         """写终态。
 
-        .md 追加结果；manifest JSON 用"写临时文件 + 原子替换"覆盖。
+        .md 追加结果；manifest JSON 用原子覆盖写（唯一临时文件 + 原子替换）。
         worker 线程写终态的同时，Leader 可能正在轮询 get_status() 读
         同一个文件——直接 open("w") 会先截断再写，读者会撞见半截 JSON。
-        原子替换保证读者要么看到完整旧文件、要么看到完整新文件。
+        原子替换保证读者要么看到完整旧文件、要么看到完整新文件；与
+        mark_delivered 并发时唯一临时名互不踩踏（固定名会互相截断对方的
+        临时文件，把半截内容发布出去），Windows 上目标被读者占住时的
+        瞬时 PermissionError 由重试兜住。
         """
         md_path = self._store_dir / f"{manifest.agent_id}.md"
         now = datetime.now(timezone.utc).isoformat()
@@ -303,10 +309,7 @@ class AgentOrchestrator:
             "result": result,
         })
         json_path = self._store_dir / f"{manifest.agent_id}.json"
-        tmp_path = json_path.with_suffix(".json.tmp")
-        with open(tmp_path, "w", encoding= "utf-8") as f:
-            f.write(new_manifest.model_dump_json())
-        os.replace(tmp_path, json_path)
+        atomic_write_text(json_path, new_manifest.model_dump_json())
 
 
     def complete_agent(self, agent_id: str, result:str):
@@ -325,10 +328,11 @@ class AgentOrchestrator:
         return ready
 
     def mark_delivered(self, agent_ids: list[str]) -> int:
-        """把结果标记为已交付（tmp + os.replace 原子写回）。返回成功数。
+        """把结果标记为已交付（原子覆盖写回）。返回成功数。
 
-        与 worker 线程的终态写并发时两侧都走原子替换, 读者不会撞见半截
-        文件; 极端交错下最坏是多标一次 delivered, 幂等无害。"""
+        与 worker 线程的终态写并发时两侧都走唯一临时名 + 原子替换,
+        读者不会撞见半截文件, 写者互不踩踏; 极端交错下最坏是多标一次
+        delivered, 幂等无害。"""
         ok = 0
         for agent_id in agent_ids:
             try:
@@ -337,10 +341,7 @@ class AgentOrchestrator:
                 continue
             new_manifest = manifest.model_copy(update={"delivered": True})
             json_path = self._store_dir / f"{agent_id}.json"
-            tmp_path = json_path.with_suffix(".json.tmp")
-            with open(tmp_path, "w", encoding="utf-8") as f:
-                f.write(new_manifest.model_dump_json())
-            os.replace(tmp_path, json_path)
+            atomic_write_text(json_path, new_manifest.model_dump_json())
             ok += 1
         return ok
 

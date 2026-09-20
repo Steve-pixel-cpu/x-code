@@ -10,6 +10,7 @@
 - _AgentToolbox 单例与 set_api_config_provider 的注入/回落
 """
 import json
+import shutil
 from pathlib import Path
 import tempfile
 
@@ -51,12 +52,19 @@ class RecordingSpawn:
 
 @pytest.fixture(autouse=True)
 def fake_orchestrator():
-    """每个用例: 单例换成假 spawn 的编排器 + 清空会话归属（不真正起线程）。"""
+    """每个用例: 单例换成假 spawn 的编排器 + 清空会话归属（不真正起线程）。
+
+    spawn_fn 必须注入 no-op: 缺省会走 _default_spawn_fn——起真实 worker
+    线程打真实 LLM, 且线程晚到的 FAILED 终态会覆盖用例刚写入的
+    COMPLETED（随机翻转状态, 就是这批用例偶发红掉的第二个根因）。
+    这里所有用例都是自己调 complete_agent 模拟 worker 收尾, 不需要真线程。"""
     tmp = tempfile.mkdtemp()
-    orch = AgentOrchestrator(Path(tmp))
+    orch = AgentOrchestrator(Path(tmp), spawn_fn=lambda job: None)
     agent_tools._toolbox._orchestrator = orch
     _session_bindings.clear()
     yield orch
+    _session_bindings.clear()
+    shutil.rmtree(tmp, ignore_errors=True)
 
 
 # ------------------------------------------------------------

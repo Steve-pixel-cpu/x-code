@@ -17,6 +17,7 @@ from runtime import (
     ConversationRuntime,
     TokenUsage,
     ToolError,
+    TurnInterrupted,
     UsageTracker,
     build_assistant_message,
     merge_hook_feedback,
@@ -292,3 +293,105 @@ def test_run_turn_并行工具可同时进入执行():
     summary = rt.run_turn("multi")
 
     assert [m.content[0].output for m in summary.tool_results] == ["ok", "ok"]
+
+
+# ============================================================
+# 打断（cancel_check）—— 一致点取消
+# ============================================================
+
+def test_打断在迭代顶部生效_历史保持一致():
+    """cancel_check 为真时, run_turn 在历史一致点抛 TurnInterrupted。
+    CLI 不设置 cancel_check, 此路径对 CLI 完全不可达。"""
+    import pytest
+
+    fake = ScriptedApiClient([[TextDeltaEvent(text="hi"), MessageStopEvent()]])
+    rt = make_runtime(fake)
+    rt.set_cancel_check(lambda: True)
+
+    with pytest.raises(TurnInterrupted):
+        rt.run_turn("hello")
+
+    roles = [m.role for m in rt.session().messages]
+    assert roles == ["user"]                    # stream 调用前就已抛出
+
+
+def test_打断在工具批次执行前_补齐error结果并通知镜像():
+    """打断落在授权之后、执行之前: 未执行的工具就地终局——补 error
+    tool_result（不留悬空 tool_use）+ on_tool_finalized 通知镜像方闭合
+    前端工具卡——然后才抛出。"""
+    import pytest
+
+    fake = ScriptedApiClient([[
+        ToolUseEvent(id="t1", name="bash", input="cmd1"),
+        MessageStopEvent(),
+    ]])
+    finalized_seen: list = []
+    rt = make_runtime(fake, executor=EchoExecutor())
+    rt.set_on_tool_finalized(lambda block, msg: finalized_seen.append((block, msg)))
+    # 第 1 次调用 = 迭代顶部检查（放行, 走到 stream + 授权）;
+    # 第 2 次 = 批次执行前检查（打断）——钉住"授权之后、执行之前"的窗口
+    calls = {"n": 0}
+
+    def cancel_after_authorize() -> bool:
+        calls["n"] += 1
+        return calls["n"] > 1
+
+    rt.set_cancel_check(cancel_after_authorize)
+
+    with pytest.raises(TurnInterrupted):
+        rt.run_turn("hello")
+
+    messages = rt.session().messages
+    assert [m.role for m in messages] == ["user", "assistant", "tool"]
+    result_block = messages[-1].content[0]
+    assert result_block.is_error is True
+    assert "中断" in result_block.output
+    # 镜像回调拿到同一份终局结果, 前端据此闭合工具卡
+    assert len(finalized_seen) == 1
+    assert finalized_seen[0][0].id == "t1"
+    assert finalized_seen[0][1] is messages[-1]
+
+
+def test_打断落在长命令执行期_工具取消后在一致点收束():
+    """回归钉（端到端）: 工具执行中点停止——bash 等待循环轮询
+    TOOL_CANCEL_CHECK 秒级杀树返回, runtime 在下一一致点抛
+    TurnInterrupted。旧实现里打断对执行中的命令完全无效, 跑服务器类
+    常驻命令时整轮永久卡死。"""
+    import json as _json
+    import threading
+    import time as _time
+
+    import pytest
+
+    import tools as _tools
+    from tools import ToolRegistry as _Registry, bash_tool as _bash
+
+    class _BashExecutor:
+        """适配 ToolExecutor 协议（带 tool_use_id）到 ToolRegistry。"""
+
+        def __init__(self):
+            self._registry = _Registry().register("bash", _bash)
+
+        def execute(self, tool_name, input, tool_use_id=None):
+            return self._registry.execute(tool_name, input)
+
+    fake = ScriptedApiClient([[
+        ToolUseEvent(id="t1", name="bash",
+                     input=_json.dumps({"command": "sleep 30"})),
+        MessageStopEvent(),
+    ]])
+    rt = make_runtime(fake, executor=_BashExecutor())
+    stop = {"on": False}
+    rt.set_cancel_check(lambda: stop["on"])
+    _tools.TOOL_CANCEL_CHECK.set(lambda: stop["on"])
+    threading.Timer(0.7, lambda: stop.update(on=True)).start()
+
+    t0 = _time.monotonic()
+    with pytest.raises(TurnInterrupted):
+        rt.run_turn("start server")
+    elapsed = _time.monotonic() - t0
+    _tools.TOOL_CANCEL_CHECK.set(None)
+
+    assert elapsed < 15                         # 旧实现: 永久卡死
+    roles = [m.role for m in rt.session().messages]
+    assert roles == ["user", "assistant", "tool"]   # 历史一致, 无悬空

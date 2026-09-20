@@ -25,7 +25,9 @@ from permissions import PermissionRequest, PermissionResult, PermissionMode, Per
 from prompt import SystemPromptBuilder
 from runtime import ConversationRuntime
 from storage import SessionStore
-from tools import ToolRegistry, bash_tool, read_tool, write_tool, present_plan_tool, powershell_tool, git_bash_unavailable_reason
+from tools import (ToolRegistry, bash_tool, read_tool, write_tool,
+                   present_plan_tool, powershell_tool, task_output_tool,
+                   task_stop_tool, git_bash_unavailable_reason)
 from agent_tools import AGENT_TOOL_SPECS, get_orchestrator, register_agent_tools
 
 DEFAULT_MODEL = "glm-5.3-flash"
@@ -36,8 +38,13 @@ bash_spec = {
         "stdout is returned as-is; stderr is appended if present. "
         "Use this for listing files, running scripts, git operations, "
         "installing dependencies, and other command-line tasks. "
-        "Commands time out after 30 seconds, so avoid long-running or "
-        "interactive commands. "
+        "Commands are killed (whole process tree) after 'timeout' seconds "
+        "(default 30, max 600), so avoid interactive commands. "
+        "For long-running services (game/database servers, dev servers, "
+        "watchers), set 'background': true: the command starts detached "
+        "and returns a task id + log path immediately, keeping the service "
+        "alive across turns; read recent output with task_output and stop "
+        "it with task_stop. "
         "On Windows this runs in Git Bash (MSYS2), so standard bash/GNU "
         "syntax works: '&&' chains, pipes, grep/sed/awk are available. "
         "Prefer this tool over powershell for portability. "
@@ -55,6 +62,23 @@ bash_spec = {
                     "Use bash syntax on all platforms."
                 ),
             },
+            "timeout": {
+                "type": "integer",
+                "description": (
+                    "Seconds before the command and its children are "
+                    "killed. Default 30, max 600. Use only as large as "
+                    "needed (builds, installs)."
+                ),
+            },
+            "background": {
+                "type": "boolean",
+                "description": (
+                    "Run detached as a background task: returns a task id "
+                    "and log path immediately instead of waiting. Use for "
+                    "servers and other never-exiting commands; read output "
+                    "with task_output, stop with task_stop."
+                ),
+            },
         },
         "required": ["command"],
     },
@@ -67,8 +91,10 @@ powershell_spec = {
         "stdout is returned as-is; stderr is appended if present. Use this "
         "for Windows-specific tasks: services, registry, scheduled "
         "tasks, ACLs, WMI/CIM queries, Get-ChildItem -Recurse, and other "
-        "PowerShell cmdlets. Commands time out after 30 seconds, so avoid "
-        "long-running or interactive commands."
+        "PowerShell cmdlets. Commands are killed (whole process tree) "
+        "after 'timeout' seconds (default 30, max 600), so avoid "
+        "interactive commands. 'background': true is also supported "
+        "(same semantics as the bash tool)."
     ),
     "input_schema": {
         "type": "object",
@@ -79,6 +105,20 @@ powershell_spec = {
                     "The PowerShell command to execute, e.g. "
                     "'Get-Process | Select-Object -First 5' or "
                     "'Get-Service'. Must be non-interactive."
+                ),
+            },
+            "timeout": {
+                "type": "integer",
+                "description": (
+                    "Seconds before the command and its children are "
+                    "killed. Default 30, max 600."
+                ),
+            },
+            "background": {
+                "type": "boolean",
+                "description": (
+                    "Run detached as a background task (see bash tool). "
+                    "Read output with task_output, stop with task_stop."
                 ),
             },
         },
@@ -168,7 +208,55 @@ present_plan_spec = {
     },
 }
 
-TOOLS = [bash_spec, powershell_spec, read_file_spec, write_file_spec, present_plan_spec] + AGENT_TOOL_SPECS
+task_output_spec = {
+    "name": "task_output",
+    "description": (
+        "Read recent output of a background task started with the bash "
+        "or powershell tool ('background': true). Returns whether the "
+        "process is still running plus the last N lines of its log. "
+        "Poll this instead of re-running the command to check progress."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "task_id": {
+                "type": "string",
+                "description": "The task id returned when starting the "
+                               "background task, e.g. 'bg-1'.",
+            },
+            "tail_lines": {
+                "type": "integer",
+                "description": "How many trailing log lines to return "
+                               "(default 50, max 500).",
+            },
+        },
+        "required": ["task_id"],
+    },
+}
+
+task_stop_spec = {
+    "name": "task_stop",
+    "description": (
+        "Stop a background task started with the bash or powershell "
+        "tool ('background': true). Kills the whole process tree "
+        "(the server and any children). Use when the service is no "
+        "longer needed or must be restarted."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "task_id": {
+                "type": "string",
+                "description": "The task id returned when starting the "
+                               "background task, e.g. 'bg-1'.",
+            },
+        },
+        "required": ["task_id"],
+    },
+}
+
+TOOLS = [bash_spec, powershell_spec, read_file_spec, write_file_spec,
+         task_output_spec, task_stop_spec, present_plan_spec] + AGENT_TOOL_SPECS
 
 
 # --- 终端视觉规范: 调色板 + 版式 ---
@@ -674,6 +762,7 @@ TOOL_REQUIREMENTS = {
     "read_file": READ_ONLY_MODE,        # 读文件无副作用
     "agent_status": READ_ONLY_MODE,     # 看 subagent 状态
     "agent_list": READ_ONLY_MODE,       # 列 subagent
+    "task_output": READ_ONLY_MODE,      # 读后台任务日志, 只读
     "write_file": WORKSPACE_WRITE_MODE, # 落盘文件（本地写）
     "agent_tool": WORKSPACE_WRITE_MODE, # 派生 subagent（写 agents 状态目录）
     # present_plan 走 WORKSPACE_WRITE 档: plan 模式下它触发"可升级弹问"
@@ -683,11 +772,14 @@ TOOL_REQUIREMENTS = {
 
 
 def build_registry() -> ToolRegistry:
-    """CLI 与 Web 共用的工具注册表: 四个内置工具 + 多 agent 三件套一次注册到位。"""
+    """CLI 与 Web 共用的工具注册表: 内置工具 + 后台任务两件套 + 多 agent
+    三件套一次注册到位。"""
     registry = ToolRegistry().register(name="bash", handler=bash_tool).register(
         name="powershell", handler=powershell_tool).register(
         name="read_file", handler=read_tool).register(
         name="write_file", handler=write_tool).register(
+        name="task_output", handler=task_output_tool).register(
+        name="task_stop", handler=task_stop_tool).register(
         name="present_plan", handler=present_plan_tool)
     return register_agent_tools(registry)
 

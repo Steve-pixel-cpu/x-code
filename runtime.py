@@ -70,6 +70,12 @@ class UsageTracker:
 class ToolError(Exception):
     ...
 
+class TurnInterrupted(Exception):
+    """用户主动打断: 在历史一致点（迭代顶部 / 工具批次执行前）抛出。
+    Web 端流式代理（TurnInterrupted）与重试循环（StreamInterrupted→
+    由 api_client 翻译）语义一致, 三者都由调用方朝安全侧收束本轮。
+    CLI 不设置 cancel_check, 永远不会抛出。"""
+
 class ToolExecutor(Protocol):
     # tool_use_id: 事件镜像方（如 Web 端）靠它把结果配回工具卡;
     # 并行执行后结果按完成序到达, 不能再靠 FIFO 猜配对
@@ -213,6 +219,11 @@ class ConversationRuntime:
         # 生效系统提示词: 基础段 + 计划模式段(仅 PLAN 模式)。模式切换时
         # 重建, stream 调用一律用它——见 _rebuild_effective_prompt
         self._rebuild_effective_prompt()
+        # 轮次取消检查（用户打断, Web 端绑定 should_stop; CLI 默认 None）:
+        # 在历史一致点轮询——迭代顶部与工具批次执行前。工具执行中的打断
+        # 由工具自身轮询（tools.TOOL_CANCEL_CHECK）负责, 这里兜底覆盖
+        # 不支持协作取消的工具与授权等待之后的窗口。
+        self._cancel_check = None
 
     def _rebuild_effective_prompt(self) -> None:
         """权限模式联动系统提示词。计划模式把 PLAN_MODE_SECTION 插进动态段
@@ -239,6 +250,13 @@ class ConversationRuntime:
 
     def set_on_tool_finalized(self, fn) -> "ConversationRuntime":
         self._on_tool_finalized = fn
+        return self
+
+    def set_cancel_check(self, fn) -> "ConversationRuntime":
+        """绑定轮次取消检查（用户打断）。fn 无参返回 bool; None = 无人打断
+        （CLI 默认, 行为不变）。只在历史一致点抛 TurnInterrupted, 调用方
+        （Web 端 worker）负责修补+落盘+收束——与流式中断同一出口。"""
+        self._cancel_check = fn
         return self
 
     def _notify_iterate(self) -> None:
@@ -418,6 +436,10 @@ class ConversationRuntime:
             Message.user_input(user_input, attachments))
         self._notify_iterate()   # 一致点: 用户消息已落定
         while True:
+            # 打断检查点（一致点）: 用户消息/工具结果都已落定, 此刻抛出
+            # 不留悬空 tool_use。打断优先于预算/迭代/压缩检查。
+            if self._cancel_check is not None and self._cancel_check():
+                raise TurnInterrupted()
             # 循环层预算检查点: 收束发生在这里——上一迭代的工具结果已全部
             # 回填，会话历史一致，break 不会产生悬空 tool_use，也不需要异常
             # 修补。服务端 max_tokens 管单次调用上限，这里管跨次累加。
@@ -475,6 +497,31 @@ class ConversationRuntime:
                             print(f"[WARN] tool-finalized hook failed: {e}")
                 else:
                     pending.append((i, block, pre_res))
+
+            # 打断检查点（一致点）: 打断落在授权之后、执行之前时,
+            # 未执行的工具就地终局（补 error result + 通知镜像方闭合
+            # 前端工具卡）, 历史保持一致后再抛出——不留悬空 tool_use。
+            if pending and self._cancel_check is not None \
+                    and self._cancel_check():
+                for i, block, _pre in pending:
+                    interrupted_result = Message.tool_result(
+                        id=block.id,
+                        name=block.name,
+                        output="(用户中断了本轮对话)",
+                        is_error=True,
+                    )
+                    finalized[i] = interrupted_result
+                    if self._on_tool_finalized is not None:
+                        try:
+                            self._on_tool_finalized(block, interrupted_result)
+                        except Exception as e:
+                            print(f"[WARN] tool-finalized hook failed: {e}")
+                for tool_result_msg in finalized:
+                    if tool_result_msg:
+                        curr_session.messages.append(tool_result_msg)
+                        tool_results.append(tool_result_msg)
+                self._notify_iterate()   # 一致点: 中断结果已回填
+                raise TurnInterrupted()
 
             if len(pending) > 1:
                 # 池线程必须能看到本轮绑定（Web 端 emit/workdir 按 contextvars

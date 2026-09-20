@@ -70,9 +70,11 @@ from permissions import (
 )
 from prompt import SystemPromptBuilder
 from storage import SessionStore
-from tools import ToolRegistry, git_bash_unavailable_reason
+from tools import ToolRegistry, git_bash_unavailable_reason, TOOL_CANCEL_CHECK
+from runtime import TurnInterrupted
 from multi_agent import set_api_config_provider
 from agent_tools import get_orchestrator
+import music as _music
 
 setup_console()  # Windows 控制台 UTF-8 兜底（服务器日志不乱码，与 CLI 同一入口）
 
@@ -251,10 +253,6 @@ class TurnDispatch:
 dispatch = TurnDispatch()
 
 
-class TurnInterrupted(Exception):
-    """用户主动打断: 流式代理在下一个 SSE 事件到达时抛出, 快速收束本轮。"""
-
-
 class _LiveStreamProxy:
     """anthropic SSE 流代理: 事件原样透传给内核的同时镜像一份给浏览器。
 
@@ -301,6 +299,15 @@ class _LiveStreamProxy:
             cb = event.content_block
             if cb.type == "tool_use":
                 self._tools[event.index] = {"id": cb.id, "name": cb.name, "json": ""}
+                # 块开始即镜像: 大参数（write_file 整文件等）的工具 JSON
+                # 流式期可达几十秒, 等到 content_block_stop 才发 tool_use
+                # 的话, 这段时间前端没有任何活动指示, 像卡死。前端收到
+                # tool_use_started 就提前建"运行中"工具卡。
+                self._sink({
+                    "type": "tool_use_started",
+                    "id": cb.id,
+                    "name": cb.name,
+                })
             elif cb.type == "thinking":
                 self._thinking[event.index] = time.monotonic()
                 self._sink({"type": "thinking_start"})
@@ -902,6 +909,13 @@ def _spawn_turn_thread(web_session: WebSession, text: str,
         dispatch.bind(emitter, web_session.workdir,
                       lambda: web_session.stop_requested,
                       session_id=web_session.session_id)
+        # 打断进工具执行: runtime 在一致点（迭代顶/工具批次前）检查,
+        # 长命令在等待循环里轮询 contextvar——工具池线程经 copy_context()
+        # 快照读到同一份 should_stop。命令跑一半点停止 → 杀树即刻收束。
+        if web_session.runtime is not None:
+            web_session.runtime.set_cancel_check(
+                lambda: web_session.stop_requested)
+        TOOL_CANCEL_CHECK.set(lambda: web_session.stop_requested)
         try:
             summary = web_session.runtime.run_turn(text, prompter,
                                                    attachments=attachments)
@@ -1252,6 +1266,46 @@ async def api_get_messages(session_id: str):
 # ============================================================================
 # REST: 设置（思考等级 + 权限模式 + 激活模型）
 # ============================================================================
+
+# ============================================================================
+# REST: 摸鱼电台（网易云公开接口的只读代理, 不碰会话/模型状态）
+# ============================================================================
+
+async def _music_call(fn, *args, **kwargs):
+    """统一的 502 包装: 上游失败不往客户端抛裸 500。"""
+    try:
+        return fn(*args, **kwargs)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+
+@app.get("/api/music/playlist/{pid}")
+async def api_music_playlist(pid: int):
+    """歌单/榜单详情（内置榜单带 10 分钟缓存）。"""
+    return await _music_call(_music.playlist_songs, pid)
+
+
+@app.get("/api/music/builtin")
+async def api_music_builtin():
+    """内置榜单入口: 前端 Tab 据此渲染, 不写死 id。"""
+    return {"playlists": [{"key": k, "id": v} for k, v in _music.BUILTIN_PLAYLISTS.items()]}
+
+
+@app.get("/api/music/search")
+async def api_music_search(kw: str = "", limit: int = 30):
+    return await _music_call(_music.search_songs, kw, limit)
+
+
+@app.get("/api/music/url")
+async def api_music_url(id: int, br: int = 128000):
+    """播放直链。VIP/无版权歌 url 为 None, 前端按「跳过」处理。"""
+    return await _music_call(_music.song_url, id, br)
+
+
+@app.get("/api/music/lyric")
+async def api_music_lyric(id: int):
+    return await _music_call(_music.song_lyric, id)
+
 
 @app.get("/api/ping")
 async def api_ping():

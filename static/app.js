@@ -64,6 +64,7 @@ function runOf(id) {
       everConnected: false,   // 该会话 WS 是否成功连过（区分首次连接与断线重连）
       rlNote: null,           // 限流退避提示行（原地更新, 轮次有进展/收口即撤）
       awaiting: false,        // 忙碌中且正处于等待模型输出的空窗（await_output 起止）
+      awaitT0: null,          // 空窗起点（客户端）: 底部转圈的已耗时计时
     };
   }
   return state.runs[id];
@@ -465,6 +466,7 @@ function toast(text) {
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => t.classList.remove("show"), 1600);
 }
+window.xcodeToast = toast;   // 摸鱼电台(music.js)共用同一枚轻提示
 
 /* ============================================================
  * 确认弹窗 — 替代原生 confirm(): WebView2 的 confirm 顶着
@@ -1537,10 +1539,14 @@ function handleServerMessage(msg, sid) {
     if (msg.type === "text_delta") onTextDelta(msg, sid);
     else if (msg.type === "thinking_start") onThinkingStart(msg, sid);
     else if (msg.type === "thinking_end") onThinkingEnd(msg, sid);
+    else if (msg.type === "tool_use_started") onToolUseStarted(msg, sid);
     else if (msg.type === "tool_use") onToolUse(msg, sid);
     else if (msg.type === "permission_request") renderSessionList();   // awaiting 在 onPermissionRequest 里统一处理
     else if (msg.type === "tool_result") onToolResult(msg, sid);
-    else if (msg.type === "await_output") run.awaiting = run.busy;
+    else if (msg.type === "await_output") {
+      run.awaiting = run.busy;
+      if (run.awaiting) run.awaitT0 = Date.now();
+    }
     else if (msg.type === "mode_changed") onModeChanged(msg, sid);
 
     else if (msg.type === "tool_result") bumpUnread(sid);
@@ -1590,6 +1596,7 @@ function handleServerMessage(msg, sid) {
   }
   switch (msg.type) {
     case "text_delta":         onTextDelta(msg, sid); break;
+    case "tool_use_started":   onToolUseStarted(msg, sid); break;
     case "tool_use":           onToolUse(msg, sid); break;
     case "tool_result":        onToolResult(msg, sid); break;
     case "thinking_start":     onThinkingStart(msg, sid); break;
@@ -1788,6 +1795,24 @@ function completeToolCard(row, { is_error, denied }) {
   }
 }
 
+function onToolUseStarted(msg, sid) {
+  // content_block_start(tool_use) 即建卡: 大参数（write_file 整文件等）的
+  // JSON 流式期可达几十秒, 此前这段时间画面全静（转圈已收、卡片未建）,
+  // 像卡死。参数传完后 onToolUse 按 id 复用这张卡补全描述。
+  const run = runOf(sid);
+  if (msg.id && run.liveToolCards[msg.id]) return;   // 幂等: 卡已在
+  const active = sid === state.sessionId;
+  run.awaiting = false;                    // 工具卡已是可见反馈: 空窗结束
+  clearRateLimitNote(run);
+  if (active) syncThinkingIndicator();
+  flushAssistantBubble(run);
+  dropOptimisticThinking(run);
+  const card = addToolCard({ id: msg.id, name: msg.name, input: "" }, colOf(sid));
+  card.querySelector(".tdesc").textContent = "接收参数中…";
+  if (msg.id) run.liveToolCards[msg.id] = card;
+  run.activeToolCard = card;
+}
+
 function onToolUse(msg, sid) {
   const run = runOf(sid);
   const active = sid === state.sessionId;
@@ -1796,6 +1821,13 @@ function onToolUse(msg, sid) {
   if (active) syncThinkingIndicator();
   flushAssistantBubble(run);   // 工具前先收掉流式中的正文气泡
   dropOptimisticThinking(run);   // 工具先于思考到达: 撤掉乐观胶囊（工具卡已是反馈）
+  // tool_use_started 已提前建卡: 就地补全真实参数, 不重复建卡
+  const existing = msg.id ? run.liveToolCards[msg.id] : null;
+  if (existing) {
+    existing.querySelector(".tdesc").textContent = describeInput(msg.input);
+    run.activeToolCard = existing;
+    return;
+  }
   const card = addToolCard({ id: msg.id, name: msg.name, input: msg.input }, colOf(sid));
   if (msg.id) run.liveToolCards[msg.id] = card;   // 按 id 登记, 结果精确配对
   run.activeToolCard = card;
@@ -1803,7 +1835,17 @@ function onToolUse(msg, sid) {
 
 function onToolResult(msg, sid) {
   const run = runOf(sid);
-  if (msg.plan_rejected) return;   // 计划被拒: 计划卡已渲染拒绝态, 不补失败工具卡
+  if (msg.plan_rejected) {
+    // 计划被拒: 计划卡已渲染拒绝态, 不补失败工具卡。但 tool_use_started
+    // 可能已提前建了占位卡（present_plan 也会先镜像）, 就地移除, 不留悬卡
+    if (msg.id && run.liveToolCards[msg.id]) {
+      const card = run.liveToolCards[msg.id];
+      delete run.liveToolCards[msg.id];
+      card.remove();
+      if (run.activeToolCard === card) run.activeToolCard = null;
+    }
+    return;
+  }
   flushAssistantBubble(run);
   // 配对优先级: 流式卡片(按 id) → 历史回放登记的卡片(断线重同步接缝) →
   // 旧单槽位 → 都配不上(旧数据)才新开兜底卡片
@@ -1881,6 +1923,7 @@ function onPermissionRequest(msg, sid) {
   // 等待授权也是"等模型"的一种: 点亮空窗态, 否则画面全静止,
   // 用户会以为这轮已经跑完
   run.awaiting = run.busy;
+  if (run.awaiting) run.awaitT0 = Date.now();
   if (sid2 === state.sessionId) syncThinkingIndicator();
 
   const meta = TOOL_META[msg.tool_name] || { label: msg.tool_name, icon: ICON_TOOL };
@@ -2017,6 +2060,7 @@ function onAwaitOutput(msg, sid) {
   const run = runOf(sid);
   if (run && run.busy) {
     run.awaiting = true;
+    run.awaitT0 = Date.now();
     if (sid === state.sessionId) syncThinkingIndicator();
   }
 }
@@ -2353,15 +2397,25 @@ function syncThinkingIndicator() {
   if (show) {
     const pending = run.pendingPerms ? Object.values(run.pendingPerms) : [];
     const t = $("thinking").querySelector(".t");
+    let label;
     if (pending.length && pending.every(p => p.tool_name === "present_plan")) {
-      t.textContent = "等待计划审批…";
+      label = "等待计划审批…";
     } else if (pending.length) {
-      t.textContent = "等待授权…";
+      label = "等待授权…";
     } else {
-      t.textContent = "思考中…";
+      label = "思考中…";
     }
+    // 空窗已耗时: 长会话 prefill / 限流退避可达几十秒, 秒数可见才不像卡死
+    const t0 = run.awaitT0 || (run.curThinking && run.curThinking.t0) || null;
+    const secs = t0 ? Math.floor((Date.now() - t0) / 1000) : 0;
+    t.textContent = secs >= 2 ? label + " " + secs + "s" : label;
   }
 }
+// 空窗计时走秒刷新: 只在转圈可见时重算, 空闲时零开销
+setInterval(() => {
+  const el = $("thinking");
+  if (el && el.style.display !== "none") syncThinkingIndicator();
+}, 1000);
 
 async function sendCurrent() {
   const input = $("input");

@@ -1,11 +1,17 @@
+import contextvars
+import json
 import os
 import platform
 import shutil
-from pathlib import Path
-from typing import Callable, Optional, Self
-from pydantic import BaseModel
+import signal
 import subprocess
-import json
+import tempfile
+import threading
+import time
+import uuid
+from pathlib import Path
+from typing import Callable, List, Optional, Self
+from pydantic import BaseModel
 
 from runtime import ToolError
 
@@ -64,6 +70,149 @@ def resolve_path(path: str, workdir: Optional[str]) -> Path:
     if p.is_absolute() or not workdir:
         return p
     return Path(workdir) / p
+
+
+# --- 进程执行内核: Popen + 读线程 + 杀整棵进程树 ---
+#
+# 为什么不用 subprocess.run(timeout=...): 它超时只 kill 直接子进程
+# (bash.exe), 命令拉起的孙进程(如 `java -jar server.jar` 的 java)不会死,
+# 且继承着 stdout 管道句柄——run() 在 kill 后还会再调一次无超时的
+# communicate() 收尾输出, 管道永远等不到 EOF, 工具调用永久阻塞,
+# turn 工作线程随之卡死(会话 busy 不解、排队消息永不接力)。
+# 这里改成: 读线程持续收集输出 + 主线程分片等待, 超时/打断时杀整棵
+# 进程树, 收尾只带宽限地 join 读线程——任何路径都不无超时等管道 EOF。
+
+# 工具级取消检查: 宿主(Web 端)在每轮工作线程里 set 成 should_stop,
+# contextvars 随 runtime 的 copy_context() 传进并行工具池线程。
+# 长命令的等待循环里轮询它, 触发即杀树返回。CLI 不设置, 行为不变。
+TOOL_CANCEL_CHECK: contextvars.ContextVar[Optional[Callable[[], bool]]] = \
+    contextvars.ContextVar("xcode_tool_cancel", default=None)
+
+DEFAULT_CMD_TIMEOUT = 30
+MAX_CMD_TIMEOUT = 600
+_KILL_JOIN_GRACE = 2.0     # 杀树后收尸读线程的宽限
+_EXIT_JOIN_GRACE = 5.0     # 正常退出后等剩余输出排干的宽限
+_WAIT_SLICE = 0.2          # 等待循环的轮询步长
+
+
+def _cancelled() -> bool:
+    check = TOOL_CANCEL_CHECK.get()
+    return bool(check and check())
+
+
+def _clamp_timeout(raw) -> int:
+    """timeout 参数: 默认 30s, 限 1~600s。模型传坏值时兜底而非报错。"""
+    try:
+        n = int(raw)
+    except (TypeError, ValueError):
+        return DEFAULT_CMD_TIMEOUT
+    return max(1, min(n, MAX_CMD_TIMEOUT))
+
+
+def _kill_tree(proc: subprocess.Popen) -> None:
+    """杀整棵进程树。Windows 用 taskkill /T; POSIX 建会话后 killpg。
+    只杀直接子进程会留下继承管道的孙进程, 是卡死的根源。"""
+    if proc.poll() is None:
+        try:
+            if platform.system() == "Windows":
+                subprocess.run(
+                    ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                    capture_output=True, timeout=10,
+                )
+            else:
+                os.killpg(proc.pid, signal.SIGKILL)   # start_new_session 下 pgid=pid
+        except (OSError, subprocess.SubprocessError):
+            try:
+                proc.kill()
+            except OSError:
+                pass
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        pass
+
+
+def _pump(pipe, sink: List[bytes]) -> None:
+    """读线程: 持续把管道收进 sink 直到 EOF。EOF 被第三方(孙进程)拖住时
+    线程停在 read 上, 由调用方带宽限 join——绝不无限等。"""
+    try:
+        for chunk in iter(pipe.readline, b""):
+            sink.append(chunk)
+    except OSError:
+        pass
+    finally:
+        try:
+            pipe.close()
+        except OSError:
+            pass
+
+
+def _join_pumps(threads: List[threading.Thread], grace: float) -> None:
+    deadline = time.monotonic() + grace
+    for t in threads:
+        t.join(timeout=max(0.0, deadline - time.monotonic()))
+
+
+def _assemble(out_chunks: List[bytes], err_chunks: List[bytes]) -> str:
+    output = b"".join(out_chunks).decode("utf-8", errors="replace")
+    err = b"".join(err_chunks).decode("utf-8", errors="replace")
+    if err:
+        output += f"\nSTDERR: {err}"
+    return output
+
+
+def _popen_kwargs() -> dict:
+    """POSIX 下独立会话启动, 让 killpg 能覆盖整棵树; Windows 靠 taskkill /T。"""
+    if platform.system() == "Windows":
+        return {}
+    return {"start_new_session": True}
+
+
+def _run_command(argv: List[str], cwd: Optional[str], timeout: int) -> str:
+    """前台执行: 收集输出直到进程退出 / 超时 / 打断。三条路都保证返回。"""
+    try:
+        proc = subprocess.Popen(
+            argv,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            stdin=subprocess.DEVNULL,
+            cwd=cwd,
+            **_popen_kwargs(),
+        )
+    except OSError as e:
+        return f"ERROR: failed to start command: {e}"
+
+    out_chunks: List[bytes] = []
+    err_chunks: List[bytes] = []
+    pumps = [
+        threading.Thread(target=_pump, args=(proc.stdout, out_chunks), daemon=True),
+        threading.Thread(target=_pump, args=(proc.stderr, err_chunks), daemon=True),
+    ]
+    for t in pumps:
+        t.start()
+
+    interrupted = False
+    timed_out = False
+    deadline = time.monotonic() + timeout
+    while proc.poll() is None:
+        if _cancelled():
+            interrupted = True
+            break
+        if time.monotonic() >= deadline:
+            timed_out = True
+            break
+        time.sleep(_WAIT_SLICE)
+
+    if interrupted or timed_out:
+        _kill_tree(proc)
+    _join_pumps(pumps, _KILL_JOIN_GRACE if (interrupted or timed_out)
+                else _EXIT_JOIN_GRACE)
+    output = _assemble(out_chunks, err_chunks)
+    if interrupted:
+        output += "\n(用户中断了本轮对话)"
+    elif timed_out:
+        output += f"\nERROR: timeout for {timeout}s"
+    return output
 
 
 # --- Windows 执行器: Git Bash 优先, PowerShell 兜底 ---
@@ -169,51 +318,24 @@ def bash_tool(params: dict, workdir: Optional[str] = None) -> str:
         argv = [bash, "-lc", cmd]
     else:
         argv = ["sh", "-lc", cmd]
-    try:
-        result = subprocess.run(
-            argv,
-            capture_output=True,
-            stdin=subprocess.DEVNULL,
-            text=True,
-            timeout=30,
-            encoding="utf-8",
-            errors="replace",
-            cwd=cwd,
-        )
-        output = result.stdout
-        if result.stderr:
-            output += f'\nSTDERR: {result.stderr}'
-        return output
-    except subprocess.TimeoutExpired:
-        return 'ERROR: timeout for 30s'
+    if params.get("background"):
+        return _start_background(argv, cwd)
+    return _run_command(argv, cwd, _clamp_timeout(params.get("timeout")))
 
 def powershell_tool(params: dict, workdir: Optional[str] = None) -> str:
     cmd = params.get('command', "")
     cwd = str(Path(workdir)) if workdir else None
     shell = _windows_powershell()
-    try:
-        result = subprocess.run(
-            [
-                shell,
-                "-NoProfile",
-                "-NonInteractive",
-                "-Command",
-                _shell_preamble(shell) + cmd,
-            ],
-            capture_output=True,
-            stdin=subprocess.DEVNULL,
-            text=True,
-            timeout=30,
-            encoding="utf-8",
-            errors="replace",
-            cwd=cwd,
-        )
-        output = result.stdout
-        if result.stderr:
-            output += f'\nSTDERR: {result.stderr}'
-        return output
-    except subprocess.TimeoutExpired:
-        return 'ERROR: timeout for 30s'
+    argv = [
+        shell,
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        _shell_preamble(shell) + cmd,
+    ]
+    if params.get("background"):
+        return _start_background(argv, cwd)
+    return _run_command(argv, cwd, _clamp_timeout(params.get("timeout")))
 
 def read_tool(params: dict, workdir: Optional[str] = None) -> str:
     path = resolve_path(params.get('path', ''), workdir)
@@ -244,3 +366,94 @@ def present_plan_tool(params: dict, workdir: Optional[str] = None) -> str:
     n = len(plan.splitlines()) if plan else 0
     return (f"Plan received ({n} lines). The user has APPROVED your plan - "
             "start implementing it right away. Do not call present_plan again.")
+
+
+# --- 后台任务: 常驻命令(服务器/监听进程)脱离轮次生命周期 ---
+#
+# 服务器类命令前台跑只有两种结局: 30s 超时被杀(服务起不来), 或模型没配
+# timeout 时拖着轮次干等。background=true 让命令脱离会话立即返回, 输出
+# 进日志文件, 模型按需 task_output 看日志、task_stop 停进程。
+# 注册表是进程内存 dict: 服务进程生命周期 = x-code 服务进程生命周期,
+# 重启后残留的日志文件无害, 条目丢失只影响对旧任务的查询/停止。
+
+_BG_DIR = Path(tempfile.gettempdir()) / "xcode-bg"
+_bg_tasks: dict[str, dict] = {}
+_bg_lock = threading.Lock()
+_bg_seq = 0
+
+
+def _bg_entry(task_id: str) -> Optional[dict]:
+    with _bg_lock:
+        return _bg_tasks.get(task_id)
+
+
+def _start_background(argv: List[str], cwd: Optional[str]) -> str:
+    """后台启动: stdout/stderr 合流进日志文件, 立即返回 task_id + 日志路径。"""
+    _BG_DIR.mkdir(parents=True, exist_ok=True)
+    with _bg_lock:
+        global _bg_seq
+        _bg_seq += 1
+        task_id = f"bg-{_bg_seq}"
+    log_path = _BG_DIR / f"{task_id}-{uuid.uuid4().hex[:8]}.log"
+    log_file = open(log_path, "wb")
+    try:
+        proc = subprocess.Popen(
+            argv,
+            stdout=log_file,
+            stderr=subprocess.STDOUT,
+            stdin=subprocess.DEVNULL,
+            cwd=cwd,
+            **_popen_kwargs(),
+        )
+    except OSError as e:
+        log_file.close()
+        return f"ERROR: failed to start background command: {e}"
+    finally:
+        # 子进程已持有自己的句柄, 父侧随即关闭, 不阻塞日志文件被删除
+        log_file.close()
+    with _bg_lock:
+        _bg_tasks[task_id] = {"proc": proc, "log": str(log_path)}
+    return (f"Background task started: id={task_id} pid={proc.pid}\n"
+            f"log: {log_path}\n"
+            f"Read recent output with task_output; stop it with task_stop.")
+
+
+def _bg_status(task: dict) -> str:
+    code = task["proc"].poll()
+    if code is None:
+        return "running"
+    return f"exited (code {code})"
+
+
+def task_output_tool(params: dict, workdir: Optional[str] = None) -> str:
+    """读后台任务的日志尾部 + 存活状态。只读文件尾部, 服务日志再大也不撑上下文。"""
+    task_id = str(params.get("task_id", "")).strip()
+    task = _bg_entry(task_id)
+    if task is None:
+        return f"ERROR: unknown task_id: {task_id}"
+    try:
+        tail = max(1, min(int(params.get("tail_lines", 50)), 500))
+    except (TypeError, ValueError):
+        tail = 50
+    try:
+        with open(task["log"], "rb") as f:
+            lines = f.read().decode("utf-8", errors="replace").splitlines()
+    except OSError as e:
+        return f"ERROR: cannot read log: {e}"
+    recent = "\n".join(lines[-tail:])
+    header = f"[{task_id}] {_bg_status(task)}"
+    if not recent.strip():
+        return f"{header}\n(no output yet)"
+    return f"{header}\n{recent}"
+
+
+def task_stop_tool(params: dict, workdir: Optional[str] = None) -> str:
+    """停后台任务: 杀整棵进程树(服务常带子进程, 只杀主进程会漏)。"""
+    task_id = str(params.get("task_id", "")).strip()
+    task = _bg_entry(task_id)
+    if task is None:
+        return f"ERROR: unknown task_id: {task_id}"
+    if task["proc"].poll() is not None:
+        return f"[{task_id}] already exited (code {task['proc'].poll()})."
+    _kill_tree(task["proc"])
+    return f"[{task_id}] stopped."

@@ -9,6 +9,7 @@ WSL 启动器); 找不到 Git Bash 才退回 PowerShell。PowerShell 自身 pwsh
 """
 
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -105,15 +106,11 @@ def test_无GitBash时bash_tool退回PowerShell(monkeypatch, tmp_path):
     reset(monkeypatch, tmp_path)                      # 什么都不装
     captured = {}
 
-    class _FakeResult:
-        stdout = "ps-out"
-        stderr = ""
-
-    def fake_run(argv, **kwargs):
+    def fake_run_command(argv, cwd, timeout):
         captured["argv"] = argv
-        return _FakeResult()
+        return "ps-out"
 
-    monkeypatch.setattr(tools.subprocess, "run", fake_run)
+    monkeypatch.setattr(tools, "_run_command", fake_run_command)
 
     out = tools.bash_tool({"command": "ls"}, None)
 
@@ -165,3 +162,46 @@ def test_启动检查_缺失时给可操作的说明(monkeypatch, tmp_path):
     assert reason is not None
     assert tools.GIT_DOWNLOAD_URL in reason           # 告诉用户去哪装
     assert "重启" in reason                            # 告诉用户装完要重启
+
+
+# ------------------------------------------------------------
+# 执行内核: 超时杀树 / 打断立即返回 / timeout 钳制
+# 回归钉: 旧实现 subprocess.run(timeout=30) 超时只 kill 直接子进程,
+# 孙进程(如 MC 服务器的 java)继承管道 → kill 后无超时的 communicate()
+# 永久阻塞 → turn 工作线程卡死、对话冻结。
+# ------------------------------------------------------------
+
+def test_超时后杀树并按时返回_不被孙进程拖死():
+    """`sleep 30 & wait`: bash 存活期间孙进程持有 stdout 管道。
+    新实现必须整树击杀、按时返回; 旧实现在这里永久挂死。"""
+    t0 = time.monotonic()
+    out = tools.bash_tool({"command": "sleep 30 & wait", "timeout": 2})
+
+    assert "ERROR: timeout for 2s" in out
+    assert time.monotonic() - t0 < 15                 # 真挂死时远超此值
+
+
+def test_打断检查让长命令立即返回():
+    tools.TOOL_CANCEL_CHECK.set(lambda: True)
+    try:
+        t0 = time.monotonic()
+        out = tools.bash_tool({"command": "sleep 30", "timeout": 60})
+
+        assert "用户中断" in out
+        assert time.monotonic() - t0 < 10
+    finally:
+        tools.TOOL_CANCEL_CHECK.set(None)
+
+
+def test_普通命令正常收集输出():
+    out = tools.bash_tool({"command": "echo shell-ok"})
+
+    assert "shell-ok" in out
+    assert "ERROR" not in out
+
+
+def test_timeout参数钳制():
+    assert tools._clamp_timeout(None) == 30           # 缺省
+    assert tools._clamp_timeout("x") == 30            # 坏值兜底
+    assert tools._clamp_timeout(0) == 1               # 下限
+    assert tools._clamp_timeout(9999) == 600          # 上限
