@@ -28,6 +28,7 @@ from storage import SessionStore
 from tools import (ToolRegistry, bash_tool, glob_tool, grep_tool, read_tool,
                    write_tool, present_plan_tool, powershell_tool,
                    task_output_tool, task_stop_tool, todo_tool,
+                   web_fetch_tool, web_search_tool,
                    git_bash_unavailable_reason)
 from agent_tools import AGENT_TOOL_SPECS, get_orchestrator, register_agent_tools
 
@@ -336,11 +337,13 @@ glob_spec = {
     },
 }
 
-from tools import todo_spec as _todo_spec   # noqa: E402  (spec 与实现同源)
+from tools import (todo_spec as _todo_spec,     # noqa: E402  (spec 与实现同源)
+                   web_fetch_spec, web_search_spec)
 
 TOOLS = [bash_spec, powershell_spec, read_file_spec, write_file_spec,
          grep_spec, glob_spec, task_output_spec, task_stop_spec,
-         present_plan_spec, _todo_spec] + AGENT_TOOL_SPECS
+         present_plan_spec, _todo_spec,
+         web_search_spec, web_fetch_spec] + AGENT_TOOL_SPECS
 
 
 # --- 终端视觉规范: 调色板 + 版式 ---
@@ -850,6 +853,8 @@ TOOL_REQUIREMENTS = {
     "grep": READ_ONLY_MODE,             # 纯只读搜索
     "glob": READ_ONLY_MODE,             # 纯只读列文件
     "todo": READ_ONLY_MODE,             # 会话任务清单（只写 ~/.x-code/todos/ 元数据）
+    "web_search": READ_ONLY_MODE,       # 免 key 网页搜索, 纯只读
+    "web_fetch": READ_ONLY_MODE,        # 抓 URL 提取正文, 不落盘
     "write_file": WORKSPACE_WRITE_MODE, # 落盘文件（本地写）
     "agent_tool": WORKSPACE_WRITE_MODE, # 派生 subagent（写 agents 状态目录）
     # present_plan 走 WORKSPACE_WRITE 档: plan 模式下它触发"可升级弹问"
@@ -870,7 +875,9 @@ def build_registry() -> ToolRegistry:
         name="present_plan", handler=present_plan_tool).register(
         name="todo", handler=todo_tool).register(
         name="grep", handler=grep_tool).register(
-        name="glob", handler=glob_tool)
+        name="glob", handler=glob_tool).register(
+        name="web_search", handler=web_search_tool).register(
+        name="web_fetch", handler=web_fetch_tool)
     return register_agent_tools(registry)
 
 

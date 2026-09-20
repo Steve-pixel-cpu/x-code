@@ -38,8 +38,9 @@ def truncate_tool_output(output: str) -> str:
     return (
         output[:_KEEP_HEAD]
         + f"\n\n[... output truncated: {omitted} characters omitted. "
-        f"Repeat the call more narrowly (specific file range / filtered command) "
-        f"if you need the omitted part ...]\n\n"
+        f"Do NOT repeat this same call unchanged — it will truncate the same "
+        f"way again. Narrow it instead: read_file with offset/limit, a more "
+        f"specific grep pattern/path, or a filtered command ...]\n\n"
         + output[-_KEEP_TAIL:]
     )
 
@@ -344,12 +345,27 @@ def powershell_tool(params: dict, workdir: Optional[str] = None) -> str:
         return _start_background(argv, cwd)
     return _run_command(argv, cwd, _clamp_timeout(params.get("timeout")))
 
+# read_file 整读分页窗口: 超过就只回首页 + 翻页指令, 不交给通用截断。
+# head+tail 掐中段对大文件是灾难: 目标代码恰在中段时, 模型会把同一个
+# 整读调用原样重发（实测 24 次）也看不见目标——分页协议让它照抄 offset。
+_READ_WINDOW_CHARS = 12_000
+
+
+def _window_line_count(lines: list[str], budget: int) -> int:
+    """预算字符数内能装下的行数（至少 1 行, 防单行超长的死循环）。"""
+    total = 0
+    for i, line in enumerate(lines):
+        total += len(line)
+        if total > budget:
+            return max(1, i)
+    return len(lines)
+
+
 def read_tool(params: dict, workdir: Optional[str] = None) -> str:
-    """读文本文件。大文件必须用 offset/limit 按行取窗口: 整读超限会被
-    truncate_tool_output 掐掉中段, 模型只能靠 bash sed 绕路（多花调用数、
-    还助长排查循环）。窗口返回带行号头和续读提示, 模型照着 offset 翻页即可。
-    errors="replace": 不可解码字节就地变 U+FFFD, 不再整读报错——正文照常
-    拿到, 乱码由调用方按需处理。"""
+    """读文本文件。大文件必须用 offset/limit 按行取窗口: 整读超窗口时
+    返回首页 + 明确翻页指令（"continue with offset=N"）, 而不是掐中段——
+    分页是照抄参数就能走的确定路径, 不依赖模型自己想出绕路方案。
+    errors="replace": 不可解码字节就地变 U+FFFD, 不再整读报错。"""
     path = resolve_path(params.get('path', ''), workdir)
     try:
         with open(path, 'r', encoding="utf-8", errors="replace") as f:
@@ -366,7 +382,10 @@ def read_tool(params: dict, workdir: Optional[str] = None) -> str:
         return "ERROR: offset/limit must be integers"
     offset = max(1, offset)
     if offset == 1 and limit <= 0:
-        return "".join(lines)          # 小文件: 全文, 不加任何头
+        # 整读: 小文件全文原样（不加任何头）; 大文件切首页窗口
+        if sum(len(line) for line in lines) <= _READ_WINDOW_CHARS:
+            return "".join(lines)
+        limit = _window_line_count(lines, _READ_WINDOW_CHARS)
     start = offset - 1
     end = start + limit if limit > 0 else total
     chunk = lines[start:end]
@@ -374,7 +393,9 @@ def read_tool(params: dict, workdir: Optional[str] = None) -> str:
         return f"ERROR: offset {offset} is beyond the end of file ({total} lines)"
     next_off = min(end, total) + 1
     header = (f"[{path} lines {offset}-{min(end, total)} of {total} total"
-              + (f"; continue with offset={next_off}" if next_off <= total else "")
+              + (f"; continue with offset={next_off}"
+                 + (f" limit={limit}" if limit else "")
+                 if next_off <= total else "; this is the end of the file")
               + "]")
     return header + "\n" + "".join(chunk)
 
@@ -797,3 +818,179 @@ def grep_tool(params: dict, workdir: Optional[str] = None) -> str:
         head = f"{total_matches} match(es) of /{pattern}/ in {matched_files} file(s):"
         return head + NL + NL.join(hits)
     return NL.join(hits)
+
+# ---------------------------------------------------------------------------
+# Web 工具: web_search（websearch-py 多引擎免 key 搜索, 引擎自动回退）+
+# web_fetch（trafilatura 抓取正文）。定位: 只读外部信息, 输出纯文本进上下文。
+# ---------------------------------------------------------------------------
+
+_WEB_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+           "(KHTML, like Gecko) Chrome/124.0 Safari/537.36")
+
+# trafilatura 惰性导入缓存: 失败时缓存错误, 避免每轮调用重复 import 失败
+_trafilatura_state: dict = {}
+
+# websearch_py 惰性导入缓存（同上, 失败只报一次）
+_websearch_state: dict = {}
+
+# 引擎回退顺序: 实测部分网络只可达 Bing, 故 bing 优先, 其余做异地回退
+_WEB_ENGINES = ["bing", "duckduckgo", "brave", "qwant"]
+
+
+def _get_websearcher(timeout: int):
+    """惰性构建 WebSearcher(多引擎回退)。返回 (searcher 或 None, 错误信息)。"""
+    if "err" in _websearch_state:
+        return None, _websearch_state["err"]
+    try:
+        import warnings
+        from websearch_py import WebSearcher
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            searcher = WebSearcher(engines=list(_WEB_ENGINES), timeout=timeout)
+        return searcher, None
+    except Exception as e:
+        _websearch_state["err"] = f"websearch-py not available: {e}"
+        return None, _websearch_state["err"]
+
+
+def _get_trafilatura():
+    """惰性 import trafilatura。返回 (module 或 None, 错误信息或 None)。"""
+    if "mod" in _trafilatura_state or "err" in _trafilatura_state:
+        return _trafilatura_state.get("mod"), _trafilatura_state.get("err")
+    try:
+        import trafilatura  # type: ignore
+        _trafilatura_state["mod"] = trafilatura
+        return trafilatura, None
+    except Exception as e:  # ImportError 等加载失败
+        _trafilatura_state["err"] = f"trafilatura not available: {e}"
+        return None, _trafilatura_state["err"]
+
+
+def _http_get(url: str, timeout: int):
+    """统一 HTTP GET。返回 (body_bytes, final_url, 错误信息)。
+    用标准库 urllib: 搜索/抓取不新增重量级 HTTP 依赖。"""
+    import urllib.request
+    req = urllib.request.Request(url, headers={"User-Agent": _WEB_UA})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return resp.read(), resp.geturl(), None
+    except Exception as e:
+        return b"", url, str(e)
+
+
+def web_search_tool(params: dict, workdir: Optional[str] = None) -> str:
+    """web_search handler: 免 key DuckDuckGo 搜索, 返回标题+链接+摘要。
+    定位: 实时信息/训练截止后事件/不确定事实时才用。"""
+    query = str(params.get("query") or "").strip()
+    if not query:
+        return "ERROR: query is required"
+    try:
+        max_results = max(1, min(10, int(params.get("max_results", 5))))
+    except (TypeError, ValueError):
+        max_results = 5
+    try:
+        timeout = max(3, min(30, int(params.get("timeout", 10))))
+    except (TypeError, ValueError):
+        timeout = 10
+
+    searcher, err = _get_websearcher(timeout)
+    if err:
+        return f"ERROR: {err}"
+    try:
+        import warnings
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            resp = searcher.search(query, max_results=max_results,
+                                   language="en")
+        hits = [{"title": r.titre, "url": r.url,
+                 "snippet": (r.extrait or "")} for r in resp.results]
+    except Exception as e:  # 含 AllEnginesFailedError(各引擎错误已在其消息里)
+        return f"ERROR: search failed: {str(e)[:400]}"
+    if not hits:
+        return f"No results for: {query}"
+    hits = hits[:max_results]
+    lines = []
+    for i, h in enumerate(hits, 1):
+        line = f"{i}. [{h['title']}]({h['url']})"
+        if h["snippet"]:
+            line += NL + "   " + h["snippet"][:200]
+        lines.append(line)
+    return (f"{len(hits)} result(s) for '{query}':" + NL + NL.join(lines))
+
+
+def web_fetch_tool(params: dict, workdir: Optional[str] = None) -> str:
+    """web_fetch handler: trafilatura 抓 URL 提取正文纯文本, 不落盘。"""
+    url = str(params.get("url") or "").strip()
+    if not url:
+        return "ERROR: url is required"
+    if not url.startswith(("http://", "https://")):
+        return "ERROR: url must start with http:// or https://"
+    try:
+        max_chars = max(500, min(30_000, int(params.get("max_chars", 8000))))
+    except (TypeError, ValueError):
+        max_chars = 8000
+    try:
+        timeout = max(3, min(60, int(params.get("timeout", 15))))
+    except (TypeError, ValueError):
+        timeout = 15
+
+    body, final_url, err = _http_get(url, timeout)
+    if err:
+        return f"ERROR: fetch failed: {err}"
+    if not body:
+        return "ERROR: empty response"
+    trafilatura, terr = _get_trafilatura()
+    if terr:
+        return f"ERROR: {terr}"
+    try:
+        text = trafilatura.extract(
+            body, url=final_url, include_comments=False,
+            favor_recall=True) or ""
+    except Exception as e:
+        return f"ERROR: extraction failed: {e}"
+    if not text:
+        return ("ERROR: no main content extracted (page may be JS-rendered "
+                "or not an article). Try another URL.")
+    if len(text) > max_chars:
+        text = text[:max_chars] + f"... [truncated at {max_chars} chars]"
+    return final_url + NL + text
+
+
+web_search_spec = {
+    "name": "web_search",
+    "description": (
+        "Search the web (no API key; multi-engine with automatic fallback: "
+        "Bing, DuckDuckGo, Brave, Qwant). Returns title/url/snippet list. "
+        "Use ONLY for real-time info, events after your training data, or "
+        "uncertain facts - not for everyday questions you can answer directly."),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "query": {"type": "string", "description": "Search keywords"},
+            "max_results": {"type": "integer",
+                            "description": "1-10 results, default 5"},
+            "timeout": {"type": "integer",
+                        "description": "Seconds, 3-30, default 10"},
+        },
+        "required": ["query"],
+    },
+}
+
+web_fetch_spec = {
+    "name": "web_fetch",
+    "description": (
+        "Fetch a URL and extract main article text with trafilatura. Returns "
+        "plain text; writes no files. Pair with web_search: search first, then "
+        "fetch the most promising hit for full text."),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "url": {"type": "string", "description": "http(s) URL"},
+            "max_chars": {"type": "integer",
+                          "description": "Truncate text to N chars, default 8000"},
+            "timeout": {"type": "integer",
+                        "description": "Seconds, 3-60, default 15"},
+        },
+        "required": ["url"],
+    },
+}

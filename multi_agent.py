@@ -22,7 +22,8 @@ TOOL_WHITELIST: dict[str, set[str]] = {
     "explore": {"read_file"},
     "plan": {"read_file"},
     "verification": {"bash", "read_file"},
-    "general": {"bash", "read_file", "write_file"},
+    "general": {"bash", "read_file", "write_file", "web_search", "web_fetch"},
+    "explore_web": {"web_search", "web_fetch"},
 }
 
 class AgentStatus(Enum):

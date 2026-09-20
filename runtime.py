@@ -1,6 +1,7 @@
 from typing import Protocol, Optional, List
 from concurrent.futures import ThreadPoolExecutor
 import contextvars
+import threading
 
 from pydantic import BaseModel
 
@@ -46,6 +47,32 @@ TURN_ITERATIONS_EXHAUSTED_NOTICE = (
     "this conversation. In your next turn, do NOT repeat reads or checks "
     "you have already done — continue directly with the next concrete "
     "action."
+)
+
+# --- 重复只读调用护栏: 确定性反自旋。观测到的失败模式: 大文件整读被截断
+# 掐掉中段后, 模型把同一个调用原样重发几十次（一次会话里同一 read_file
+# 重复 24 次）。提示词拦不住这种病理行为, 只能在执行层兜住:
+# read_file/grep/glob 是文件系统的纯函数, 期间没有任何写入时, 完全相同
+# 的调用结果必然相同——重复零信息, 第 3 次起直接拒绝, 零损失。
+PURE_READ_TOOLS = frozenset({"read_file", "grep", "glob"})
+REPEAT_WARN_ON = 2       # 第 2 次: 照常执行, 结果附加警告
+REPEAT_DENY_FROM = 3     # 第 3 次起: 拒绝执行
+REPEAT_WARN_TEXT = (
+    "[System note] This is the 2nd time you ran this EXACT same read-only "
+    "call, and nothing has been written since — the result is guaranteed "
+    "identical to what you already have. Do NOT run it a 3rd time (it will "
+    "be refused). If the part you need was truncated, change the parameters "
+    "(read_file offset/limit to page through a large file, or a narrower "
+    "grep pattern/path); otherwise act on what you already have."
+)
+REPEAT_DENIED_TEXT = (
+    "REFUSED — this exact read-only call already ran twice in this session "
+    "with no writes in between, so repeating it cannot produce new "
+    "information. Change the parameters instead: read_file with offset/"
+    "limit to page through a large file, a narrower grep pattern or a "
+    "specific path — or act on the results already in this conversation. "
+    "If you suspect the content actually changed, verify that via a "
+    "different tool (e.g. bash) rather than repeating this call."
 )
 
 # --- Token 用量追踪 ---
@@ -276,6 +303,13 @@ class ConversationRuntime:
         # 超过余量时复用旧摘要、保留区随之变长——旧实现每次请求都从全量
         # 历史重算一遍摘要, 纯浪费。
         self._compact_cache: Optional[tuple[int, str]] = None
+        # 重复只读调用护栏状态: (tool_name, input) -> (执行次数, 记账时的
+        # 变异序号)。写入/bash 等副作用工具推进变异序号, 序号变了视为
+        # 首次（文件真的变了, 重读合法）。压缩激活时清零——旧结果可能
+        # 已被归档, 重读重新合法。并行执行进池线程, 访问须持锁。
+        self._mutation_seq = 0
+        self._read_calls: dict[tuple[str, str], tuple[int, int]] = {}
+        self._guard_lock = threading.Lock()
         # 事件镜像钩子（Web 端工具卡片闭合用, CLI 默认 None 行为不变）:
         # - on_tool_finalized: 工具未经执行就被终局（权限拒绝 / hook 拦截 /
         #   prompter 拒绝）时触发——这条路径不经过 tool_executor, 镜像方
@@ -400,9 +434,36 @@ class ConversationRuntime:
             ), None
         return None, pre_res
 
+    def _register_read_call(self, tool_name: str, tool_input: str) -> Optional[int]:
+        """护栏记账。纯读工具返回本次是第几次执行（1=首次）; 其他工具推进
+        变异序号并返回 None（不记账）。并行执行下持锁串行记账。"""
+        if tool_name not in PURE_READ_TOOLS:
+            with self._guard_lock:
+                self._mutation_seq += 1
+            return None
+        key = (tool_name, tool_input)
+        with self._guard_lock:
+            count, at_seq = self._read_calls.get(key, (0, self._mutation_seq))
+            if at_seq != self._mutation_seq:
+                count = 0               # 有写入介入: 结果会变, 视作首次
+            count += 1
+            self._read_calls[key] = (count, self._mutation_seq)
+            return count
+
     def _execute_tool(self, tool_block: ToolContentBlock, pre_res: HookResult) -> Message:
-        """执行管线: 工具本体 + Pre/Post hook 反馈合并。无共享可变状态,
-        同一条消息里相互独立的 tool_use 可由 run_turn 并发调度。"""
+        """执行管线: 工具本体 + Pre/Post hook 反馈合并 + 重复只读护栏。
+        无其他共享可变状态, 同一条消息里相互独立的 tool_use 可由 run_turn
+        并发调度（护栏状态自身持锁）。"""
+        repeat_n = self._register_read_call(tool_block.name, tool_block.input)
+        if repeat_n is not None and repeat_n >= REPEAT_DENY_FROM:
+            # 拒绝执行: 结果已在历史里, 拒绝零损失。is_error 让模型把它
+            # 当反馈读, 而不是当成又一次"成功但没看懂"的结果。
+            return Message.tool_result(
+                id = tool_block.id,
+                name = tool_block.name,
+                output = REPEAT_DENIED_TEXT,
+                is_error = True,
+            )
         is_tool_error = False
         try:
             output = self._tool_executor.execute(
@@ -427,6 +488,9 @@ class ConversationRuntime:
         if not is_tool_error and not post_res.denied:
             # hook 反馈拼进文本后 output 已是新 str, meta 需重新挂上
             output = ToolOutput(str(output)).with_meta(meta) if meta else output
+        if repeat_n is not None and repeat_n >= REPEAT_WARN_ON:
+            # 第 2 次: 结果照常给（容忍一次健忘）, 但把"再犯会被拒"说明白
+            output = f"{output}\n\n{REPEAT_WARN_TEXT}"
 
         # result_meta 随消息落盘, Web 端历史回放可重建富展示（diff 等）。
         # 内部 Message/持久化层认识它, API 序列化 (_convert_message) 忽略之。
@@ -476,6 +540,9 @@ class ConversationRuntime:
         ) == 0:
             return False
         self._compact_active = True
+        # 旧只读结果可能已被归档出模型视图: 重读重新合法, 护栏清零重记
+        with self._guard_lock:
+            self._read_calls.clear()
         if self._on_compacted is not None:
             try:
                 self._on_compacted()

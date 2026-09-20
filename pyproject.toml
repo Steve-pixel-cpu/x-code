@@ -9,6 +9,8 @@ dependencies = [
     "fastapi>=0.115",
     "uvicorn[standard]>=0.30",
     "tzdata>=2026.4",
+    "trafilatura>=2.0",
+    "websearch-py>=0.1.0",
 ]
 
 [dependency-groups]

@@ -3782,64 +3782,52 @@ document.addEventListener("scroll", tipHide, true);
   $("input").focus();
 })();
 (() => {
-/* ===== 悬浮滚动: 侧栏被截断的项目名 / 任务标题, 鼠标悬浮时自动横向滚动展示全文 ===== */
-  const HS_SPEED = 42;          // 滚动速度 px/s
-  const HS_START_DELAY = 350;   // ms, 悬停多久后开始滚动
-  const HS_END_HOLD = 900;      // ms, 滚到末尾后停留
-  const HS_LOOP_GAP = 1400;     // ms, 一个来回后的间隔
+/* ===== 悬浮循环滚动(跑马灯): 侧栏被截断的项目名 / 任务标题, 悬浮时循环滚动展示全文 ===== */
   const HS_SEL = ".session-item .title, .project-item .p-name";
-  let hsCur = null;             // { el, timer, raf }
+  const HS_SPEED = 40;    // 滚动速度 px/s
+  const HS_GAP = 56;      // 首尾相接处的间距 px
+  const HS_DELAY = 300;   // 悬停多久后开始滚动 ms
+  let hsCur = null;       // { el, html, timer }
 
-  const hsStop = reset => {
+  if (!document.getElementById("hs-marquee-style")) {   // 一次性注入样式
+    const st = document.createElement("style");
+    st.id = "hs-marquee-style";
+    st.textContent =
+      ".hs-on{text-overflow:clip}" +
+      ".hs-track{display:inline-flex;white-space:nowrap;will-change:transform;animation:hs-marquee 10s linear infinite}" +
+      ".hs-track>span{flex:none;padding-right:" + HS_GAP + "px}" +
+      "@keyframes hs-marquee{from{transform:translateX(0)}to{transform:translateX(-50%)}}";
+    document.head.appendChild(st);
+  }
+
+  const hsStop = () => {
     if (!hsCur) return;
     clearTimeout(hsCur.timer);
-    cancelAnimationFrame(hsCur.raf);
-    if (reset !== false) hsCur.el.scrollLeft = 0;
+    const el = hsCur.el, html = hsCur.html;
     hsCur = null;
-  };
-
-  const hsAnimateTo = (el, from, to, dur, done) => {
-    const t0 = performance.now();
-    const ease = t => (t < .5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2);   // easeInOutQuad
-    const step = now => {
-      if (!el.isConnected) { hsStop(); return; }   // 列表被重渲染, 元素已移除
-      const t = Math.min(1, (now - t0) / dur);
-      el.scrollLeft = Math.round(from + (to - from) * ease(t));
-      if (t < 1) { hsCur.raf = requestAnimationFrame(step); }
-      else if (done) { done(); }
-    };
-    hsCur.raf = requestAnimationFrame(step);
-  };
-
-  const makeCycle = (el, dist, dur) => {
-    const cycle = () => {
-      hsAnimateTo(el, 0, dist, dur, () => {          // → 滚到末尾
-        if (!hsCur) return;
-        hsCur.timer = setTimeout(() => {
-          hsAnimateTo(el, dist, 0, dur, () => {      // ← 滚回开头
-            if (!hsCur) return;
-            hsCur.timer = setTimeout(cycle, HS_LOOP_GAP);
-          });
-        }, HS_END_HOLD);
-      });
-    };
-    return cycle;
+    if (!el.isConnected) return;   // 列表已重渲染, 元素已丢弃, 无需还原
+    el.classList.remove("hs-on");
+    el.innerHTML = html;           // 移除轨道, 还原原始内容
   };
 
   document.addEventListener("pointerover", e => {
     const el = e.target.closest && e.target.closest(HS_SEL);
     if (hsCur && el === hsCur.el) return;
-    hsStop(true);
+    hsStop();
     if (!el) return;
-    const dist = el.scrollWidth - el.clientWidth;
-    if (dist < 3) return;                        // 没被截断就不滚动
-    const dur = Math.min(5000, Math.max(700, dist / HS_SPEED * 1000));
-    hsCur = { el, timer: 0, raf: 0 };
-    hsCur.timer = setTimeout(makeCycle(el, dist, dur), HS_START_DELAY);
+    hsCur = { el, html: el.innerHTML, timer: setTimeout(() => {
+      const dist = el.scrollWidth - el.clientWidth;
+      if (!el.isConnected || dist < 3) return;   // 未截断(或已被重渲染移除)则不滚动
+      const dur = Math.max(3, Math.round((el.scrollWidth + HS_GAP) / HS_SPEED));   // 一圈的秒数
+      el.classList.add("hs-on");
+      el.innerHTML =
+        '<span class="hs-track" style="animation-duration:' + dur + 's">' +
+        "<span>" + hsCur.html + "</span><span>" + hsCur.html + "</span></span>";
+    }, HS_DELAY) };
   });
 
   document.addEventListener("pointerout", e => {
-    if (hsCur && e.target === hsCur.el) hsStop(true);
+    if (hsCur && !hsCur.el.contains(e.relatedTarget)) hsStop();   // 离开该标题才停
   });
-  window.addEventListener("blur", () => hsStop(true));
+  window.addEventListener("blur", () => hsStop());
 })();

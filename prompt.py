@@ -327,7 +327,13 @@ class SystemPromptBuilder:
             "'files_with_matches' (default) first, 'content' when you need "
             "line-level context. - glob: filename listing with '**' "
             "recursion; use it to discover files before reading them. Both "
-            "skip node_modules/.git and binary noise automatically."
+            "skip node_modules/.git and binary noise automatically. - "
+            "web_search: search the web with DuckDuckGo (no API key "
+            "required); use it when you need up-to-date docs, releases, or "
+            "error lookups beyond your training data. - web_fetch: fetch a "
+            "URL and extract the main article text with trafilatura "
+            "(readability, no ads/nav noise); pass the concrete URL, prefer "
+            "it over raw curl for reading pages."
         )
 
     @staticmethod
