@@ -110,8 +110,13 @@ def test_turn_output_budget_stops_before_next_call():
     assert summary.budget_exhausted is True
     assert client.calls == 2
     assert summary.iterations == 2
+    # 无悬空 tool_use; 收束说明作为 user 消息落进历史——对模型解释
+    # "被掐了、证据都在、下一轮直接干活", 否则下一轮只会从头再查
     roles = [m.role for m in runtime.session().messages]
-    assert roles == ["user", "assistant", "tool", "assistant", "tool"]  # 无悬空 tool_use
+    assert roles == ["user", "assistant", "tool", "assistant", "tool", "user"]
+    notice = runtime.session().messages[-1].content[0].text
+    assert "output token budget" in notice
+    assert "do NOT re-read" in notice
 
 
 def test_turn_budget_not_triggered_when_under():
@@ -146,9 +151,10 @@ def test_max_iterations_stops_gracefully():
 # ------------------------------------------------------------
 
 def test_auto_compact_triggers_on_latest_input():
-    # 消息数充足: 过阈值且真压掉了 → True
+    # 消息数充足: 过阈值且真压掉了 → True（preserve_recent=8, 12 旧消息
+    # 才有可安全切割的位置）
     session = Session(messages=[
-        Message.user_text(f"旧消息{i} " + "x" * 40) for i in range(6)
+        Message.user_text(f"旧消息{i} " + "x" * 40) for i in range(12)
     ])
     client = ScriptedClient([make_events("ok", out_tokens=1, in_tokens=500_000)])
     runtime = ConversationRuntime(
@@ -162,10 +168,10 @@ def test_auto_compact_triggers_on_latest_input():
     summary = runtime.run_turn("hi")
 
     assert summary.auto_compacted is True
-    # 历史(内存)不被改写: 6 旧 + user"hi" + assistant 完整保留
-    assert len(runtime.session().messages) == 8
+    # 历史(内存)不被改写: 12 旧 + user"hi" + assistant 完整保留
+    assert len(runtime.session().messages) == 14
     # 当轮请求时 usage 未知 → 全量视图; 轮末激活, 自下一次请求起压缩
-    assert len(client.seen[0]) == 7
+    assert len(client.seen[0]) == 13
     assert runtime._compact_active is True
 
 
@@ -189,7 +195,7 @@ def test_auto_compact_fires_mid_turn_before_next_call():
     # 阈值在单轮中途被跨过: 第二次调用前就地压缩（此时工具结果已回填、
     # 历史一致），而不是等 turn 结束——更不会等上下文撑爆 API 报 400
     session = Session(messages=[
-        Message.user_text(f"旧消息{i} " + "x" * 40) for i in range(6)
+        Message.user_text(f"旧消息{i} " + "x" * 40) for i in range(12)
     ])
     first = make_tool_events(out_tokens=10)
     first[1].usage.input_tokens = 50_000          # 第一次调用后即跨过阈值
@@ -210,14 +216,15 @@ def test_auto_compact_fires_mid_turn_before_next_call():
     assert summary.auto_compacted is True
     assert client.calls == 2
     # 第二次调用看到的是压缩视图: 摘要开头 + 保留的最近几条, 不再是全量
+    # (12旧+user+assistant+tool=15 条, 切掉前 7 条 → 摘要 + 保留 8 条)
     second_call = client.seen[1]
-    assert len(second_call) < 9                   # 未压缩应为 6旧+user+assistant+tool
+    assert len(second_call) == 9
     assert "continued from a previous conversation" in second_call[0].content[0].text
     # 压缩不产生悬空 tool_use: tool_use 与 tool_result 必须成对保留在末尾
     assert second_call[-2].role == "assistant"
     assert second_call[-1].role == "tool"
-    # 历史(内存)不被改写: 6旧 + user + assistant(tool_use) + tool + assistant(终答)
-    assert len(runtime.session().messages) == 10
+    # 历史(内存)不被改写: 12旧 + user + assistant(tool_use) + tool + assistant(终答)
+    assert len(runtime.session().messages) == 16
 
 
 def test_context_tokens_counts_cache_usage():
@@ -258,9 +265,90 @@ def test_build_runtime_wires_loop_budgets():
 # ------------------------------------------------------------
 
 def test_config_turn_token_budget_default(tmp_path):
-    assert ConfigLoader(cwd=tmp_path, config_home=tmp_path).load().turn_token_budget() == 65_536
+    assert ConfigLoader(cwd=tmp_path, config_home=tmp_path).load().turn_token_budget() == 131_072
 
 
 def test_config_turn_token_budget_env_override(tmp_path, monkeypatch):
     monkeypatch.setenv("CLAUDE_TURN_TOKEN_BUDGET", "999")
     assert ConfigLoader(cwd=tmp_path, config_home=tmp_path).load().turn_token_budget() == 999
+
+
+# ------------------------------------------------------------
+# 迭代收束说明 — 与预算收束同语义: 模型必须知道轮次为何结束
+# ------------------------------------------------------------
+
+def test_iterations_exhausted_appends_notice():
+    client = ScriptedClient([make_tool_events(out_tokens=1)])
+    runtime = make_runtime(client, max_iterations=2)
+
+    summary = runtime.run_turn("hi")
+
+    assert summary.iterations_exhausted is True
+    assert summary.budget_exhausted is False
+    roles = [m.role for m in runtime.session().messages]
+    assert roles[-1] == "user"
+    assert "iteration limit" in runtime.session().messages[-1].content[0].text
+
+
+# ------------------------------------------------------------
+# 压缩摘要缓存 — 切割点未推进超余量时复用旧摘要, 保留区温和变长;
+# 推进超余量才重算。钉住: 摘要生成是"每若干条消息一次", 不是每请求一次
+# ------------------------------------------------------------
+
+def test_compacted_view_reuses_cached_summary_within_margin():
+    session = Session(messages=[
+        Message.user_text(f"旧消息{i} " + "x" * 40) for i in range(12)
+    ])
+    client = ScriptedClient([make_events("ok", out_tokens=1, in_tokens=100)])
+    runtime = make_runtime(client)
+    runtime._session = session               # make_runtime 不收 session, 挂上专用的
+    runtime._compact_active = True           # 直接激活, 专测视图构建
+
+    view1 = runtime._model_view()
+    cut1 = runtime._compact_cache[0]
+    assert cut1 == 4                          # 12 - preserve_recent(8)
+    assert len(view1) == 9                    # 摘要 + 保留 8 条
+
+    # 追加 2 条: 切割点若重算会前移, 但 14-4=6 <= 8+6(余量) → 复用旧摘要
+    session.messages.append(Message.user_text("新消息A"))
+    session.messages.append(Message.user_text("新消息B"))
+    view2 = runtime._model_view()
+    assert runtime._compact_cache[0] == cut1  # 缓存未失效
+    assert view2[1] is session.messages[cut1] # 保留区从同一位置起, 变长了
+    assert len(view2) == 11
+
+    # 再追加 6 条: 20-4=16 > 8+6 → 重算, 切割点前移
+    for i in range(6):
+        session.messages.append(Message.user_text(f"更多{i}"))
+    view3 = runtime._model_view()
+    cut3 = runtime._compact_cache[0]
+    assert cut3 == 12                         # 20 - 8
+    assert view3[1] is session.messages[cut3]
+    assert len(view3) == 9                    # 摘要 + 保留 8 条
+
+
+# ------------------------------------------------------------
+# 摘要内容 — 助手结论逐字保留(反循环核心: 压缩后模型仍"记得"查到了什么)
+# ------------------------------------------------------------
+
+def test_summary_preserves_assistant_findings_verbatim():
+    from compact import CompactionConfig, compact_session
+    from models import TextContentBlock, ToolContentBlock
+
+    conclusion = ("实锤了——bg-user.png 被写进 PyInstaller 的临时解包目录 "
+                  "_MEIPASS, 重启即失。")
+    msgs = [
+        Message.user_text("排查外观设置持久化"),
+        Message(role="assistant", content=[
+            TextContentBlock(text=conclusion),
+            ToolContentBlock(id="t1", name="bash", input="ls"),
+        ]),
+        Message.tool_result(id="t1", name="bash",
+                            output="x" * 500, is_error=False),
+    ] + [Message.user_text(f"填充{i}") for i in range(10)]
+
+    result = compact_session(msgs, CompactionConfig(max_estimated_tokens=0))
+
+    assert result.removed_count > 0
+    assert conclusion in result.formatted_summary   # 结论逐字活着
+    assert "do NOT re-verify" in result.formatted_summary

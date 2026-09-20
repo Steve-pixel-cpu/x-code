@@ -2335,12 +2335,51 @@ function onTurnDone(msg) {
       addNoteBubble("stopped", "已停止");
     }
   } else if (msg.budget_exhausted) {
-    addNoteBubble("warn", "本轮输出 token 预算已用尽，已提前收束本轮");
+    addBudgetNote(msg.usage);
   } else if (msg.iterations_exhausted) {
     addNoteBubble("warn", `已达单轮最大迭代次数（${msg.iterations} 次调用），已提前收束本轮`);
   }
   // 刷新侧栏标题/消息数，标题可能被自动命名更新
   (async () => { await loadSessions(); refreshDocTitle(); })();
+}
+
+/* 预算横幅: 带真实累计输出（与触发预算的计数同口径, 修复前显示的是
+ * 最后一次调用的用量）+ 一键"继续"。收束点历史已完整落定, 继续 =
+ * 用户手打"继续"发送, 无需任何服务端配合。 */
+function addBudgetNote(usage) {
+  const div = document.createElement("div");
+  div.className = "note warn";
+  const out = usage && usage.output_tokens ? fmtTokens(usage.output_tokens) : "";
+  div.textContent = "⚠ 本轮输出 token 预算已用尽"
+    + (out ? `（累计输出 ${out}，可调大 turnTokenBudget）` : "") + "，已提前收束本轮";
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "note-act";
+  btn.textContent = "继续";
+  btn.onclick = () => { btn.disabled = true; sendFixedText("继续"); };
+  div.appendChild(btn);
+  msgCol().appendChild(div);
+  scrollToBottom();
+}
+
+/* 固定文本直接开一轮: 与 sendCurrent 的非草稿、非忙碌路径同构（turn_done
+ * 之后必然处于该状态）, 不经过输入框, 不动用户正在打的草稿。 */
+function sendFixedText(text) {
+  const run = curRun();
+  if (!run || !run.ws || run.ws.readyState !== 1) {
+    toast("连接未就绪，请手动发送「继续」");
+    return;
+  }
+  addUserBubble(text, []);
+  run.busy = true;
+  run.awaiting = false;
+  run.lastThinkRow = null;   // 新一轮开始: 打断标记只属于当前轮的思考行
+  beginOptimisticThinking(run, state.sessionId, msgCol());
+  syncThinkingIndicator();
+  setBusyUi(true);
+  renderSessionList();
+  updateSendBtn();
+  sendWs({ type: "user", text, attachments: [], qid: genQid() });
 }
 
 function onSessionRenamed(msg) {
@@ -3275,7 +3314,7 @@ $("bg-file").addEventListener("change", () => {
   const file = $("bg-file").files[0];
   $("bg-file").value = "";   // 清空: 允许重复选择同一文件
   if (!file) return;
-  if (file.size > 8 * 1024 * 1024) { toast("图片过大（限 8MB）"); return; }
+  if (file.size > 20 * 1024 * 1024) { toast("图片过大（限 20MB）"); return; }
   const rd = new FileReader();
   rd.onload = async () => {
     const data = String(rd.result || "");
@@ -3469,8 +3508,11 @@ function applyAccentVars() {
   const dark = document.documentElement.dataset.theme === "dark";
   st.setProperty("--accent", c);
   st.setProperty("--accent-deep", mixHex(c, "#000000", dark ? 0.16 : 0.2));
+  // 亚克力下 soft 必须半透明: 浅色默认分支混白是实色, 内联样式优先级高于
+  // CSS 令牌块, 会盖掉亚克力的 --accent-soft 覆盖 → 用户气泡死白
   st.setProperty("--accent-soft",
-    dark ? `rgba(${r}, ${g}, ${b}, .13)` : mixHex(c, "#ffffff", 0.9));
+    themeIsAcrylic() ? `rgba(${r}, ${g}, ${b}, ${dark ? .14 : .12})`
+    : dark ? `rgba(${r}, ${g}, ${b}, .13)` : mixHex(c, "#ffffff", 0.9));
   st.setProperty("--accent-border",
     dark ? `rgba(${r}, ${g}, ${b}, .36)` : mixHex(c, "#ffffff", 0.74));
 }

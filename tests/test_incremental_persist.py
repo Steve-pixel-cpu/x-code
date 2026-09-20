@@ -76,7 +76,8 @@ def test_on_iterate_用户消息后与工具结果后各触发一次():
 def test_on_compacted_压缩视图激活时触发_历史不被改写():
     """压缩激活 = 纯通知: 历史原样保留（含完整早期消息, 无摘要消息),
     存储不需要重写——磁盘与内存天然一致。"""
-    session = Session(messages=[Message.user_text(f"旧{i} " + "x" * 40) for i in range(6)])
+    # 12 旧消息: preserve_recent=8 时才有可安全切割的位置
+    session = Session(messages=[Message.user_text(f"旧{i} " + "x" * 40) for i in range(12)])
     client = ScriptedClient([make_events("ok", in_tokens=500_000)])
     runtime = make_runtime(session, client).with_auto_compact_threshold(10_000)
     fired = []
@@ -87,8 +88,8 @@ def test_on_compacted_压缩视图激活时触发_历史不被改写():
     assert len(fired) == 1
     # 通知携带的是当时的完整历史快照, 不含续接摘要
     assert "continued from a previous conversation" not in fired[0][0].content[0].text
-    # 轮次结束后历史依旧原样: 6 旧 + user"hi" + assistant
-    assert len(session.messages) == 8
+    # 轮次结束后历史依旧原样: 12 旧 + user"hi" + assistant
+    assert len(session.messages) == 14
     assert all(
         "continued from a previous conversation" not in b.text
         for m in session.messages

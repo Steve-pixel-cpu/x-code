@@ -132,7 +132,10 @@ read_file_spec = {
     "description": (
         "Read the contents of a text file from the local filesystem and "
         "return it as a string. Use this to inspect source code, configs, "
-        "or any text-based file before editing it."
+        "or any text-based file before editing it. Files larger than a few "
+        "hundred lines are truncated in the middle when read whole — for "
+        "large files pass offset/limit to read a specific line range "
+        "instead of shelling out to sed."
     ),
     "input_schema": {
         "type": "object",
@@ -142,6 +145,21 @@ read_file_spec = {
                 "description": (
                     "Path to the file to read, e.g. 'src/main.py' or "
                     "'/home/user/notes.txt'. Supports relative and absolute paths."
+                ),
+            },
+            "offset": {
+                "type": "integer",
+                "description": (
+                    "1-based line number to start reading from. Use for "
+                    "large files instead of reading whole and getting a "
+                    "truncated middle."
+                ),
+            },
+            "limit": {
+                "type": "integer",
+                "description": (
+                    "Maximum number of lines to return, starting at offset. "
+                    "Omit (with no offset) to read the whole file."
                 ),
             },
         },

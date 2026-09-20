@@ -277,6 +277,19 @@ class SystemPromptBuilder:
             "Act economically: when the information you have is sufficient, "
             "act directly instead of gathering more; avoid exhaustive "
             "exploration and redundant verification.",
+            # 反循环: 排查类任务里"再确认一点"没有自然终点——同一文件段被
+            # 反复重读、结论被换个角度反复验证, 会把单轮预算烧光也走不到
+            # 动手。重读已读内容被明确禁止; 验证有停止规则; 被预算收束后
+            # 接着干而不是从头再查。
+            "Work from evidence already in the conversation: never re-read "
+            "files or re-run commands whose results you can already see.",
+            "Verification has a stopping rule: once a finding is confirmed "
+            "by direct evidence (you saw the code, file, or state), act on "
+            "it — re-confirming the same thing from another angle is waste, "
+            "not diligence.",
+            "If a system note says a previous turn was cut off by the "
+            "budget or iteration limit, continue from the evidence already "
+            "gathered; do not restart the investigation.",
             # 结论纪律: 审计/找茬类任务天然偏"宁滥勿缺"，扫读时标记的可疑点
             # 极易被包装成结论输出。经济性只适用于收集信息；要把一个行为
             # 称为"bug"或"误配"，必须先走完验证——闸门往往就在调用链上一层
@@ -328,7 +341,9 @@ class SystemPromptBuilder:
             "output, constraints. Poll agent_status to check on a worker; "
             "before finishing, call agent_reap to collect results you have "
             "not yet harvested. Do small tasks yourself — spawn workers only "
-            "when a subtask benefits from isolation or parallelism."
+            "when a subtask benefits from isolation or parallelism. Never "
+            "poll agent_status in a tight loop: do useful local work "
+            "between polls instead of burning calls watching a worker run."
         )
 
     def _environment_section(self) -> str:

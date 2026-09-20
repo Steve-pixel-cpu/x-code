@@ -138,23 +138,38 @@
     --code-head: rgba(17, 17, 22, .82);
     --pane-tint: rgba(16, 16, 20, .60);   /* 消息主区: 最透, 露壁纸 */
     --side-tint: rgba(11, 11, 15, .62);
-    --header-tint: rgba(16, 16, 20, .58);
+    --header-tint: rgba(16, 16, 20, .40);
     --titlebar-tint: rgba(11, 11, 15, .66);
+    /* 高亮/气泡底色转半透明: 实色会盖住 DWM 材质, 磨砂上糊出不透明色块 */
+    --hover: rgba(29, 29, 36, .55);
+    --active: rgba(35, 35, 44, .55);
+    --accent-soft: color-mix(in srgb, var(--accent) 14%, transparent);
   }
   :root[data-theme="light"][data-fx="acrylic"] {
     --bg: rgba(255, 255, 255, .72);
     --bg-side: rgba(247, 247, 248, .76);
-    --surface: rgba(255, 255, 255, .78);
-    --surface-2: rgba(243, 243, 245, .78);
-    --surface-3: rgba(234, 234, 238, .74);
+    --surface: rgba(255, 255, 255, .58);
+    --surface-2: rgba(243, 243, 245, .60);
+    --surface-3: rgba(234, 234, 238, .58);
     --pop-bg: rgba(255, 255, 255, .62);
     --overlay: rgba(24, 24, 30, .26);
     --code-bg: rgba(247, 247, 249, .72);
     --code-head: rgba(239, 239, 242, .84);
     --pane-tint: rgba(255, 255, 255, .58);
     --side-tint: rgba(247, 247, 248, .62);
-    --header-tint: rgba(255, 255, 255, .56);
-    --titlebar-tint: rgba(247, 247, 248, .68);
+    /* header-tint 要低: doc-header 叠在 pane tint 之上, 白色叠白色
+     * 会显成一条白色横带(.56 时两层叠加近实心白) */
+    --header-tint: rgba(255, 255, 255, .32);
+    --titlebar-tint: rgba(247, 247, 248, .55);
+    /* 浅色令牌里的 accent-soft/hover/active/*-soft 是不透明实色,
+     * 亚克力下会糊成死白色块(最明显: 用户消息气泡)。统一转半透明,
+     * accent-soft 用 color-mix 自动适配五种强调色主题。 */
+    --hover: rgba(243, 243, 245, .6);
+    --active: rgba(236, 236, 239, .6);
+    --accent-soft: color-mix(in srgb, var(--accent) 12%, transparent);
+    --ok-soft: rgba(231, 244, 235, .65);
+    --err-soft: rgba(251, 236, 234, .65);
+    --warn-soft: rgba(251, 242, 220, .65);
   }
   /* body 必须透明: 亚克力的磨砂来自 DWM 窗口材质(桌面透出), 页面画任何
    * 不透明垫底色都会把材质挡住。 */
@@ -166,6 +181,13 @@
     background: color-mix(in srgb, var(--header-tint) 86%, transparent);
   }
   :root[data-fx="acrylic"] .composer-shell { background: transparent; }
+  /* 输入卡玻璃化: 低实度白 + 一层磨砂。backdrop-filter 只能模糊页面内
+   * 身后的图层(pane tint / #bg-frost 已模糊的壁纸), 够不到窗外——窗外
+   * 的柔化靠 DWM 材质本身。无壁纸时此层近似无感, 开着也无害 */
+  :root[data-fx="acrylic"] #input-card {
+    -webkit-backdrop-filter: blur(18px) saturate(1.4);
+    backdrop-filter: blur(18px) saturate(1.4);
+  }
 
   /* 壁纸启用标记 data-bg="1" 挂在 <html> 上（head 预绘制脚本可设，避免刷新闪底色）。
    * 普通主题 + 壁纸: 大面积区域转半透明让图片可见, 卡片保持实底保证可读性;
@@ -175,11 +197,12 @@
   :root[data-bg="1"]:not([data-fx="acrylic"]) #titlebar { background: color-mix(in srgb, var(--bg-side) 88%, transparent); }
   :root[data-bg="1"]:not([data-fx="acrylic"]) #doc-header { background: color-mix(in srgb, var(--bg) 86%, transparent); }
   :root[data-bg="1"] .composer-shell { background: transparent; }
-  /* 遮罩强度: 亚克力下轻一档（磨砂已柔化壁纸）; 无模糊时遮罩重一点帮文字让路 */
-  :root[data-bg="1"] { --bg-scrim: rgba(10, 10, 14, .52); }
-  :root[data-theme="light"][data-bg="1"] { --bg-scrim: rgba(255, 255, 255, .46); }
-  :root[data-fx="acrylic"][data-bg="1"] { --bg-scrim: rgba(10, 10, 14, .34); }
-  :root[data-theme="light"][data-fx="acrylic"][data-bg="1"] { --bg-scrim: rgba(255, 255, 255, .30); }
+  /* 遮罩强度: 亚克力下轻一档（磨砂已柔化壁纸）; 无模糊时稍重帮文字让路。
+   * 正文卡片仍是 84%+ 实底, 可读性由卡片保证, 遮罩只管露出的壁纸区域 */
+  :root[data-bg="1"] { --bg-scrim: rgba(10, 10, 14, .38); }
+  :root[data-theme="light"][data-bg="1"] { --bg-scrim: rgba(255, 255, 255, .34); }
+  :root[data-fx="acrylic"][data-bg="1"] { --bg-scrim: rgba(10, 10, 14, .26); }
+  :root[data-theme="light"][data-fx="acrylic"][data-bg="1"] { --bg-scrim: rgba(255, 255, 255, .22); }
 
   /* 壁纸遮罩与磨砂层: z-index -1 = 壁纸(body 绘制)之上、一切 UI 之下;
    * 变量从 <html> 继承, 元素本体只管显隐与着色 */
@@ -844,6 +867,15 @@
   }
   .note.warn { color: var(--warn); background: var(--warn-soft); border-color: color-mix(in srgb, var(--warn) 26%, transparent); }
   .note.err  { color: var(--err); background: var(--err-soft); border-color: color-mix(in srgb, var(--err) 26%, transparent); }
+  /* 预算横幅的"继续"按钮: 描边胶囊, 前景随 note 颜色 */
+  .note .note-act {
+    margin-left: 10px; padding: 2px 14px;
+    font-size: calc(12px * var(--fs-ui));
+    border: 1px solid color-mix(in srgb, currentColor 45%, transparent);
+    border-radius: 999px; background: transparent; color: inherit;
+  }
+  .note .note-act:hover:not(:disabled) { background: color-mix(in srgb, currentColor 12%, transparent); }
+  .note .note-act:disabled { opacity: .45; cursor: default; }
   /* 打断收尾: 素雅一行 + 底部细分隔线, 不用警示样式 */
   .note.usage {
     color: var(--text-3);

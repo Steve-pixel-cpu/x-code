@@ -62,15 +62,15 @@ def make_runtime(session, client, threshold: int) -> ConversationRuntime:
 # ------------------------------------------------------------
 
 def test_auto_compact_view_applies_history_untouched():
-    session = Session(messages=[Message.user_text(f"旧消息{i} " + "x" * 40) for i in range(6)])
+    session = Session(messages=[Message.user_text(f"旧消息{i} " + "x" * 40) for i in range(12)])
     client = ScriptedClient([make_events("ok", out_tokens=1, in_tokens=500_000)])
     runtime = make_runtime(session, client, threshold=10_000)
 
     summary = runtime.run_turn("hi")
 
     assert summary.auto_compacted is True
-    # 历史(内存)不被改写: 6 旧 + user"hi" + assistant 完整保留, 无摘要消息
-    assert len(runtime.session().messages) == 8
+    # 历史(内存)不被改写: 12 旧 + user"hi" + assistant 完整保留, 无摘要消息
+    assert len(runtime.session().messages) == 14
     assert all(
         "continued from a previous conversation" not in b.text
         for m in runtime.session().messages
@@ -79,7 +79,7 @@ def test_auto_compact_view_applies_history_untouched():
     )
     # 跨阈值发生在本轮响应之后(usage 到手才知道), 当轮请求仍是全量视图;
     # 粘性标记已置位 → 自下一次请求起使用压缩视图(见粘性测试)
-    assert len(client.seen[0]) == 7
+    assert len(client.seen[0]) == 13
     assert runtime._compact_active is True
 
 
@@ -115,7 +115,7 @@ def test_auto_compact_over_threshold_but_nothing_removable_is_false():
 # ------------------------------------------------------------
 
 def test_auto_compact_激活后粘性生效_不因阈值回落而恢复全量():
-    session = Session(messages=[Message.user_text(f"旧消息{i} " + "x" * 40) for i in range(6)])
+    session = Session(messages=[Message.user_text(f"旧消息{i} " + "x" * 40) for i in range(12)])
     client = ScriptedClient([
         make_events("ok", out_tokens=1, in_tokens=500_000),   # 第一次: 跨过阈值, 激活
         make_events("ok", out_tokens=1, in_tokens=100),       # 第二次: usage 远低于阈值
@@ -124,13 +124,14 @@ def test_auto_compact_激活后粘性生效_不因阈值回落而恢复全量():
 
     runtime.run_turn("第一轮")
     # 第一次请求时 usage 未知, 仍是全量视图; 轮末激活粘性标记
-    assert len(client.seen[0]) == 7
+    assert len(client.seen[0]) == 13
     runtime.run_turn("第二轮")            # usage 远低于阈值, 但粘性已激活
     second_view = client.seen[1]
 
-    # 第二轮请求(usage 远低于阈值)仍使用压缩视图: [续接摘要] + 保留 4 条
-    # + 第一轮 user/assistant + 第二轮 user, 而不是恢复全量
+    # 第二轮请求(usage 远低于阈值)仍使用压缩视图: [续接摘要] + 保留 8 条
+    # (12旧+第一轮user+第一轮assistant+第二轮user=15 条, 切掉前 7 条),
+    # 而不是恢复全量
     assert "continued from a previous conversation" in second_view[0].content[0].text
-    assert len(second_view) == 5
-    # 历史依旧原样: 8 条 + 第二轮 user + assistant = 10
-    assert len(runtime.session().messages) == 10
+    assert len(second_view) == 9
+    # 历史依旧原样: 14 条 + 第二轮 user + assistant = 16
+    assert len(runtime.session().messages) == 16

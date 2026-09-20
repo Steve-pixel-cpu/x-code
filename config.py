@@ -60,7 +60,9 @@ class RuntimeFeatureConfig(BaseModel):
     # CLAUDE_THINKING_LEVEL 调低（low 明显更快——输出 tokens 是每步
     # 墙钟时间的主导项）。
     thinking_level: str = "high"
-    turn_token_budget: int = 65_536
+    # 单轮输出预算（含思考）。与 runtime.DEFAULT_TURN_OUTPUT_BUDGET 对齐:
+    # 思考型模型一次大思考烧 8k~16k, 预算太紧会把轮次掐死在动手之前。
+    turn_token_budget: int = 131_072
 
 class RuntimeConfig(BaseModel):
     merged: dict = Field(default_factory=dict)
@@ -172,7 +174,7 @@ class ConfigLoader:
             max_iterations=merged.get("maxIterations", 128),
             token_budget=merged.get("tokenBudget", 100_000),
             thinking_level=raw_level.strip().lower(),
-            turn_token_budget=merged.get("turnTokenBudget", 65_536),
+            turn_token_budget=merged.get("turnTokenBudget", 131_072),
         )
 
     @staticmethod

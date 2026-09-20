@@ -43,5 +43,6 @@ def test_bg_reject_bad_data(client):
 
 
 def test_bg_too_large(client):
-    big = "data:image/png;base64," + base64.b64encode(b"x" * (8 * 1024 * 1024 + 1)).decode()
+    # 上限与 server._BG_MAX 对齐: 解码后 20MB（前端 file.size 同为 20MB 口径）
+    big = "data:image/png;base64," + base64.b64encode(b"x" * (20 * 1024 * 1024 + 1)).decode()
     assert client.post("/api/bg", json={"data": big}).status_code == 400

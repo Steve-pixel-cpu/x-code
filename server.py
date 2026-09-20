@@ -1173,7 +1173,7 @@ async def api_post_icon(request: dict):
 
 
 # --- 背景图片: 设置 → 外观 可上传; 存 static/bg-user.png, 前端经 /static/ 读取 ---
-_BG_MAX = 8 * 1024 * 1024
+_BG_MAX = 20 * 1024 * 1024
 
 
 def _bg_ver() -> int:
@@ -1196,7 +1196,7 @@ async def api_post_bg(request: dict):
             raise HTTPException(status_code=400, detail="背景图必须是 PNG/JPEG/WebP 的 dataURL")
         raw = base64.b64decode(m.group(2))
         if len(raw) > _BG_MAX:
-            raise HTTPException(status_code=400, detail="背景图过大（解码后限 8MB）")
+            raise HTTPException(status_code=400, detail="背景图过大（解码后限 20MB）")
         live.write_bytes(raw)
     return {"ok": True, "ver": _bg_ver()}
 

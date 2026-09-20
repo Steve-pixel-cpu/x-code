@@ -345,13 +345,38 @@ def powershell_tool(params: dict, workdir: Optional[str] = None) -> str:
     return _run_command(argv, cwd, _clamp_timeout(params.get("timeout")))
 
 def read_tool(params: dict, workdir: Optional[str] = None) -> str:
+    """读文本文件。大文件必须用 offset/limit 按行取窗口: 整读超限会被
+    truncate_tool_output 掐掉中段, 模型只能靠 bash sed 绕路（多花调用数、
+    还助长排查循环）。窗口返回带行号头和续读提示, 模型照着 offset 翻页即可。
+    errors="replace": 不可解码字节就地变 U+FFFD, 不再整读报错——正文照常
+    拿到, 乱码由调用方按需处理。"""
     path = resolve_path(params.get('path', ''), workdir)
     try:
-        with open(path, 'r', encoding="utf-8") as f:
-            content = f.read()
+        with open(path, 'r', encoding="utf-8", errors="replace") as f:
+            lines = f.readlines()
     except FileNotFoundError:
         return f'ERROR: file not found {path}'
-    return content
+    except OSError as e:
+        return f'ERROR: cannot read {path}: {e}'
+    total = len(lines)
+    try:
+        offset = int(params.get("offset") or 1)
+        limit = int(params.get("limit") or 0)
+    except (TypeError, ValueError):
+        return "ERROR: offset/limit must be integers"
+    offset = max(1, offset)
+    if offset == 1 and limit <= 0:
+        return "".join(lines)          # 小文件: 全文, 不加任何头
+    start = offset - 1
+    end = start + limit if limit > 0 else total
+    chunk = lines[start:end]
+    if not chunk:
+        return f"ERROR: offset {offset} is beyond the end of file ({total} lines)"
+    next_off = min(end, total) + 1
+    header = (f"[{path} lines {offset}-{min(end, total)} of {total} total"
+              + (f"; continue with offset={next_off}" if next_off <= total else "")
+              + "]")
+    return header + "\n" + "".join(chunk)
 
 def _unified_diff(old_text: str, new_text: str, path: str) -> str:
     """两版文本的 unified diff（无 trailing 换行噪音）。"""

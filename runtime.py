@@ -5,7 +5,13 @@ import contextvars
 from pydantic import BaseModel
 
 from api_client import AssistantEvent, TextDeltaEvent, ToolUseEvent, MessageStopEvent, ApiClient
-from compact import compact_session, CompactionConfig
+from compact import (
+    CompactionConfig,
+    continuation_message,
+    cut_point,
+    format_compact_summary,
+    summarize_messages,
+)
 from hooks import HookRunner, HookResult
 from models import Message, TextContentBlock, AnyContentBlock, ToolContentBlock, Session
 from permissions import PermissionMode, PermissionPolicy, PermissionPrompter, PermissionDecision
@@ -16,9 +22,31 @@ DEFAULT_MAX_ITERATIONS = 128
 # 装 max_tokens=32768 的输出位, 阈值若贴着窗口设, 永远轮不到它触发,
 # 只会等 API 报 context length 而整轮炸掉。取 128k 窗口的 ~75%。
 DEFAULT_AUTO_COMPACT_THRESHOLD = 100_000
-# 单轮输出预算（output_tokens 含思考）。正常单次调用被服务端 max_tokens=32768
-# 硬顶，取两倍意味着只有"失控轮"（超长思考连环调用）会被拦下。
-DEFAULT_TURN_OUTPUT_BUDGET = 65_536
+# 单轮输出预算（output_tokens 含思考）。思考型模型一次"汇总证据"级的
+# 大思考就能烧掉 1/4 预算（GLM 系强制思考, high 档上限 16k/次）, 预算太紧
+# 会把轮次稳定掐死在"证据齐了"和"动手改"之间——排查死循环的一环。
+# 131072 ≈ 容纳 8 次大思考调用; CLAUDE_TURN_TOKEN_BUDGET 可覆盖。
+DEFAULT_TURN_OUTPUT_BUDGET = 131_072
+
+# --- 轮次收束说明: 预算/迭代耗尽对模型是不可见的截断——只把警告发给
+# 前端的话, 模型不知道自己被掐过, 下一轮只会重新排查。把收束原因作为
+# user 消息写进历史, 下一轮模型才可能"接着干"而不是"从头查"。 ---
+TURN_BUDGET_EXHAUSTED_NOTICE = (
+    "[System note] This turn was stopped early because the per-turn output "
+    "token budget ran out. Nothing you did is lost: every file you read, "
+    "command you ran and conclusion you reached is already in this "
+    "conversation. In your next turn, do NOT re-read files or re-run "
+    "commands whose results you can already see, and do NOT restart the "
+    "investigation — go straight to the next concrete action (make the "
+    "edits, run the checks, or give the final answer)."
+)
+TURN_ITERATIONS_EXHAUSTED_NOTICE = (
+    "[System note] This turn was stopped early because the per-turn "
+    "iteration limit was reached. Your evidence and conclusions are all in "
+    "this conversation. In your next turn, do NOT repeat reads or checks "
+    "you have already done — continue directly with the next concrete "
+    "action."
+)
 
 # --- Token 用量追踪 ---
 class TokenUsage(BaseModel):
@@ -41,13 +69,20 @@ class TokenUsage(BaseModel):
 
 class UsageTracker:
     def __init__(self):
-        self._latest_turn = TokenUsage()
+        self._turn_accum = TokenUsage()
         self._cumulative = TokenUsage()
         self._turns = 0
 
+    def begin_turn(self):
+        """用户回合开始: 清空按轮累加器。调用点在 run_turn 顶部, 循环层
+        预算检查与本累加器共用同一口径——预算按它触发, 展示也按它显示。"""
+        self._turn_accum = TokenUsage()
 
     def record(self, usage: TokenUsage):
-        self._latest_turn = usage
+        self._turn_accum.input_tokens += usage.input_tokens
+        self._turn_accum.output_tokens += usage.output_tokens
+        self._turn_accum.cache_creation_input_tokens += usage.cache_creation_input_tokens
+        self._turn_accum.cache_read_input_tokens += usage.cache_read_input_tokens
 
         self._cumulative.input_tokens += usage.input_tokens
         self._cumulative.output_tokens += usage.output_tokens
@@ -57,7 +92,10 @@ class UsageTracker:
         self._turns += 1
 
     def current_turn_usage(self) -> TokenUsage:
-        return self._latest_turn
+        """本轮（一次 run_turn）的累计用量: 多次 API 调用相加, 而非最近一次。
+        旧实现返回 last-call, 曾让"预算已用尽"横幅旁挂着远小于阈值的单次
+        用量（如 5.1k vs 65k 阈值）, 读起来像预算在 5k 就误触发。"""
+        return self._turn_accum
 
 
     def cumulative_usage(self) -> TokenUsage:
@@ -234,6 +272,10 @@ class ConversationRuntime:
         # 压缩视图粘性开关: 过阈值置位后持续生效(防"压缩→恢复全量→再压缩"
         # 振荡); 历史本身不被改写, _model_view() 据此构建给模型的请求视图
         self._compact_active = False
+        # 压缩摘要缓存: (切割点, 格式化摘要)。历史只增不减, 切割点未推进
+        # 超过余量时复用旧摘要、保留区随之变长——旧实现每次请求都从全量
+        # 历史重算一遍摘要, 纯浪费。
+        self._compact_cache: Optional[tuple[int, str]] = None
         # 事件镜像钩子（Web 端工具卡片闭合用, CLI 默认 None 行为不变）:
         # - on_tool_finalized: 工具未经执行就被终局（权限拒绝 / hook 拦截 /
         #   prompter 拒绝）时触发——这条路径不经过 tool_executor, 镜像方
@@ -406,15 +448,13 @@ class ConversationRuntime:
         # 手动压缩: 不再删历史——压缩是"给模型的请求期视图", 置粘性标记后
         # _model_view() 即刻生效, 原始对话原样保留在内存与磁盘(展示用)。
         self._compact_active = True
-        compact_result = compact_session(
-            messages=self._session.messages,
-            config=CompactionConfig(
-                max_estimated_tokens=0
-            ),
+        keep_from = cut_point(
+            self._session.messages,
+            config=CompactionConfig(max_estimated_tokens=0),
         )
-        if compact_result.removed_count == 0:
+        if keep_from == 0:
             return "Nothing to compact!"
-        return (f"Compacted view active! Archived {compact_result.removed_count} "
+        return (f"Compacted view active! Archived {keep_from} "
                 f"earlier messages from the model context (history kept for display).")
 
     def _maybe_auto_compact(self)-> bool:
@@ -429,15 +469,11 @@ class ConversationRuntime:
             return False
         if self._compact_active:
             return True                      # 已激活: 持续生效, 不重复通知
-        compact_result = compact_session(
-            messages=self._session.messages,
-            config=CompactionConfig(
-                max_estimated_tokens = 0
-            ),
-        )
-        # 语义: auto_compacted = "本请求使用了压缩视图"。过阈值但没东西
-        # 可压（消息数 <= preserve_recent, 如单条超大粘贴）时不亮信号
-        if compact_result.removed_count == 0:
+        # 真正能压掉东西才亮信号（消息数 <= preserve_recent 时无安全切割点）
+        if cut_point(
+            self._session.messages,
+            config=CompactionConfig(max_estimated_tokens=0),
+        ) == 0:
             return False
         self._compact_active = True
         if self._on_compacted is not None:
@@ -448,15 +484,32 @@ class ConversationRuntime:
 
         return True
 
+    # 摘要重算余量: 保留区比"preserve_recent + 余量"还长时才值得重新
+    # 切割+重算摘要; 未超余量就复用旧切割点, 保留区温和变长。没有这个
+    # 余量, 激活后的每次迭代都会触发一次全量摘要重算。
+    _COMPACT_RESUMMARY_MARGIN = 6
+
     def _model_view(self) -> List[Message]:
-        """给模型的会话视图: 压缩激活时 = [续接摘要] + 保留区(纯函数逐请求
-        重算), 否则原样返回全量历史。展示层永远读全量——压缩只影响模型。"""
+        """给模型的会话视图: 压缩激活时 = [续接摘要] + 保留区(纯函数,
+        摘要按切割点缓存), 否则原样返回全量历史。展示层永远读全量——
+        压缩只影响模型。"""
+        msgs = self._session.messages
         if not self._compact_active:
-            return self._session.messages
-        return compact_session(
-            messages=self._session.messages,
-            config=CompactionConfig(max_estimated_tokens=0),
-        ).compacted_messages
+            return msgs
+        config = CompactionConfig(max_estimated_tokens=0)
+        if self._compact_cache is not None:
+            cached_cut, cached_summary = self._compact_cache
+            if (cached_cut > 0 and len(msgs) - cached_cut
+                    <= config.preserve_recent_messages + self._COMPACT_RESUMMARY_MARGIN):
+                return ([continuation_message(cached_summary, preserved=True)]
+                        + msgs[cached_cut:])
+        keep_from = cut_point(msgs, config)
+        if keep_from == 0:
+            return msgs
+        summary = format_compact_summary(summarize_messages(msgs[:keep_from]))
+        self._compact_cache = (keep_from, summary)
+        return ([continuation_message(summary, preserved=True)]
+                + msgs[keep_from:])
 
     def _context_over_compact_threshold(self) -> bool:
         latest = self.usage().current_turn_usage()
@@ -470,7 +523,7 @@ class ConversationRuntime:
         curr_session = self._session
         tool_results : list[Message] = []
         assistant_messages = []
-        turn_output_tokens = 0       # 本轮累计输出（含思考），循环层预算的计量
+        self.usage().begin_turn()    # 本轮用量归零（含思考）; 预算检查读同一累加器
         budget_exhausted = False
         iterations_exhausted = False
         auto_compacted = False
@@ -487,12 +540,21 @@ class ConversationRuntime:
                 raise TurnInterrupted()
             # 循环层预算检查点: 收束发生在这里——上一迭代的工具结果已全部
             # 回填，会话历史一致，break 不会产生悬空 tool_use，也不需要异常
-            # 修补。服务端 max_tokens 管单次调用上限，这里管跨次累加。
-            if turn_output_tokens >= self._turn_output_budget:
+            # 修补。服务端 max_tokens 管单次调用上限，这里管跨次累加
+            # （口径 = usage 按轮累加器, begin_turn 在 run_turn 顶部清零）。
+            # 收束原因作为 user 消息落进历史: 对模型说明"被掐了、证据都在、
+            # 下一轮直接干活"，堵死"下一轮从头再查"的分支。
+            if self.usage().current_turn_usage().output_tokens >= self._turn_output_budget:
                 budget_exhausted = True
+                curr_session.messages.append(
+                    Message.user_text(TURN_BUDGET_EXHAUSTED_NOTICE))
+                self._notify_iterate()   # 一致点: 收束说明已落定
                 break
             if iterations >= self._max_iterations:
                 iterations_exhausted = True
+                curr_session.messages.append(
+                    Message.user_text(TURN_ITERATIONS_EXHAUSTED_NOTICE))
+                self._notify_iterate()
                 break
             # 压缩检查点与预算检查同位置: 此刻历史一致。压缩只置粘性标记
             # （历史不被改写）, 真正的裁剪发生在下面 _model_view() 构建
@@ -515,7 +577,6 @@ class ConversationRuntime:
             assistant_messages.append(message)
             if token_usage:
                 self.usage().record(usage=token_usage)
-                turn_output_tokens += token_usage.output_tokens
             curr_session.messages.append(message)
 
             tool_use_blocks = []

@@ -158,12 +158,23 @@ def test_tracker_跨次累加():
     assert cumulative.input_tokens == 150
     assert cumulative.output_tokens == 15
     assert tracker.turns() == 2
-    assert tracker.current_turn_usage().input_tokens == 50  # latest 只留最近一次
+    assert tracker.current_turn_usage().input_tokens == 150  # 按轮累加, 与预算计数同口径
+
+
+def test_tracker_begin_turn_清空按轮累加不动累计():
+    tracker = UsageTracker()
+    tracker.record(TokenUsage(input_tokens=100, output_tokens=10))
+    tracker.begin_turn()
+    assert tracker.current_turn_usage() == TokenUsage()
+    tracker.record(TokenUsage(input_tokens=7, output_tokens=2))
+    assert tracker.current_turn_usage().input_tokens == 7
+    assert tracker.cumulative_usage().input_tokens == 107   # 累计口径不受 begin_turn 影响
 
 
 def test_tracker_初始全零():
     tracker = UsageTracker()
     assert tracker.cumulative_usage() == TokenUsage()
+    assert tracker.current_turn_usage() == TokenUsage()
     assert tracker.turns() == 0
 
 
