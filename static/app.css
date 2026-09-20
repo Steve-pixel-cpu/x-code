@@ -816,7 +816,8 @@
     display: flex; align-items: center; gap: 8px; margin-bottom: 7px;
   }
   .todo-track {
-    flex: 1; height: 4px; border-radius: 2px;
+    /* 固定紧凑宽度: 轨道撑满整卡太空旷, 计数紧跟其后即可 */
+    flex: none; width: 120px; height: 4px; border-radius: 2px;
     background: var(--surface-3); position: relative; overflow: hidden;
   }
   .todo-bar {
