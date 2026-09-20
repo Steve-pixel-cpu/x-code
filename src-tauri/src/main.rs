@@ -16,7 +16,8 @@ use std::process::{Child, Command, Stdio};
 use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
-use tauri::window::{Effect, WindowEffectsConfig};
+use tauri::window::Effect;
+use tauri::utils::config::WindowEffectsConfig;
 use tauri::{AppHandle, Manager, RunEvent, WebviewUrl, WebviewWindowBuilder};
 use tauri_plugin_opener::OpenerExt;
 
