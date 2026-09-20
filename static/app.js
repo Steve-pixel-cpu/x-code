@@ -324,19 +324,37 @@ function showCol(id) {
  * ============================================================ */
 const THEME_KEY = "xc-theme";
 const mqDark = window.matchMedia("(prefers-color-scheme: dark)");
+/* 值: dark | light | system | acrylic（亚克力深色） | acrylic-light（亚克力浅色） */
 function themePref() { return localStorage.getItem(THEME_KEY) || "system"; }
+function themeIsAcrylic() { return themePref().startsWith("acrylic"); }
 function resolvedTheme() {
   const pref = themePref();
+  if (pref === "acrylic" || pref === "acrylic-light") return pref === "acrylic" ? "dark" : "light";
   return pref === "system" ? (mqDark.matches ? "dark" : "light") : pref;
+}
+/* 亚克力主题: 深浅底色之上的材质开关（半透明表面 + 全屏磨砂 + 壁纸透出）。
+ * "跟随系统"时亚克力跟 resolvedTheme 走——深浅切换实时更新材质。 */
+const FX_KEY = "xc-fx";
+const fxPref = () => localStorage.getItem(FX_KEY) === "acrylic" ? "acrylic" : "";
+/* 背景图开关状态: applyFx 启动早期就会经 syncBgLayers 读到, 必须先于此初始化 */
+const BG_KEY = "xc-bg";
+let bgVer = 0;
+function applyFx() {
+  const fx = fxPref();
+  if (fx) document.documentElement.dataset.fx = fx;
+  else delete document.documentElement.dataset.fx;
+  // 背景图逻辑声明在文件后部; 函数声明会提升, 此时其状态变量已就绪, 可直接调
+  syncBgLayers();
 }
 function applyTheme() {
   document.documentElement.dataset.theme = resolvedTheme();
 }
 // 跟随系统时, 系统深浅切换实时生效
 mqDark.addEventListener("change", () => {
-  if (themePref() === "system") applyTheme();
+  if (themePref() === "system") { applyTheme(); syncBgLayers(); }
 });
 applyTheme();
+applyFx();
 
 /* ============================================================
  * markdown 渲染: marked.js 优先，加载失败降级为转义纯文本;
@@ -2970,6 +2988,8 @@ async function loadSettings() {
     state.defaultModel = s.model || null;
     refreshWorkdirTag();
     if (s.icon_ver) { iconVer = s.icon_ver; applyIconEverywhere(iconUrl()); }
+    if (s.bg_ver) { bgVer = s.bg_ver; syncBgLayers(); }
+    else syncBgLayers();   // 服务端无壁纸: 走一遍以清掉本地残留标记的效果
   } catch (e) { console.error("加载设置失败", e); }
 }
 
@@ -3149,6 +3169,78 @@ $("btn-add-provider").onclick = () => {
   renderProviderSettings();
 };
 
+/* ---------- 设置 → 外观: 背景图片（亚克力磨砂的"壁纸"） ----------
+ * 与应用图标同模式: POST /api/bg 落盘 static/bg-user.png, localStorage 只存
+ * 启用标记（xc-bg=1）。应用方式: <html data-bg="1"> 让遮罩/半透明令牌生效
+ * （预绘制脚本抢在首帧前设置, 避免闪烁）; 壁纸本体由 syncBgLayers 预加载
+ * 成功后再写到 body 内联背景上, 避免解码期间半成品闪烁。 */
+const bgUrl = () => "/static/bg-user.png" + (bgVer ? `?v=${bgVer}` : "");
+function bgPref() { return localStorage.getItem(BG_KEY) === "1"; }
+
+function syncBgLayers() {
+  const on = bgPref() && bgVer > 0;
+  if (on) document.documentElement.dataset.bg = "1";
+  else delete document.documentElement.dataset.bg;
+  if (!on) {
+    document.body.style.backgroundImage = "";
+    return;
+  }
+  const img = new Image();
+  img.onload = () => {
+    if (!bgPref()) return;               // 加载期间被清除了
+    document.body.style.backgroundImage = `url("${bgUrl()}")`;
+    document.body.style.backgroundSize = "cover";
+    document.body.style.backgroundPosition = "center";
+  };
+  img.src = bgUrl();
+}
+/* 启动装载: 本地标记开启才发请求拿壁纸（版本号稍后由 /api/settings 校准,
+ * 校准值若不同, loadSettings 里会再跑一遍本函数换新地址） */
+syncBgLayers();
+
+$("btn-bg-upload").onclick = () => $("bg-file").click();
+$("bg-file").addEventListener("change", () => {
+  const file = $("bg-file").files[0];
+  $("bg-file").value = "";   // 清空: 允许重复选择同一文件
+  if (!file) return;
+  if (file.size > 8 * 1024 * 1024) { toast("图片过大（限 8MB）"); return; }
+  const rd = new FileReader();
+  rd.onload = async () => {
+    const data = String(rd.result || "");
+    if (!/^data:image\/(png|jpeg|webp);base64,/.test(data)) {
+      toast("仅支持 PNG / JPEG / WebP");
+      return;
+    }
+    try {
+      const r = await fetch("/api/bg", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ data }),
+      });
+      if (!r.ok) throw new Error((await r.json()).detail || "HTTP " + r.status);
+      bgVer = (await r.json()).ver;
+      localStorage.setItem(BG_KEY, "1");   // 上传即启用
+      syncBgLayers();
+      toast("背景已更新");
+    } catch (e) { toast("背景更新失败: " + e.message); }
+  };
+  rd.readAsDataURL(file);
+});
+$("btn-bg-clear").onclick = async () => {
+  try {
+    const r = await fetch("/api/bg", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ data: null }),
+    });
+    if (!r.ok) throw new Error((await r.json()).detail || "HTTP " + r.status);
+    bgVer = 0;
+    localStorage.removeItem(BG_KEY);
+    syncBgLayers();
+    toast("已清除背景图");
+  } catch (e) { toast("清除失败: " + e.message); }
+};
+
 /* ---------- 设置 → 外观: 应用图标上传 / 恢复默认 ---------- */
 $("btn-icon-upload").onclick = () => $("icon-file").click();
 $("icon-file").addEventListener("change", () => {
@@ -3252,12 +3344,15 @@ const THEME_ITEMS = [
   { value: "dark", label: "深色" },
   { value: "light", label: "浅色" },
   { value: "system", label: "跟随系统" },
+  { value: "acrylic", label: "亚克力（深色）" },
+  { value: "acrylic-light", label: "亚克力（浅色）" },
 ];
 const themeDd = makeDropdown($("sel-theme"), {
   items: THEME_ITEMS, value: themePref(),
   onChange: v => {
     localStorage.setItem(THEME_KEY, v);
     applyTheme();
+    applyFx();
     applyAccentVars();   // 自定义色的派生令牌跟随深浅主题
     syncAccentInput();
   },

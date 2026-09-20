@@ -3,6 +3,8 @@
 一个 Claude Code 风格的 AI 编程 Agent，从零实现的完整学习项目：终端 REPL + Web 桌面端双入口，内置工具循环、权限体系、多 Agent 编排、会话持久化与自动压缩。
 
 > Python 3.14 + FastAPI + Tauri 2，兼容任意 Anthropic API 格式的模型服务（可自定义接口地址）。
+>
+> 本项目基于 [MiniCC](https://github.com/Louisym/MiniCC) 开发，在其 Agent 架构基础上扩展而来。
 
 ## 功能特性
 
@@ -174,6 +176,15 @@ uv run pytest
 [guides/](guides/) 下有 13 篇按模块拆解的实现笔记（models / tools / api_client /
 config / permissions / hooks / retry / prompt / compact / storage / multi_agent /
 runtime / main），适合按顺序阅读源码。
+
+## 项目来源与致谢
+
+本项目基于 [Louisym/MiniCC](https://github.com/Louisym/MiniCC) 开发，在其 Agent
+架构的基础上进行了多方向扩展与定制，例如桌面端 Tauri 2 壳、三级权限体系、
+多 Agent 编排、Hooks、auto-compact、限流重试与摸鱼电台等。
+
+感谢 MiniCC 原作者的工作；本项目同样以学习 Agent 架构设计为目的，
+欢迎参考与交流。
 
 ## 免责声明
 

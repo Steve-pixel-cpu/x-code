@@ -1162,6 +1162,35 @@ async def api_post_icon(request: dict):
     return {"ok": True, "ver": _icon_ver()}
 
 
+# --- 背景图片: 设置 → 外观 可上传; 存 static/bg-user.png, 前端经 /static/ 读取 ---
+_BG_MAX = 8 * 1024 * 1024
+
+
+def _bg_ver() -> int:
+    try:
+        return int((STATIC_DIR / "bg-user.png").stat().st_mtime)
+    except OSError:
+        return 0
+
+
+@app.post("/api/bg")
+async def api_post_bg(request: dict):
+    """data 为 dataURL 时写入背景图, null 删除; 返回新版本号。"""
+    data = request.get("data")
+    live = STATIC_DIR / "bg-user.png"
+    if data is None:
+        live.unlink(missing_ok=True)
+    else:
+        m = _ICON_RE.match(str(data))
+        if not m:
+            raise HTTPException(status_code=400, detail="背景图必须是 PNG/JPEG/WebP 的 dataURL")
+        raw = base64.b64decode(m.group(2))
+        if len(raw) > _BG_MAX:
+            raise HTTPException(status_code=400, detail="背景图过大（解码后限 8MB）")
+        live.write_bytes(raw)
+    return {"ok": True, "ver": _bg_ver()}
+
+
 @app.get("/api/sessions")
 async def api_list_sessions():
     def _mode_name_for(sid: str) -> str:
@@ -1346,6 +1375,7 @@ async def api_get_settings():
         "configured": _provider_ready(_provider_cfg),   # false → 前端弹初始化页
         "workspace": Path.cwd().name,
         "icon_ver": _icon_ver(),
+        "bg_ver": _bg_ver(),
     }
 
 

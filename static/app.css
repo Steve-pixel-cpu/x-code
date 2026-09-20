@@ -119,6 +119,77 @@
     --accent-soft: #fdeef1; --accent-border: #f5c6d1;
   }
 
+  /* ============ 亚克力主题: data-fx="acrylic" 叠加在当前深浅底色上 ============
+   * 表面令牌全部转为半透明, 让"壁纸 → 遮罩 → 磨砂"这三层透出来。
+   * 层次: 壁纸直接铺在 body 上（JS 写 inline background）, #bg-scrim 与
+   * #bg-frost 用 z-index:-1 垫在所有 UI 之下（负 z-index 绘制于普通流
+   * 内容之前）——磨砂由全屏 #bg-frost 一个元素统一提供, 不给每个表面
+   * 单独加 blur: 层叠模糊代价高, 嵌套 backdrop-filter 在 WebView2 上
+   * 表现也不一致。 */
+  :root[data-fx="acrylic"] {
+    --bg-solid: #101014;                  /* body 垫底色（无壁纸时磨砂的模糊对象） */
+    --bg: rgba(16, 16, 20, .72);
+    --bg-side: rgba(11, 11, 15, .74);
+    --surface: rgba(23, 23, 29, .78);
+    --surface-2: rgba(29, 29, 36, .74);
+    --surface-3: rgba(38, 38, 47, .72);
+    --pop-bg: rgba(30, 30, 38, .60);
+    --overlay: rgba(6, 6, 10, .45);
+    --code-bg: rgba(10, 10, 15, .68);
+    --code-head: rgba(17, 17, 22, .82);
+    --pane-tint: rgba(16, 16, 20, .60);   /* 消息主区: 最透, 露壁纸 */
+    --side-tint: rgba(11, 11, 15, .62);
+    --header-tint: rgba(16, 16, 20, .58);
+    --titlebar-tint: rgba(11, 11, 15, .66);
+  }
+  :root[data-theme="light"][data-fx="acrylic"] {
+    --bg-solid: #ffffff;
+    --bg: rgba(255, 255, 255, .72);
+    --bg-side: rgba(247, 247, 248, .76);
+    --surface: rgba(255, 255, 255, .78);
+    --surface-2: rgba(243, 243, 245, .78);
+    --surface-3: rgba(234, 234, 238, .74);
+    --pop-bg: rgba(255, 255, 255, .62);
+    --overlay: rgba(24, 24, 30, .26);
+    --code-bg: rgba(247, 247, 249, .72);
+    --code-head: rgba(239, 239, 242, .84);
+    --pane-tint: rgba(255, 255, 255, .58);
+    --side-tint: rgba(247, 247, 248, .62);
+    --header-tint: rgba(255, 255, 255, .56);
+    --titlebar-tint: rgba(247, 247, 248, .68);
+  }
+  :root[data-fx="acrylic"] body { background-color: var(--bg-solid); }
+  :root[data-fx="acrylic"] #sidebar { background: var(--side-tint); }
+  :root[data-fx="acrylic"] #pane { background: var(--pane-tint); }
+  :root[data-fx="acrylic"] #titlebar { background: var(--titlebar-tint); }
+  :root[data-fx="acrylic"] #doc-header {
+    background: color-mix(in srgb, var(--header-tint) 86%, transparent);
+  }
+  :root[data-fx="acrylic"] .composer-shell { background: transparent; }
+
+  /* 壁纸启用标记 data-bg="1" 挂在 <html> 上（head 预绘制脚本可设，避免刷新闪底色）。
+   * 普通主题 + 壁纸: 大面积区域转半透明让图片可见, 卡片保持实底保证可读性;
+   * 用 :not([data-fx=acrylic]) 与亚克力令牌互斥, 避免两套选择器打架 */
+  :root[data-bg="1"]:not([data-fx="acrylic"]) #sidebar { background: color-mix(in srgb, var(--bg-side) 88%, transparent); }
+  :root[data-bg="1"]:not([data-fx="acrylic"]) #pane { background: color-mix(in srgb, var(--bg) 84%, transparent); }
+  :root[data-bg="1"]:not([data-fx="acrylic"]) #titlebar { background: color-mix(in srgb, var(--bg-side) 88%, transparent); }
+  :root[data-bg="1"]:not([data-fx="acrylic"]) #doc-header { background: color-mix(in srgb, var(--bg) 86%, transparent); }
+  :root[data-bg="1"] .composer-shell { background: transparent; }
+  /* 遮罩强度: 亚克力下轻一档（磨砂已柔化壁纸）; 无模糊时遮罩重一点帮文字让路 */
+  :root[data-bg="1"] { --bg-scrim: rgba(10, 10, 14, .52); }
+  :root[data-theme="light"][data-bg="1"] { --bg-scrim: rgba(255, 255, 255, .46); }
+  :root[data-fx="acrylic"][data-bg="1"] { --bg-scrim: rgba(10, 10, 14, .34); }
+  :root[data-theme="light"][data-fx="acrylic"][data-bg="1"] { --bg-scrim: rgba(255, 255, 255, .30); }
+
+  /* 壁纸遮罩与磨砂层: z-index -1 = 壁纸(body 绘制)之上、一切 UI 之下;
+   * 变量从 <html> 继承, 元素本体只管显隐与着色 */
+  #bg-scrim, #bg-frost {
+    position: fixed; inset: 0; z-index: -1; display: none; pointer-events: none;
+  }
+  :root[data-bg="1"] #bg-scrim { display: block; background: var(--bg-scrim); }
+  #bg-frost { backdrop-filter: blur(46px) saturate(1.4); }
+  :root[data-fx="acrylic"] #bg-frost { display: block; }
+
   * { box-sizing: border-box; margin: 0; padding: 0; }
   input[type="checkbox"], input[type="radio"] { accent-color: var(--accent); }
   html, body { height: 100%; }
