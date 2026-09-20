@@ -71,6 +71,7 @@ from permissions import (
 from prompt import SystemPromptBuilder
 from storage import SessionStore
 from tools import ToolRegistry, git_bash_unavailable_reason, TOOL_CANCEL_CHECK
+from runtime import result_meta
 from runtime import TurnInterrupted
 from multi_agent import set_api_config_provider
 from agent_tools import get_orchestrator
@@ -455,8 +456,13 @@ class EmittingToolRegistry(ToolRegistry):
                       "input": tool_input_json, "output": str(e), "is_error": True})
             raise
         if emit:
-            emit({"type": "tool_result", "id": tool_use_id, "name": name,
-                  "input": tool_input_json, "output": result, "is_error": False})
+            payload = {"type": "tool_result", "id": tool_use_id, "name": name,
+                       "input": tool_input_json, "output": str(result),
+                       "is_error": False}
+            meta = result_meta(result)   # ToolOutput._meta（write_file 的 diff 等）
+            if meta:
+                payload["result_meta"] = meta
+            emit(payload)
         return result
 
 
@@ -939,12 +945,21 @@ def _spawn_turn_thread(web_session: WebSession, text: str,
         else:
             persist_turn(web_session)
             needs_title = not web_session.titled
+            u = summary.usage
             emitter({
                 "type": "turn_done",
                 "interrupted": web_session.stop_requested,
                 "iterations": summary.iterations,
                 "budget_exhausted": summary.budget_exhausted,
                 "iterations_exhausted": summary.iterations_exhausted,
+                # 本轮 token 用量（前端展示"本轮消耗"）: input/output +
+                # 缓存读写四项原样下发, 聚合口径由前端决定
+                "usage": {
+                    "input_tokens": u.input_tokens,
+                    "output_tokens": u.output_tokens,
+                    "cache_creation_input_tokens": u.cache_creation_input_tokens,
+                    "cache_read_input_tokens": u.cache_read_input_tokens,
+                },
             })
             # AI 命名放在 turn_done 之后: 前端先收尾，标题好了再单独广播。
             # 排队区非空 = 用户正在连续驱动: 跳过命名请求, 避免与接力的下一轮
@@ -1090,13 +1105,16 @@ def _message_to_dict(msg: Message) -> dict:
         elif isinstance(b, ToolContentBlock):
             blocks.append({"type": "tool_use", "id": b.id, "name": b.name, "input": b.input})
         elif isinstance(b, ToolResultContentBlock):
-            blocks.append({
+            entry = {
                 "type": "tool_result",
                 "id": b.id,
                 "name": b.name,
                 "output": b.output,
                 "is_error": bool(b.is_error),
-            })
+            }
+            if msg.result_meta:
+                entry["result_meta"] = msg.result_meta   # 历史回放重建 diff 卡
+            blocks.append(entry)
     return {"role": msg.role, "blocks": blocks}
 
 

@@ -303,6 +303,21 @@ class SystemPromptBuilder:
         )
 
     @staticmethod
+    def _search_section() -> str:
+        return (
+            "# Search tools\n"
+            "Use the dedicated grep and glob tools for code search instead of "
+            "shelling out to bash grep/find/ls -R: they work on any machine "
+            "(even without Git Bash), take JSON parameters (no shell-quoting "
+            "pitfalls), and are read-only so they never trigger permission "
+            "prompts. - grep: content search with a regex; output_mode "
+            "'files_with_matches' (default) first, 'content' when you need "
+            "line-level context. - glob: filename listing with '**' "
+            "recursion; use it to discover files before reading them. Both "
+            "skip node_modules/.git and binary noise automatically."
+        )
+
+    @staticmethod
     def _subagents_section() -> str:
         return (
             "# Subagents\n"
@@ -356,6 +371,7 @@ class SystemPromptBuilder:
         sections.append(self._system_section())
         sections.append(self._doing_tasks_section())
         sections.append(self._actions_section())
+        sections.append(self._search_section())
         sections.append(self._subagents_section())
 
         # ══════ 缓存边界 ══════

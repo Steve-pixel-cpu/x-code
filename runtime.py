@@ -70,6 +70,26 @@ class UsageTracker:
 class ToolError(Exception):
     ...
 
+class ToolOutput(str):
+    """工具返回值: 本体是给模型/存储的字符串（isinstance(x, str) 恒真,
+    内核零改动透传）, 附带 `_meta` 给镜像方（Web 端 EmittingToolRegistry）
+    做富展示——write_file 的 diff、行数统计等。模型永远看不到 _meta。
+
+    为什么不用 dict 返回值: ToolExecutor 协议与 CLI 的所有调用点都按 str
+    处理, 改返回类型要动内核; str 子类只有 tools.py / runtime.py 两处
+    需要知道它, 其余路径（API 序列化、落盘、merge_hook_feedback）拿到的
+    就是普通字符串。"""
+    _meta: dict = {}
+
+    def with_meta(self, meta: dict) -> "ToolOutput":
+        self._meta = meta
+        return self
+
+
+def result_meta(output) -> Optional[dict]:
+    """从工具返回值摘 _meta（普通 str → None）。"""
+    return getattr(output, "_meta", None) or None
+
 class TurnInterrupted(Exception):
     """用户主动打断: 在历史一致点（迭代顶部 / 工具批次执行前）抛出。
     Web 端流式代理（TurnInterrupted）与重试循环（StreamInterrupted→
@@ -82,6 +102,7 @@ class ToolExecutor(Protocol):
     def execute(self, tool_name: str, input: str,
                 tool_use_id: Optional[str] = None) -> str: ...
     # 成功返回字符串，失败抛 ToolError
+    # （可返回 ToolOutput——str 子类, 附带 _meta 富展示元数据, 内核按 str 透传）
 
 
 
@@ -348,7 +369,8 @@ class ConversationRuntime:
             output = str(e)
             is_tool_error = True
 
-        tool_output = output
+        meta = result_meta(output)   # ToolOutput._meta（普通 str 为 None）
+        tool_output = str(output)    # hook 只看文本, meta 不掺和
         output = merge_hook_feedback(messages=pre_res.messages, output=output, denied=False)
         post_res = self._hook_runner.run_post_tool_use(
             tool_name=tool_block.name,
@@ -357,12 +379,18 @@ class ConversationRuntime:
             is_error= is_tool_error,
         )
         output = merge_hook_feedback(messages=post_res.messages, output=output, denied=post_res.denied)
+        if not is_tool_error and not post_res.denied:
+            # hook 反馈拼进文本后 output 已是新 str, meta 需重新挂上
+            output = ToolOutput(str(output)).with_meta(meta) if meta else output
 
+        # result_meta 随消息落盘, Web 端历史回放可重建富展示（diff 等）。
+        # 内部 Message/持久化层认识它, API 序列化 (_convert_message) 忽略之。
         return Message.tool_result(
             id = tool_block.id,
             name = tool_block.name,
             output = output,
             is_error = is_tool_error or post_res.denied,
+            result_meta = meta,
         )
 
     def _process_tool_use(self, tool_block: ToolContentBlock, prompter: Optional[PermissionPrompter]=None)-> Message | None:
@@ -551,7 +579,7 @@ class ConversationRuntime:
             assistant_messages=assistant_messages,
             tool_results=tool_results,
             iterations=iterations,
-            usage=self.usage().cumulative_usage(),
+            usage=self.usage().current_turn_usage(),   # 本轮用量（累计口径走 usage()）
             auto_compacted= auto_compacted,
             budget_exhausted=budget_exhausted,
             iterations_exhausted=iterations_exhausted,

@@ -25,9 +25,10 @@ from permissions import PermissionRequest, PermissionResult, PermissionMode, Per
 from prompt import SystemPromptBuilder
 from runtime import ConversationRuntime
 from storage import SessionStore
-from tools import (ToolRegistry, bash_tool, read_tool, write_tool,
-                   present_plan_tool, powershell_tool, task_output_tool,
-                   task_stop_tool, git_bash_unavailable_reason)
+from tools import (ToolRegistry, bash_tool, glob_tool, grep_tool, read_tool,
+                   write_tool, present_plan_tool, powershell_tool,
+                   task_output_tool, task_stop_tool, todo_tool,
+                   git_bash_unavailable_reason)
 from agent_tools import AGENT_TOOL_SPECS, get_orchestrator, register_agent_tools
 
 DEFAULT_MODEL = "glm-5.3-flash"
@@ -255,8 +256,73 @@ task_stop_spec = {
     },
 }
 
+grep_spec = {
+    "name": "grep",
+    "description": (
+        "Search file contents with a regular expression (pure-Python ripgrep-"
+        "like search; no shell involved). Prefer this over running `grep` via "
+        "bash. Parameters: pattern (required regex), path (file or directory, "
+        "default workdir), glob (filename filter like '*.py'), output_mode: "
+        "'files_with_matches' (default) | 'content' (file:line: text) | "
+        "'count'. Skips node_modules/.git and binary files."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "pattern": {
+                "type": "string",
+                "description": "Regular expression to search for, e.g. r'def \\w+' or 'TODO'.",
+            },
+            "path": {
+                "type": "string",
+                "description": "File or directory to search in. Defaults to the workdir.",
+            },
+            "glob": {
+                "type": "string",
+                "description": "Optional filename filter, e.g. '*.py' or '*.ts'.",
+            },
+            "output_mode": {
+                "type": "string",
+                "enum": ["files_with_matches", "content", "count"],
+                "description": (
+                    "'files_with_matches' = matching file paths (default); "
+                    "'content' = file:line: text; 'count' = matches per file."
+                ),
+            },
+        },
+        "required": ["pattern"],
+    },
+}
+
+glob_spec = {
+    "name": "glob",
+    "description": (
+        "List files matching a glob pattern (pure-Python, no shell). Prefer "
+        "this over `find`/`ls -R` via bash. Supports recursive '**'. Returns "
+        "absolute paths you can pass to read_file. Skips node_modules/.git "
+        "and other noise directories."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "pattern": {
+                "type": "string",
+                "description": "Glob pattern, e.g. '**/*.py', 'src/*.ts', '*.json'.",
+            },
+            "path": {
+                "type": "string",
+                "description": "Directory to search in. Defaults to the workdir.",
+            },
+        },
+        "required": ["pattern"],
+    },
+}
+
+from tools import todo_spec as _todo_spec   # noqa: E402  (spec 与实现同源)
+
 TOOLS = [bash_spec, powershell_spec, read_file_spec, write_file_spec,
-         task_output_spec, task_stop_spec, present_plan_spec] + AGENT_TOOL_SPECS
+         grep_spec, glob_spec, task_output_spec, task_stop_spec,
+         present_plan_spec, _todo_spec] + AGENT_TOOL_SPECS
 
 
 # --- 终端视觉规范: 调色板 + 版式 ---
@@ -763,6 +829,9 @@ TOOL_REQUIREMENTS = {
     "agent_status": READ_ONLY_MODE,     # 看 subagent 状态
     "agent_list": READ_ONLY_MODE,       # 列 subagent
     "task_output": READ_ONLY_MODE,      # 读后台任务日志, 只读
+    "grep": READ_ONLY_MODE,             # 纯只读搜索
+    "glob": READ_ONLY_MODE,             # 纯只读列文件
+    "todo": READ_ONLY_MODE,             # 会话任务清单（只写 ~/.x-code/todos/ 元数据）
     "write_file": WORKSPACE_WRITE_MODE, # 落盘文件（本地写）
     "agent_tool": WORKSPACE_WRITE_MODE, # 派生 subagent（写 agents 状态目录）
     # present_plan 走 WORKSPACE_WRITE 档: plan 模式下它触发"可升级弹问"
@@ -780,7 +849,10 @@ def build_registry() -> ToolRegistry:
         name="write_file", handler=write_tool).register(
         name="task_output", handler=task_output_tool).register(
         name="task_stop", handler=task_stop_tool).register(
-        name="present_plan", handler=present_plan_tool)
+        name="present_plan", handler=present_plan_tool).register(
+        name="todo", handler=todo_tool).register(
+        name="grep", handler=grep_tool).register(
+        name="glob", handler=glob_tool)
     return register_agent_tools(registry)
 
 

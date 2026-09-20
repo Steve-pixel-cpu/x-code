@@ -695,6 +695,71 @@
   .tstate.stopped { color: var(--warn); }
   @keyframes pulse { 0%, 100% { opacity: .35; } 50% { opacity: 1; } }
 
+  /* diff 面板: write_file 结果卡下方的统一 diff（默认折叠） */
+  .td-wrap {
+    margin: -6px 0 10px 38px;
+    border: 1px solid var(--border);
+    border-radius: var(--r-sm);
+    overflow: hidden;
+    background: var(--code-bg);
+    animation: msg-in .22s ease;
+  }
+  .td-head {
+    display: flex; align-items: center; gap: 8px;
+    width: 100%; padding: 5px 10px;
+    background: none; border: none; cursor: pointer;
+    font-size: calc(11.5px * var(--fs-ui));
+    color: var(--text-2);
+    text-align: left;
+  }
+  .td-head:hover { background: var(--hover); }
+  .td-caret { flex: none; color: var(--text-3); width: 10px; }
+  .td-sum { flex: none; }
+  .td-add { flex: none; color: var(--ok); font-family: var(--font-mono); }
+  .td-del { flex: none; color: var(--err); font-family: var(--font-mono); }
+  .td-body { max-height: 340px; overflow: auto; border-top: 1px solid var(--border); }
+  .td-line {
+    padding: 0 10px; white-space: pre;
+    font-family: var(--font-mono);
+    font-size: calc(11.5px * var(--fs-code));
+    line-height: 1.55; color: var(--text-2);
+    min-height: 1.55em;
+  }
+  .td-line.add  { color: var(--ok);  background: var(--ok-soft); }
+  .td-line.del  { color: var(--err); background: var(--err-soft); }
+  .td-line.hunk { color: var(--hl-title); background: var(--accent-soft); }
+  .td-line.ctx  { color: var(--text-3); }
+
+  /* todo 清单卡: 任务进度 + 逐项状态 */
+  .todo-list {
+    margin: -6px 0 10px 38px; padding: 8px 12px;
+    border: 1px solid var(--border); border-radius: var(--r-sm);
+    background: var(--surface);
+    font-size: calc(12.5px * var(--fs-ui));
+    animation: msg-in .22s ease;
+  }
+  .todo-prog {
+    display: flex; align-items: center; gap: 8px; margin-bottom: 7px;
+  }
+  .todo-track {
+    flex: 1; height: 4px; border-radius: 2px;
+    background: var(--surface-3); position: relative; overflow: hidden;
+  }
+  .todo-bar {
+    position: absolute; left: 0; top: 0; height: 100%; width: 0;
+    border-radius: 2px; background: var(--ok);
+    transition: width .3s ease;
+  }
+  .todo-prog span { flex: none; color: var(--text-3); font-size: 11px; font-family: var(--font-mono); }
+  .todo-item { padding: 2px 0 2px 22px; position: relative; color: var(--text-2); }
+  .todo-item::before {
+    content: "○"; position: absolute; left: 4px; color: var(--text-3);
+  }
+  .todo-item.in_progress { color: var(--text); }
+  .todo-item.in_progress::before { content: "◐"; color: var(--warn); }
+  .todo-item.completed { color: var(--text-3); text-decoration: line-through; }
+  .todo-item.completed::before { content: "●"; color: var(--ok); }
+
   /* 提示条（警告/错误） */
   .note {
     max-width: fit-content; margin: 0 0 18px; padding: 8px 14px;
@@ -705,6 +770,12 @@
   .note.warn { color: var(--warn); background: var(--warn-soft); border-color: color-mix(in srgb, var(--warn) 26%, transparent); }
   .note.err  { color: var(--err); background: var(--err-soft); border-color: color-mix(in srgb, var(--err) 26%, transparent); }
   /* 打断收尾: 素雅一行 + 底部细分隔线, 不用警示样式 */
+  .note.usage {
+    color: var(--text-3);
+    background: transparent;
+    border-color: transparent;
+    font-size: calc(11.5px * var(--fs-ui));
+  }
   .note.stopped {
     width: 100%; max-width: 100%; border: none; background: none;
     color: var(--text-3); font-size: calc(12.5px * var(--fs-ui)); padding: 0 2px 12px;

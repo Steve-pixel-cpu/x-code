@@ -1443,11 +1443,13 @@ function renderHistoryMessage(m) {
       if (b.type !== "tool_result") continue;
       const card = run.toolResultIndex[b.id];
       if (card) {
-        completeToolCard(card, { output: b.output, is_error: b.is_error, denied: false });
+        completeToolCard(card, { output: b.output, is_error: b.is_error,
+                                 denied: false, result_meta: b.result_meta });
       } else {
         // 配不上对（旧数据/截断）: 独立卡片兜底
         addToolCard({ id: b.id, name: b.name, input: "(—)",
-                      result: { output: b.output, is_error: b.is_error, denied: false } });
+                      result: { output: b.output, is_error: b.is_error,
+                                denied: false, result_meta: b.result_meta } });
       }
     }
   }
@@ -1660,12 +1662,18 @@ const ICON_EDIT = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" s
 const ICON_TOOL = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"><rect x="4" y="7" width="16" height="13" rx="2"/><path d="M9 7V5a2 2 0 012-2h2a2 2 0 012 2v2"/></svg>';
 // 计划模式图标: TOOL_META 在模块加载即求值, 声明必须位于其前（否则 TDZ 炸掉整个引导）
 const ICON_MODE_PLAN = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 3h6l1 3h3v15H5V6h3l1-3z"/><path d="M9 12h6M9 16h4"/></svg>';
+const ICON_SEARCH = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="M16.5 16.5L21 21"/><path d="M8 11h6M11 8v6"/></svg>';
+const ICON_GLOB = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h5M4 11h7M4 16h5"/><path d="M14 5l6 7-6 7"/><path d="M20 12H10"/></svg>';
+const ICON_TODO = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6.5l1.5 1.5L8 5.5"/><path d="M4 13.5l1.5 1.5L8 12.5"/><path d="M11 7h9M11 14h9M11 20h6"/></svg>';
 const TOOL_META = {
   bash:       { label: "终端",     icon: ICON_TERM },
   powershell: { label: "终端",     icon: ICON_TERM },
   read_file:  { label: "读取文件", icon: ICON_FILE },
   write_file: { label: "写入文件", icon: ICON_EDIT },
   present_plan: { label: "实施计划", icon: ICON_MODE_PLAN },
+  todo: { label: "任务清单", icon: ICON_TODO },
+  grep: { label: "搜索内容", icon: ICON_SEARCH },
+  glob: { label: "查找文件", icon: ICON_GLOB },
 };
 
 function fmtDuration(ms) {
@@ -1741,11 +1749,23 @@ function dropOptimisticThinking(run) {
 }
 
 /* ---------- 工具调用 ---------- */
-function describeInput(raw) {
+function describeInput(raw, name) {
   // 卡片标题一行摘要: JSON 先取 command/path 等关键字段，失败展示原文
   try {
     const data = JSON.parse(raw);
     if (data && typeof data === "object") {
+      if (data.action === "write" && Array.isArray(data.items)) {
+        const done = data.items.filter(it => it.status === "completed").length;
+        return data.items.length + " 项 (已完成 " + done + ")";
+      }
+      if (data.action === "read") return "读取当前清单";
+      if (name === "grep") {
+        let s = "/" + String(data.pattern || "") + "/";
+        if (data.glob) s += "  ·  " + data.glob;
+        if (data.output_mode && data.output_mode !== "files_with_matches") s += "  ·  " + data.output_mode;
+        return s;
+      }
+      if (name === "glob") return String(data.pattern || "");
       for (const k of ["command", "path", "file_path", "url", "content", "plan"]) {
         if (typeof data[k] === "string" && data[k].trim()) {
           return data[k].replace(/\s+/g, " ").slice(0, 90);
@@ -1766,7 +1786,9 @@ function addToolCard({ id, name, input, result }, col) {
     '<span class="t-ico">' + meta.icon + '</span>' +
     '<span class="tname2"></span><span class="tdesc"></span><span class="tstate"></span>';
   row.querySelector(".tname2").textContent = meta.label;
-  row.querySelector(".tdesc").textContent = describeInput(input);
+  row.querySelector(".tdesc").textContent = describeInput(input, name);
+  row.dataset.tool = name;
+  row.dataset.input = input || "";
   if (result) {
     completeToolCard(row, result);
   } else {
@@ -1777,6 +1799,52 @@ function addToolCard({ id, name, input, result }, col) {
   return row;
 }
 
+/* ---------- diff 展示: write_file 结果卡的统一 diff 面板 ----------
+ * 服务端在 tool_result 事件/历史回放里带 result_meta.diff（unified diff）。
+ * 面板插在工具行下方, 默认折叠, 点头部展开/收起; ± 行绿/红着色。 */
+function renderDiffPanel(row, diffText, meta) {
+  if (!diffText || row.querySelector(".td-wrap")) return;
+  const lines = diffText.split(String.fromCharCode(10));
+  // 统计增删行数（跳过 ---/+++/@@ 头）
+  let add = 0, del = 0;
+  for (const l of lines) {
+    if (l.startsWith("+") && !l.startsWith("+++")) add++;
+    else if (l.startsWith("-") && !l.startsWith("---")) del++;
+  }
+  const wrap = document.createElement("div");
+  wrap.className = "td-wrap";
+  const head = document.createElement("button");
+  head.type = "button";
+  head.className = "td-head";
+  head.innerHTML =
+    '<span class="td-caret">▸</span>' +
+    '<span class="td-sum">' + (meta && meta.created ? "新建文件" : "变更") + '</span>' +
+    '<span class="td-add">+' + add + '</span><span class="td-del">-' + del + '</span>';
+  const body = document.createElement("div");
+  body.className = "td-body";
+  body.hidden = true;
+  const table = document.createElement("div");
+  table.className = "td-table";
+  for (const l of lines) {
+    const ln = document.createElement("div");
+    let cls = "ctx";
+    if (l.startsWith("+") && !l.startsWith("+++")) cls = "add";
+    else if (l.startsWith("-") && !l.startsWith("---")) cls = "del";
+    else if (l.startsWith("@@")) cls = "hunk";
+    ln.className = "td-line " + cls;
+    ln.textContent = l.length ? l : " ";
+    table.appendChild(ln);
+  }
+  body.appendChild(table);
+  head.onclick = () => {
+    body.hidden = !body.hidden;
+    head.querySelector(".td-caret").textContent = body.hidden ? "▸" : "▾";
+  };
+  wrap.appendChild(head);
+  wrap.appendChild(body);
+  row.insertAdjacentElement("afterend", wrap);   // 面板独立于工具行, 不挤一行式布局
+}
+
 function setToolState(row, kind) {
   row.dataset.state = kind;
   const st = row.querySelector(".tstate");
@@ -1785,7 +1853,7 @@ function setToolState(row, kind) {
                      denied: "已拒绝", stopped: "已中断" }[kind] || kind;
 }
 
-function completeToolCard(row, { is_error, denied }) {
+function completeToolCard(row, { is_error, denied, result_meta }) {
   if (denied) {
     setToolState(row, "denied");
   } else if (is_error) {
@@ -1793,6 +1861,47 @@ function completeToolCard(row, { is_error, denied }) {
   } else {
     setToolState(row, "ok");
   }
+  if (result_meta && result_meta.diff) {
+    renderDiffPanel(row, result_meta.diff, result_meta);
+  }
+  if (row.dataset.tool === "todo") {
+    renderTodoCard(row);
+  }
+}
+
+/* todo 卡: 工具行下方渲染任务清单本体（取代裸文本结果）。数据取自
+ * 工具入参（write 时最新鲜、且历史回放可用——tool_use 块的 input 就有） */
+function renderTodoCard(row) {
+  if (row.querySelector(".todo-list")) return;
+  let items = null;
+  try {
+    const data = JSON.parse(row.dataset.input || "{}");
+    if (data.action === "write" && Array.isArray(data.items)) items = data.items;
+  } catch (e) { /* 历史数据无 input */ }
+  if (!items || !items.length) return;
+  const wrap = document.createElement("div");
+  wrap.className = "todo-list";
+  const done = items.filter(it => it.status === "completed").length;
+  const prog = document.createElement("div");
+  prog.className = "todo-prog";
+  const track = document.createElement("div");
+  track.className = "todo-track";
+  const bar = document.createElement("div");
+  bar.className = "todo-bar";
+  bar.style.width = Math.round(done / items.length * 100) + "%";
+  track.appendChild(bar);
+  prog.appendChild(track);
+  const label = document.createElement("span");
+  label.textContent = done + "/" + items.length;
+  prog.appendChild(label);
+  wrap.appendChild(prog);
+  for (const it of items) {
+    const line = document.createElement("div");
+    line.className = "todo-item " + (it.status || "pending");
+    line.textContent = it.content || "";
+    wrap.appendChild(line);
+  }
+  row.insertAdjacentElement("afterend", wrap);
 }
 
 function onToolUseStarted(msg, sid) {
@@ -1824,7 +1933,7 @@ function onToolUse(msg, sid) {
   // tool_use_started 已提前建卡: 就地补全真实参数, 不重复建卡
   const existing = msg.id ? run.liveToolCards[msg.id] : null;
   if (existing) {
-    existing.querySelector(".tdesc").textContent = describeInput(msg.input);
+    existing.querySelector(".tdesc").textContent = describeInput(msg.input, msg.name || existing.dataset.tool);
     run.activeToolCard = existing;
     return;
   }
@@ -1864,6 +1973,7 @@ function onToolResult(msg, sid) {
   } else {
     completeToolCard(addToolCard({ id: msg.id, name: msg.name, input: msg.input }, colOf(sid)), msg);
   }
+  // （msg.result_meta 由 completeToolCard 消费: write_file 的 diff 面板）
   if (run.activeToolCard === card) run.activeToolCard = null;
 }
 
@@ -1950,7 +2060,7 @@ function onPermissionRequest(msg, sid) {
   head.appendChild(ico); head.appendChild(title); head.appendChild(hint);
   row.appendChild(head);
 
-  const body = describeInput(msg.input) || "(无参数)";
+  const body = describeInput(msg.input, msg.name) || "(无参数)";
   const cmd = document.createElement("div");
   cmd.className = "pr-cmd";
   cmd.textContent = body;
@@ -2109,8 +2219,35 @@ function onQueueCleared(sid) {
   }
 }
 
+function fmtTokens(n) {
+  if (typeof n !== "number" || n <= 0) return "";
+  if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + "M";
+  if (n >= 1000) return (n / 1000).toFixed(1) + "k";
+  return String(n);
+}
+
+/* 轮次用量行: turn_done 带来本轮 token 消耗, 渲染成一条淡色小字。
+ * 全零（断线显形/被打断在首个请求前）时不渲染——没有信息量的行是噪音。 */
+function addUsageNote(usage) {
+  if (!usage || typeof usage !== "object") return;
+  const total = (usage.input_tokens || 0) + (usage.output_tokens || 0)
+    + (usage.cache_creation_input_tokens || 0) + (usage.cache_read_input_tokens || 0);
+  if (!total) return;
+  const parts = [];
+  const out = fmtTokens(usage.output_tokens);
+  const cin = fmtTokens(usage.cache_creation_input_tokens);
+  const cred = fmtTokens(usage.cache_read_input_tokens);
+  const inp = fmtTokens(usage.input_tokens);
+  if (inp) parts.push("输入 " + inp);
+  if (out) parts.push("输出 " + out);
+  if (cin) parts.push("缓存写 " + cin);
+  if (cred) parts.push("缓存读 " + cred);
+  addNoteBubble("usage", "本轮 token · " + parts.join(" · "));
+}
+
 function onTurnDone(msg) {
   endTurnUiReset();
+  addUsageNote(msg.usage);
   if (msg.interrupted) {
     // 「已停止」挂在本轮思考行的胶囊里; 本轮没思考过（工具/正文阶段打断）才落成独立提示行
     const row = curRun()?.lastThinkRow;

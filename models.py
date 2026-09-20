@@ -66,6 +66,9 @@ AnyContentBlock = Annotated[
 class Message(BaseModel):
     role: Literal['user', 'assistant', 'tool']
     content: list[AnyContentBlock] = Field(default_factory=list)
+    # 工具结果富展示元数据（write_file 的 diff 等）, 仅 tool 角色可能携带。
+    # 不进 API 请求体（_convert_message 忽略）, 只落盘 + 回放给前端渲染。
+    result_meta: Optional[dict] = None
     model_config = {"frozen": True}
 
     @classmethod
@@ -105,8 +108,9 @@ class Message(BaseModel):
         return cls(role='assistant', content=[ToolContentBlock(id= id, name= name, input= input)])
 
     @classmethod
-    def tool_result(cls, id, name, output, is_error) -> Message:
-        return cls(role='tool', content=[ToolResultContentBlock(id= id, name= name, output= output, is_error= is_error)])
+    def tool_result(cls, id, name, output, is_error, result_meta=None) -> Message:
+        return cls(role='tool', content=[ToolResultContentBlock(id= id, name= name, output= output, is_error= is_error)],
+                   result_meta=result_meta)
 
 
 class Session(BaseModel):

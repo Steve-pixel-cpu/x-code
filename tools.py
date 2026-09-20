@@ -1,4 +1,5 @@
 import contextvars
+import fnmatch
 import json
 import os
 import platform
@@ -13,7 +14,13 @@ from pathlib import Path
 from typing import Callable, List, Optional, Self
 from pydantic import BaseModel
 
-from runtime import ToolError
+from runtime import ToolError, ToolOutput
+
+NL = chr(10)   # LF: splitlines/endswith 的换行判定用, 避免源码里写裸转义
+
+# 用户级配置目录（todo 清单等）: 与 config.USER_DIR 同一处, 但 tools.py
+# 不 import config（避免引入配置加载副作用）, 直接推导
+USER_CONFIG_HOME = Path.home() / ".x-code"
 
 # 工具输出进入会话历史前的硬上限。模型的思考长度随上下文膨胀，无界的
 # 工具输出（大文件、长命令输出）是透支上下文、诱发过度思考的根源，所以
@@ -346,15 +353,154 @@ def read_tool(params: dict, workdir: Optional[str] = None) -> str:
         return f'ERROR: file not found {path}'
     return content
 
+def _unified_diff(old_text: str, new_text: str, path: str) -> str:
+    """两版文本的 unified diff（无 trailing 换行噪音）。"""
+    import difflib
+    old_lines = old_text.splitlines(keepends=True)
+    new_lines = new_text.splitlines(keepends=True)
+    return "".join(difflib.unified_diff(
+        old_lines, new_lines,
+        fromfile=f"a/{path}", tofile=f"b/{path}"))
+
+
 def write_tool(params: dict, workdir: Optional[str] = None) -> str:
     path = resolve_path(params.get('path', ''), workdir)
     content = params.get('content', '')
+    existed = path.exists()
+    old_text = ""
+    if existed:
+        try:
+            old_text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            old_text = None   # 二进制/不可解码旧内容: diff 不可靠, 置 None 跳过
     try:
+        path.parent.mkdir(parents=True, exist_ok=True)
         with open(path, 'w', encoding="utf-8") as f:
             f.write(content)
     except FileNotFoundError:
         return f'ERROR: directory not found {path}'
-    return f'OK: wrote to {path}'
+    except OSError as e:
+        return f'ERROR: cannot write {path}: {e}'
+
+    new_lines = len(content.splitlines())
+    if content and not content.endswith(NL):
+        new_lines += 1   # 末行无换行符也算一行
+    summary = (f"OK: wrote to {path} ({new_lines} lines, "
+               + ("updated" if existed and old_text is not None else
+                  "overwritten (old content undecodable)" if existed else "new file")
+               + ")")
+    meta: dict = {"path": str(path), "created": not existed,
+                  "lines": new_lines, "chars": len(content)}
+    if old_text is not None and old_text != content:
+        diff = _unified_diff(old_text, content, str(path))
+        if diff:
+            meta["diff"] = diff[:8000]
+    return ToolOutput(summary).with_meta(meta)
+
+
+# --- 任务清单 (todo): 会话级进度追踪, 与 Claude Code 的 TodoWrite 同构 ---
+#
+# 为什么做进工具而不是提示词: 模型对"多步任务"的进度管理一旦只靠脑内
+# 记忆, 长会话压缩后必丢。落一份结构化清单在 ~/.x-code/todos/, 既给模型
+# 一个"当前该干什么"的外部记忆, 也给前端一份可渲染的任务面板数据源。
+# 单会话单清单: 文件名 = session_id, 线程锁串行化写入。
+
+_TODOS_DIR = USER_CONFIG_HOME / "todos"
+_todo_lock = threading.Lock()
+
+
+def todo_tool(params: dict, workdir: Optional[str] = None,
+              session_id: Optional[str] = None) -> str:
+    """读/写当前会话的任务清单。写时全量替换（模型每次提交完整列表）。
+
+    session_id 归属与 agent_tools.current_session_id 同一策略: Web 端由
+    dispatch 绑定提供（每会话一份清单）, CLI 无绑定落 "cli"。"""
+    action = str(params.get("action") or "read")
+    if session_id is None:
+        try:
+            from agent_tools import current_session_id
+            session_id = current_session_id() or "cli"
+        except Exception:
+            session_id = "cli"
+
+    def _load() -> list[dict]:
+        try:
+            data = json.loads((_TODOS_DIR / f"{session_id}.json").read_text(encoding="utf-8"))
+            return data.get("items", []) if isinstance(data, dict) else []
+        except (OSError, ValueError):
+            return []
+
+    def _render(items: list[dict]) -> str:
+        if not items:
+            return "(empty)"
+        marks = {"pending": "[ ]", "in_progress": "[~]", "completed": "[x]"}
+        return NL.join(
+            f"{marks.get(it.get('status'), '[ ]')} {it.get('content', '')}"
+            for it in items)
+
+    with _todo_lock:
+        if action == "write":
+            raw = params.get("items")
+            if not isinstance(raw, list) or len(raw) > 50:
+                return "ERROR: items must be a list (max 50)"
+            items = []
+            for it in raw:
+                if not isinstance(it, dict):
+                    continue
+                content = str(it.get("content") or "").strip()
+                if not content:
+                    continue
+                status = str(it.get("status") or "pending")
+                if status not in ("pending", "in_progress", "completed"):
+                    status = "pending"
+                items.append({"content": content[:200], "status": status})
+            _TODOS_DIR.mkdir(parents=True, exist_ok=True)
+            (_TODOS_DIR / f"{session_id}.json").write_text(
+                json.dumps({"items": items}, ensure_ascii=False, indent=2),
+                encoding="utf-8")
+            return f"OK: {len(items)} todos saved.{NL}{_render(items)}"
+        return _render(_load())
+
+
+todo_spec = {
+    "name": "todo",
+    "description": (
+        "Maintain a task checklist for the current session so the user can "
+        "track progress on multi-step work. Two actions: 'read' returns the "
+        "current list; 'write' replaces the whole list (always submit the "
+        "complete list, one item per step, status = pending / in_progress / "
+        "completed). Keep exactly one item in_progress at a time; mark "
+        "completed immediately after finishing a step."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "action": {
+                "type": "string",
+                "enum": ["read", "write"],
+                "description": "'read' = fetch current todos; "
+                               "'write' = replace the whole list.",
+            },
+            "items": {
+                "type": "array",
+                "description": "Full list for action=write. Each item: "
+                               "{'content': str, 'status': "
+                               "'pending'|'in_progress'|'completed'}.",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "content": {"type": "string"},
+                        "status": {"type": "string",
+                                   "enum": ["pending", "in_progress",
+                                            "completed"]},
+                    },
+                    "required": ["content"],
+                },
+            },
+        },
+        "required": ["action"],
+    },
+}
 
 
 def present_plan_tool(params: dict, workdir: Optional[str] = None) -> str:
@@ -457,3 +603,172 @@ def task_stop_tool(params: dict, workdir: Optional[str] = None) -> str:
         return f"[{task_id}] already exited (code {task['proc'].poll()})."
     _kill_tree(task["proc"])
     return f"[{task_id}] stopped."
+
+
+# --- grep / glob: 纯 Python 只读搜索工具 ---
+#
+# 为什么不直接用 bash grep/find: (1) 无 Git Bash 的机器上 bash 工具降级,
+# 模型只能拼 PowerShell 语法, 易翻车; (2) 模式含引号/正则元字符时经 shell
+# 转义是常见失败源, 专用工具收 JSON 参数零 shell 解析; (3) 只读语义让它
+# 们归 READ_ONLY 权限档, 免弹窗且可安全并发。
+# glob 遍历时跳过 node_modules/.git/__pycache__ 等噪声目录与隐藏目录。
+
+_SKIP_DIRS = {
+    "node_modules", ".git", "__pycache__", ".venv", "venv", "dist",
+    "build", ".idea", ".vscode", ".pytest_cache", ".mypy_cache",
+    "site-packages", ".tox", "target", ".next", "vendor",
+}
+_BINARY_EXT = {
+    ".png", ".jpg", ".jpeg", ".gif", ".webp", ".ico", ".pdf", ".zip",
+    ".gz", ".tar", ".7z", ".rar", ".exe", ".dll", ".so", ".dylib",
+    ".woff", ".woff2", ".ttf", ".eot", ".mp3", ".mp4", ".mov", ".avi",
+    ".sqlite", ".db", ".pyc", ".class", ".wasm", ".bin",
+}
+_MAX_FILE_BYTES = 2_000_000      # 单文件读入上限: 超过按二进制跳过
+_MAX_RESULTS = 200               # grep 单模式匹配数上限（files_with_matches 是文件数）
+_MAX_LIST = 500                  # glob 返回路径数上限
+
+
+def _iter_files(base: Path):
+    """递归遍历 base 下的文件。跳过噪声目录/隐藏目录, 不跟随符号链接。"""
+    stack = [base]
+    while stack:
+        d = stack.pop()
+        try:
+            entries = sorted(d.iterdir(), key=lambda p: p.name)
+        except (PermissionError, OSError):
+            continue
+        for e in entries:
+            if e.is_dir():
+                if e.name.startswith(".") or e.name in _SKIP_DIRS:
+                    continue
+                stack.append(e)
+            elif e.is_file():
+                yield e
+
+
+def glob_tool(params: dict, workdir: Optional[str] = None) -> str:
+    """按 glob 模式列出文件路径。pattern 相对 workdir, 支持递归 `**`。"""
+    pattern = str(params.get("pattern", "")).strip()
+    if not pattern:
+        return "ERROR: pattern is required"
+    base = resolve_path(str(params.get("path") or "."), workdir)
+    if not base.is_dir():
+        return f"ERROR: directory not found: {base}"
+
+    pats = pattern if isinstance(pattern, list) else [pattern]
+    seen: dict[str, None] = {}
+    truncated = False
+    for pat in pats:
+        # ** 跨目录递归; Path.glob 在 Windows 上大小写不敏感, 与系统一致
+        pat = pat.replace("\\\\", "/")
+        try:
+            matches = list(base.glob(pat))
+        except (ValueError, OSError) as e:
+            return f"ERROR: bad pattern '{pat}': {e}"
+        for m in matches:
+            if len(seen) >= _MAX_LIST:
+                truncated = True
+                break
+            # 目录本身不进结果（模型要的是文件）; 保留先见顺序, 去重
+            if not m.is_file():
+                continue
+            # Path.glob 不认 _SKIP_DIRS, 结果按相对路径补过滤
+            # （Path.glob 总是从 base 起, 不必担心 m 在 base 之外）
+            rel_parts = m.relative_to(base).parts[:-1]
+            if any(p.startswith(".") or p in _SKIP_DIRS for p in rel_parts):
+                continue
+            seen.setdefault(str(m), None)
+        if truncated:
+            break
+    if not seen:
+        return f"No files found for pattern(s): {pattern}"
+    lines = list(seen.keys())
+    if truncated:
+        lines.append(f"... (truncated at {_MAX_LIST} files, refine the pattern)")
+    # 摘要头帮助模型一眼看到规模, 正文是可直接传给 read_file 的路径
+    return f"{len(lines) - (1 if truncated else 0)} file(s):" + NL + NL.join(lines)
+
+
+def grep_tool(params: dict, workdir: Optional[str] = None) -> str:
+    """在文件内容里搜正则。模式: files_with_matches(默认)/content/count。
+    glob 参数过滤文件名（如 '*.py'）, path 参数限定目录或单文件。"""
+    import re
+    pattern = params.get("pattern")
+    if not pattern or not str(pattern).strip():
+        return "ERROR: pattern is required"
+    try:
+        rx = re.compile(str(pattern))
+    except re.error as e:
+        return f"ERROR: invalid regex: {e}"
+
+    mode = str(params.get("output_mode") or "files_with_matches")
+    if mode not in ("files_with_matches", "content", "count"):
+        return f"ERROR: output_mode must be files_with_matches | content | count"
+    file_glob = params.get("glob")
+    globs = [str(g) for g in file_glob] if isinstance(file_glob, list) else (
+        [str(file_glob)] if file_glob else None)
+
+    target = resolve_path(str(params.get("path") or "."), workdir)
+    if target.is_file():
+        files = [target]
+    elif target.is_dir():
+        files = _iter_files(target)
+    else:
+        return f"ERROR: path not found: {target}"
+
+    hits: list[str] = []       # 输出行
+    matched_files = 0
+    total_matches = 0
+    truncated = False
+    for f in files:
+        if globs:
+            # '*.py' 对文件名匹配; 'src/*.py' 这类带斜杠的按相对路径匹配
+            rel = f.relative_to(target) if target.is_dir() else Path(f.name)
+            if not any(fnmatch.fnmatch(str(rel), g) or fnmatch.fnmatch(f.name, g)
+                       for g in globs):
+                continue
+        if f.suffix.lower() in _BINARY_EXT:
+            continue
+        try:
+            if f.stat().st_size > _MAX_FILE_BYTES:
+                continue
+            text = f.read_text(encoding="utf-8", errors="replace")
+        except (OSError, PermissionError):
+            continue
+        count = 0
+        content_lines: list[str] = []
+        for i, line in enumerate(text.splitlines(), 1):
+            if rx.search(line):
+                count += 1
+                total_matches += 1
+                if mode == "content":
+                    content_lines.append(f"{f}:{i}: {line.strip()[:300]}")
+        if count:
+            matched_files += 1
+            if mode == "files_with_matches":
+                hits.append(str(f))
+                if len(hits) >= _MAX_RESULTS:
+                    truncated = True
+            elif mode == "count":
+                hits.append(f"{f}: {count} match(es)")
+                if len(hits) >= _MAX_RESULTS:
+                    truncated = True
+            else:
+                hits.extend(content_lines)
+                if len(hits) >= _MAX_RESULTS:
+                    truncated = True
+        if truncated:
+            break
+
+    if not hits:
+        return f"No matches for /{pattern}/ in {target}"
+    if truncated:
+        hits.append(f"... (truncated at {_MAX_RESULTS} results, narrow the search)")
+    if mode == "files_with_matches":
+        head = f"{matched_files} file(s) match /{pattern}/:"
+        return head + NL + NL.join(hits)
+    if mode == "count":
+        head = f"{total_matches} match(es) of /{pattern}/ in {matched_files} file(s):"
+        return head + NL + NL.join(hits)
+    return NL.join(hits)
