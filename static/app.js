@@ -3781,3 +3781,65 @@ document.addEventListener("scroll", tipHide, true);
   if (state.configured === false) openOnboarding();   // 首次使用: 先引导配置供应商
   $("input").focus();
 })();
+(() => {
+/* ===== 悬浮滚动: 侧栏被截断的项目名 / 任务标题, 鼠标悬浮时自动横向滚动展示全文 ===== */
+  const HS_SPEED = 42;          // 滚动速度 px/s
+  const HS_START_DELAY = 350;   // ms, 悬停多久后开始滚动
+  const HS_END_HOLD = 900;      // ms, 滚到末尾后停留
+  const HS_LOOP_GAP = 1400;     // ms, 一个来回后的间隔
+  const HS_SEL = ".session-item .title, .project-item .p-name";
+  let hsCur = null;             // { el, timer, raf }
+
+  const hsStop = reset => {
+    if (!hsCur) return;
+    clearTimeout(hsCur.timer);
+    cancelAnimationFrame(hsCur.raf);
+    if (reset !== false) hsCur.el.scrollLeft = 0;
+    hsCur = null;
+  };
+
+  const hsAnimateTo = (el, from, to, dur, done) => {
+    const t0 = performance.now();
+    const ease = t => (t < .5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2);   // easeInOutQuad
+    const step = now => {
+      if (!el.isConnected) { hsStop(); return; }   // 列表被重渲染, 元素已移除
+      const t = Math.min(1, (now - t0) / dur);
+      el.scrollLeft = Math.round(from + (to - from) * ease(t));
+      if (t < 1) { hsCur.raf = requestAnimationFrame(step); }
+      else if (done) { done(); }
+    };
+    hsCur.raf = requestAnimationFrame(step);
+  };
+
+  const makeCycle = (el, dist, dur) => {
+    const cycle = () => {
+      hsAnimateTo(el, 0, dist, dur, () => {          // → 滚到末尾
+        if (!hsCur) return;
+        hsCur.timer = setTimeout(() => {
+          hsAnimateTo(el, dist, 0, dur, () => {      // ← 滚回开头
+            if (!hsCur) return;
+            hsCur.timer = setTimeout(cycle, HS_LOOP_GAP);
+          });
+        }, HS_END_HOLD);
+      });
+    };
+    return cycle;
+  };
+
+  document.addEventListener("pointerover", e => {
+    const el = e.target.closest && e.target.closest(HS_SEL);
+    if (hsCur && el === hsCur.el) return;
+    hsStop(true);
+    if (!el) return;
+    const dist = el.scrollWidth - el.clientWidth;
+    if (dist < 3) return;                        // 没被截断就不滚动
+    const dur = Math.min(5000, Math.max(700, dist / HS_SPEED * 1000));
+    hsCur = { el, timer: 0, raf: 0 };
+    hsCur.timer = setTimeout(makeCycle(el, dist, dur), HS_START_DELAY);
+  });
+
+  document.addEventListener("pointerout", e => {
+    if (hsCur && e.target === hsCur.el) hsStop(true);
+  });
+  window.addEventListener("blur", () => hsStop(true));
+})();

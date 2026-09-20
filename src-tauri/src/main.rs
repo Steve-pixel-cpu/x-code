@@ -7,6 +7,8 @@
 //            开发态用 .venv 的 python server.py; 退出整树杀
 //   6. 前端: 窗口加载本地服务; 注入 window.xcodeDesktop 标记 + xcodePickFolder 原生选文件夹桥;
 //            外部链接转交系统浏览器
+//   7. 诊断: 后端输出与壳侧启动步骤追加写 ~/.x-code/boot.log; 后端提前退出立即报错
+//            （带退出码）而非干等超时; 首启探活窗 60s（杀软首扫 + onefile 解压很慢）
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use std::io::{BufRead, BufReader, Read, Write};
@@ -119,7 +121,77 @@ fn ping_server(port: u16, token: &str, timeout: Duration) -> bool {
 
 // ---------- 拉起后端 ----------
 
-/// 后端输出转发到控制台（调试可见, 对齐 Electron 壳的 [server] 前缀行为）
+/// 启动诊断日志: 打包态没有控制台, 后端 stdout/stderr 此前只进 eprint（= 蒸发）,
+/// 用户只能看到"30 秒未就绪"的兜底弹窗, 真实死因（杀软拦截/缺文件/端口占用）无从定位。
+/// 壳侧关键步骤与后端输出都追加到 ~/.x-code/boot.log, 追加式以保留最近几次启动记录。
+fn boot_log_path() -> PathBuf {
+    data_dir().join("boot.log")
+}
+
+static BOOT_LOG: LazyLock<Mutex<Option<std::fs::File>>> = LazyLock::new(|| {
+    let _ = std::fs::create_dir_all(data_dir());
+    Mutex::new(
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(boot_log_path())
+            .ok(),
+    )
+});
+
+/// UTC 时间戳, 专供 boot.log。不引第三方时间库, civil 算法（Howard Hinnant）直接算。
+fn utc_now_string() -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    fmt_utc(secs)
+}
+
+fn fmt_utc(secs: u64) -> String {
+    let (h, m, s) = ((secs / 3600) % 24, (secs % 3600) / 60, secs % 60);
+    let z = (secs / 86400) as i64 + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let mut y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let mth = if mp < 10 { mp + 3 } else { mp - 9 };
+    if mth <= 2 {
+        y += 1;
+    }
+    format!("{y:04}-{mth:02}-{d:02} {h:02}:{m:02}:{s:02} UTC")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn utc_epoch为零() {
+        assert_eq!(fmt_utc(0), "1970-01-01 00:00:00 UTC");
+    }
+
+    #[test]
+    fn utc_已知时刻() {
+        // 2026-09-20 00:00:00 UTC = 20716 天 × 86400
+        assert_eq!(fmt_utc(20_716 * 86_400), "2026-09-20 00:00:00 UTC");
+        // 闰年日: 2024-02-29 12:00:00 UTC
+        assert_eq!(fmt_utc(1_709_208_000), "2024-02-29 12:00:00 UTC");
+    }
+}
+
+fn boot_log(tag: &str, line: &str) {
+    if let Ok(mut f) = BOOT_LOG.lock() {
+        if let Some(f) = f.as_mut() {
+            let _ = writeln!(f, "[{}][{tag}] {}", utc_now_string(), line);
+        }
+    }
+}
+
+/// 后端输出转发到控制台（调试可见, 对齐 Electron 壳的 [server] 前缀行为）+ boot.log
 fn drain_output(mut pipe: impl BufRead + Send + 'static) {
     std::thread::spawn(move || {
         let mut line = String::new();
@@ -127,7 +199,10 @@ fn drain_output(mut pipe: impl BufRead + Send + 'static) {
             line.clear();
             match pipe.read_line(&mut line) {
                 Ok(0) | Err(_) => break,
-                Ok(_) => eprint!("[server] {line}"),
+                Ok(_) => {
+                    eprint!("[server] {line}");
+                    boot_log("server", line.trim_end());
+                }
             }
         }
     });
@@ -145,7 +220,14 @@ fn spawn_backend(program: PathBuf, args: Vec<String>, cwd: PathBuf) -> Result<Ch
         use std::os::windows::process::CommandExt;
         cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
     }
-    let mut child = cmd.spawn().map_err(|e| format!("spawn backend: {e}"))?;
+    let mut child = cmd.spawn().map_err(|e| {
+        let msg = format!(
+            "启动后端 {} 失败: {e}\n发布版常见原因: 杀毒软件已隔离 resources\\server\\x-code-server.exe, 或安装目录缺少该文件。",
+            program.display()
+        );
+        boot_log("shell", &msg);
+        msg
+    })?;
     if let Some(out) = child.stdout.take() {
         drain_output(BufReader::new(out));
     }
@@ -165,6 +247,7 @@ fn start_server() -> Result<Child, String> {
     });
     if let Some(exe_path) = sidecar {
         let _ = std::fs::create_dir_all(data_dir());
+        boot_log("shell", &format!("打包态: 拉起冻结后端 {}", exe_path.display()));
         // --parent-pid: 后端内置看门狗, 壳死亡(含崩溃/被强杀)时后端立刻退出,
         // 端口随之释放——ExitRequested 清理只覆盖正常退出路径
         return spawn_backend(
@@ -195,6 +278,14 @@ fn start_server() -> Result<Child, String> {
     } else {
         PathBuf::from("python")
     };
+    boot_log(
+        "shell",
+        &format!(
+            "开发态: {} {}（无 .venv 时回落 PATH 里的 python, 找不到会 spawn 失败）",
+            python.display(),
+            root.join("server.py").display()
+        ),
+    );
     spawn_backend(
         python,
         vec![
@@ -390,22 +481,49 @@ fn main() {
 }
 
 fn bootstrap(token: &str) -> Result<(), String> {
+    let log = boot_log_path();
+    boot_log("shell", "=== 壳启动, 开始引导后端 ===");
     // 端口已有 x-code 在跑 → 复用（另一实例/用户手动起的服务）, 不重复拉
     let mut port = read_port();
     if ping_server(port, token, Duration::from_millis(1200)) {
+        boot_log("shell", &format!("复用已运行的后端 port={port}"));
         return Ok(());
     }
     let child = start_server()?;
     *CHILD.lock().unwrap() = Some(child);
+    boot_log("shell", "后端进程已拉起, 开始探活");
     let t0 = Instant::now();
-    while t0.elapsed() < Duration::from_secs(30) {
+    // 60s 而非 30s: 杀软首次深度扫描 + onefile 解压在低端机/冷盘上会超 30s。
+    // 期间每轮先看后端是否已退出——死了就不干等, 退出码 + boot.log 才是答案。
+    while t0.elapsed() < Duration::from_secs(60) {
+        {
+            let mut guard = CHILD.lock().unwrap();
+            if let Some(child) = guard.as_mut() {
+                match child.try_wait() {
+                    Ok(Some(status)) => {
+                        let msg = format!(
+                            "后端进程启动后即退出（{status}）。\n常见原因: 杀毒软件拦截/隔离了 resources\\server\\x-code-server.exe（请在杀软隔离区找回并加入白名单）, 或安装目录缺少该文件。\n后端完整输出已写入 {}",
+                            log.display()
+                        );
+                        boot_log("shell", &format!("后端提前退出: {status}"));
+                        return Err(msg);
+                    }
+                    Ok(None) => {}
+                    Err(e) => boot_log("shell", &format!("try_wait 失败: {e}")),
+                }
+            }
+        }
         port = read_port(); // 后端避让后会把实际端口写进 port 文件, 每轮重读
         if ping_server(port, token, Duration::from_millis(800)) {
+            boot_log("shell", &format!("后端就绪 port={port}"));
             return Ok(());
         }
         std::thread::sleep(Duration::from_millis(300));
     }
-    Err("Python 后端在 30 秒内未能就绪。\n若 8000-8019 端口被其他程序（如 C-Lodop 打印服务）占用, 请关闭后重试。".to_string())
+    Err(format!(
+        "Python 后端在 60 秒内未能就绪。\n可能原因: ① 8000-8019 端口被其他程序（如 C-Lodop 打印服务）占用; ② 杀毒软件拦截后端进程（请查杀软隔离区并加白名单）。\n后端完整输出已写入 {}, 反馈问题时请附上该文件。",
+        log.display()
+    ))
 }
 
 fn create_main_window(app: &AppHandle) -> Result<(), String> {

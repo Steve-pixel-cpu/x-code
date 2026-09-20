@@ -188,6 +188,12 @@
     -webkit-backdrop-filter: blur(18px) saturate(1.4);
     backdrop-filter: blur(18px) saturate(1.4);
   }
+  /* 摸鱼电台 dock: 亚克力下改透明继承侧栏 tint。原本自画 --bg-side(浓度
+   * 高于侧栏 tint 和输入卡 surface), 在磨砂家族里像一条死白贴片 */
+  :root[data-fx="acrylic"] #music-dock {
+    background: transparent;
+    border-top-color: color-mix(in srgb, var(--border) 55%, transparent);
+  }
 
   /* 壁纸启用标记 data-bg="1" 挂在 <html> 上（head 预绘制脚本可设，避免刷新闪底色）。
    * 普通主题 + 壁纸: 大面积区域转半透明让图片可见, 卡片保持实底保证可读性;
@@ -197,12 +203,28 @@
   :root[data-bg="1"]:not([data-fx="acrylic"]) #titlebar { background: color-mix(in srgb, var(--bg-side) 88%, transparent); }
   :root[data-bg="1"]:not([data-fx="acrylic"]) #doc-header { background: color-mix(in srgb, var(--bg) 86%, transparent); }
   :root[data-bg="1"] .composer-shell { background: transparent; }
+  /* 普通主题 + 壁纸: 侧栏本体降到 88% 不透明度, dock 同步透明跟随,
+   * 免得播放条比侧栏更实、在底部显出一截白带 */
+  :root[data-bg="1"]:not([data-fx="acrylic"]) #music-dock { background: transparent; }
   /* 遮罩强度: 亚克力下轻一档（磨砂已柔化壁纸）; 无模糊时稍重帮文字让路。
    * 正文卡片仍是 84%+ 实底, 可读性由卡片保证, 遮罩只管露出的壁纸区域 */
   :root[data-bg="1"] { --bg-scrim: rgba(10, 10, 14, .38); }
   :root[data-theme="light"][data-bg="1"] { --bg-scrim: rgba(255, 255, 255, .34); }
   :root[data-fx="acrylic"][data-bg="1"] { --bg-scrim: rgba(10, 10, 14, .26); }
   :root[data-theme="light"][data-fx="acrylic"][data-bg="1"] { --bg-scrim: rgba(255, 255, 255, .22); }
+  /* 亚克力 + 壁纸: 表面 tint 再让一档。磨砂(抹掉细节) + 遮罩 + 无壁纸档的
+   * 高浓度 tint 三层叠乘, 壁纸亮度只剩约三成, 观感近乎全黑。有壁纸时 tint
+   * 减薄让壁纸透出; 正文可读性由磨砂抹平高频细节 + 遮罩兜底 */
+  :root[data-fx="acrylic"][data-bg="1"] {
+    --pane-tint: rgba(16, 16, 20, .44);
+    --side-tint: rgba(11, 11, 15, .50);
+    --titlebar-tint: rgba(11, 11, 15, .55);
+  }
+  :root[data-theme="light"][data-fx="acrylic"][data-bg="1"] {
+    --pane-tint: rgba(255, 255, 255, .44);
+    --side-tint: rgba(247, 247, 248, .50);
+    --titlebar-tint: rgba(247, 247, 248, .45);
+  }
 
   /* 壁纸遮罩与磨砂层: z-index -1 = 壁纸(body 绘制)之上、一切 UI 之下;
    * 变量从 <html> 继承, 元素本体只管显隐与着色 */
@@ -210,7 +232,7 @@
     position: fixed; inset: 0; z-index: -1; display: none; pointer-events: none;
   }
   :root[data-bg="1"] #bg-scrim { display: block; background: var(--bg-scrim); }
-  #bg-frost { backdrop-filter: blur(46px) saturate(1.4); }
+  #bg-frost { backdrop-filter: blur(30px) saturate(1.4); }
   /* 页面内磨砂只服务壁纸(backdrop-filter 够不到窗口外的桌面): 亚克力无壁纸
    * 时模糊对象是透明窗外的 DWM 材质, 页面这层开着只会白耗 GPU。 */
   :root[data-fx="acrylic"][data-bg="1"] #bg-frost { display: block; }
