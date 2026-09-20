@@ -24,13 +24,9 @@ def test_permission_mode_roundtrip(tmp_path):
     assert store.get_permission_mode("s-x") == "workspace-write"  # 取最新一条
 
 
-def test_permission_mode_survives_rewrite(tmp_path):
-    """压缩重写会话文件后, 非消息记录（含权限模式）必须保留。"""
-    store = SessionStore(storage_dir=tmp_path)
-    store.set_permission_mode("s-rw", "plan")
-    msgs, _ = store.load_session("s-rw")
-    store.rewrite_session("s-rw", msgs)
-    assert store.get_permission_mode("s-rw") == "plan"
+# （曾有 test_permission_mode_survives_rewrite: 压缩重写会话文件后非消息
+#   记录必须保留。压缩已改为请求期视图(runtime._model_view), 历史不再被
+#   重写, 存储永远只追加, 记录天然保留——该保证随之退役。）
 
 
 # ------------------------------------------------------------

@@ -1,11 +1,15 @@
-"""规格钉子: auto_compacted 语义 = "实际压缩了"。
+"""规格钉子: auto_compacted 语义 = "本请求使用了压缩视图"。
 
-历史背景: 曾经 _maybe_auto_compact() 在"上下文过阈值但 removed_count==0"时
-也返回 True, 信号亮了但会话根本没被压缩（假阳性）。现已改为: 过阈值但
-消息数 <= preserve_recent(4)（如单条超大粘贴）时返回 False。
+压缩是"给模型的请求期视图": 过阈值置粘性标记 _compact_active, stream 收到的
+messages 为 [续接摘要] + 保留区; **会话历史本身不被改写**——完整对话原样
+保留在内存与磁盘供展示, 摘要不再落盘。
 
-场景: 单条 user 消息携带超大输入 (in_tokens 远超阈值), 消息总数 <= preserve_recent(4),
-compact_session 的 should_compact 因条数不足返回 removed_count=0。
+历史背景:
+- 曾经 _maybe_auto_compact() 在"过阈值但 removed_count==0"时也返回 True
+  （假阳性）。现已改为: 消息数 <= preserve_recent(4)（如单条超大粘贴）时
+  返回 False。
+- 曾经压缩会原地替换 session.messages 并重写会话文件——展示层被迫跟着
+  显示一整面摘要墙。现为请求期视图, 历史原样保留。
 
 运行: uv run pytest tests/test_auto_compact_signal.py -v
 """
@@ -28,9 +32,11 @@ class ScriptedClient:
     def __init__(self, script: list):
         self.script = list(script)
         self.calls = 0
+        self.seen: list[list] = []       # 每次调用收到的 messages 快照
         self.thinking_level = "medium"
 
     def stream(self, system_prompt, messages, thinking_level=None) -> list:
+        self.seen.append(list(messages))
         events = self.script[self.calls] if self.calls < len(self.script) else self.script[-1]
         self.calls += 1
         return events
@@ -52,10 +58,10 @@ def make_runtime(session, client, threshold: int) -> ConversationRuntime:
 
 
 # ------------------------------------------------------------
-# 对照组: 消息数充足时, 真·压缩发生
+# 对照组: 消息数充足时, 请求视图被压缩, 历史原样保留
 # ------------------------------------------------------------
 
-def test_auto_compact_true_positive_actually_compacts():
+def test_auto_compact_view_applies_history_untouched():
     session = Session(messages=[Message.user_text(f"旧消息{i} " + "x" * 40) for i in range(6)])
     client = ScriptedClient([make_events("ok", out_tokens=1, in_tokens=500_000)])
     runtime = make_runtime(session, client, threshold=10_000)
@@ -63,8 +69,18 @@ def test_auto_compact_true_positive_actually_compacts():
     summary = runtime.run_turn("hi")
 
     assert summary.auto_compacted is True
-    assert len(runtime.session().messages) == 5          # 摘要 + 保留 4 条
-    assert "continued from a previous conversation" in runtime.session().messages[0].content[0].text
+    # 历史(内存)不被改写: 6 旧 + user"hi" + assistant 完整保留, 无摘要消息
+    assert len(runtime.session().messages) == 8
+    assert all(
+        "continued from a previous conversation" not in b.text
+        for m in runtime.session().messages
+        for b in m.content
+        if hasattr(b, "text")
+    )
+    # 跨阈值发生在本轮响应之后(usage 到手才知道), 当轮请求仍是全量视图;
+    # 粘性标记已置位 → 自下一次请求起使用压缩视图(见粘性测试)
+    assert len(client.seen[0]) == 7
+    assert runtime._compact_active is True
 
 
 # ------------------------------------------------------------
@@ -90,3 +106,31 @@ def test_auto_compact_over_threshold_but_nothing_removable_is_false():
         for b in m.content
         if hasattr(b, "text")
     )
+    # 视图 = 调用时刻的全量历史（仅 user"hi", assistant 尚未产生）
+    assert client.seen[0] == runtime.session().messages[:1]
+
+
+# ------------------------------------------------------------
+# 粘性: 激活一次后持续生效, 不因 usage 回落而恢复全量视图（防振荡）
+# ------------------------------------------------------------
+
+def test_auto_compact_激活后粘性生效_不因阈值回落而恢复全量():
+    session = Session(messages=[Message.user_text(f"旧消息{i} " + "x" * 40) for i in range(6)])
+    client = ScriptedClient([
+        make_events("ok", out_tokens=1, in_tokens=500_000),   # 第一次: 跨过阈值, 激活
+        make_events("ok", out_tokens=1, in_tokens=100),       # 第二次: usage 远低于阈值
+    ])
+    runtime = make_runtime(session, client, threshold=10_000)
+
+    runtime.run_turn("第一轮")
+    # 第一次请求时 usage 未知, 仍是全量视图; 轮末激活粘性标记
+    assert len(client.seen[0]) == 7
+    runtime.run_turn("第二轮")            # usage 远低于阈值, 但粘性已激活
+    second_view = client.seen[1]
+
+    # 第二轮请求(usage 远低于阈值)仍使用压缩视图: [续接摘要] + 保留 4 条
+    # + 第一轮 user/assistant + 第二轮 user, 而不是恢复全量
+    assert "continued from a previous conversation" in second_view[0].content[0].text
+    assert len(second_view) == 5
+    # 历史依旧原样: 8 条 + 第二轮 user + assistant = 10
+    assert len(runtime.session().messages) == 10

@@ -1480,6 +1480,8 @@ function startDraft(draftDir = null) {
 function renderHistoryMessage(m) {
   if (m.role === "user") {
     const text = m.blocks.filter(b => b.type === "text").map(b => b.text).join("\n");
+    // 旧版压缩持久化的续接指令: 模型专用文本, 渲染为一行提示卡而非气泡
+    if (text && isCompactNotice(text)) { addCompactNotice(); return; }
     // 附件块转成与 WS 同形状: image 拼缩略图网格, file 渲染文件 chip
     const atts = m.blocks
       .filter(b => b.type === "image" || b.type === "file")
@@ -1620,6 +1622,7 @@ function handleServerMessage(msg, sid) {
       run.awaiting = run.busy;
       if (run.awaiting) run.awaitT0 = Date.now();
     }
+    else if (msg.type === "context_compacted") addCompactNotice(colOf(sid), true);
     else if (msg.type === "mode_changed") onModeChanged(msg, sid);
 
     else if (msg.type === "tool_result") bumpUnread(sid);
@@ -1679,6 +1682,7 @@ function handleServerMessage(msg, sid) {
     case "turn_queued_user":   onTurnQueuedUser(msg, sid); break;
     case "turn_queue_cleared": onQueueCleared(sid); break;
     case "await_output":       onAwaitOutput(msg, state.sessionId); break;
+    case "context_compacted":  addCompactNotice(msgCol(), true); break;
     case "rate_limited_retry": onRateLimitedRetry(msg, sid); break;
     case "turn_interrupting":  onTurnInterrupting(msg, sid); break;
     case "permission_request": onPermissionRequest(msg, sid); break;
@@ -2355,6 +2359,21 @@ function addNoteBubble(kind, text) {
   div.className = "note " + kind;
   div.textContent = (kind === "err" ? "✗ " : kind === "warn" ? "⚠ " : "") + text;
   msgCol().appendChild(div);
+  scrollToBottom();
+}
+
+/* ---------- 压缩续接消息: 模型指令, 非对话内容 ----------
+ * 旧版压缩把续接摘要作为 user 消息持久化, 回放显示成一整面墙。
+ * 按固定前缀识别（与 compact.py 的 continuation_text 对应）后渲染为
+ * 一行式提示卡; 新版压缩不再落盘, 只发 context_compacted 提示。 */
+const COMPACT_MARK = "This session is being continued from a previous conversation";
+function isCompactNotice(text) { return text.startsWith(COMPACT_MARK); }
+function addCompactNotice(col, live) {
+  const div = document.createElement("div");
+  div.className = "note compact-note";
+  div.textContent = (live ? "本轮已自动压缩上下文" : "此处之前的上下文已压缩")
+    + "（摘要仅供模型使用，完整对话记录不受影响）";
+  (col || msgCol()).appendChild(div);
   scrollToBottom();
 }
 

@@ -187,7 +187,7 @@ class TurnSummary(BaseModel):
     tool_results: list[Message]
     iterations: int
     usage: TokenUsage
-    # 语义 = "实际压缩了"（过阈值且确有消息被压掉）;
+    # 语义 = "本请求使用了压缩视图"（过阈值且确有消息被归档）;
     # 过阈值但消息数 <= preserve_recent 无东西可压时为 False
     auto_compacted: bool
     budget_exhausted: bool = False
@@ -227,10 +227,13 @@ class ConversationRuntime:
         # 持久化钩子（Web 端增量落盘用, CLI 默认 None 行为不变）:
         # - on_iterate: 消息历史处于一致点（无悬空 tool_use）时触发——
         #   用户消息落定后、每次工具结果回填后
-        # - on_compacted: 压缩替换内存历史后触发——追加式存储从此
-        #   失准, 调用方需要重写存储（见 storage.rewrite_session）
+        # - on_compacted: 压缩视图首次激活时触发（纯通知, 历史不被改写,
+        #   存储无需重写——压缩只影响 _model_view() 给模型的请求视图）
         self._on_iterate = None
         self._on_compacted = None
+        # 压缩视图粘性开关: 过阈值置位后持续生效(防"压缩→恢复全量→再压缩"
+        # 振荡); 历史本身不被改写, _model_view() 据此构建给模型的请求视图
+        self._compact_active = False
         # 事件镜像钩子（Web 端工具卡片闭合用, CLI 默认 None 行为不变）:
         # - on_tool_finalized: 工具未经执行就被终局（权限拒绝 / hook 拦截 /
         #   prompter 拒绝）时触发——这条路径不经过 tool_executor, 镜像方
@@ -400,39 +403,43 @@ class ConversationRuntime:
             return finalized
         return self._execute_tool(tool_block, pre_res)
     def compact(self)->  str:
-        curr_session = self._session
-        # 手动压缩: 0 让估算闸门恒过, 无条件压到 preserve_recent
+        # 手动压缩: 不再删历史——压缩是"给模型的请求期视图", 置粘性标记后
+        # _model_view() 即刻生效, 原始对话原样保留在内存与磁盘(展示用)。
+        self._compact_active = True
         compact_result = compact_session(
-            messages=curr_session.messages,
+            messages=self._session.messages,
             config=CompactionConfig(
                 max_estimated_tokens=0
             ),
         )
         if compact_result.removed_count == 0:
             return "Nothing to compact!"
-
-        curr_session.messages = compact_result.compacted_messages
-        return f"Compact success! Remove count = {compact_result.removed_count}."
+        return (f"Compacted view active! Archived {compact_result.removed_count} "
+                f"earlier messages from the model context (history kept for display).")
 
     def _maybe_auto_compact(self)-> bool:
         # 信号: 最近一次调用的真实上下文占用（input + 缓存读写, 见
         # TokenUsage.context_tokens）。开缓存后 input_tokens 只算未命中
-        # 部分, 不能单看。传 max_estimated_tokens=0 是有意的——阈值已过
-        # 就让估算恒过闸, 无条件压到 preserve_recent, 并非"消息多就每轮压缩"
+        # 部分, 不能单看。
+        # 压缩不改写历史: 置粘性标记 _compact_active, 由 _model_view() 在
+        # 构建请求时生成压缩视图。粘性是必须的——视图生效后 usage 骤降,
+        # 若只看阈值会"压缩→恢复全量→再压缩"振荡。激活一次即通知一次
+        # (_on_compacted, Web 端广播提示), 之后持续生效不再重复通知。
         if not self._context_over_compact_threshold():
             return False
-        curr_session = self._session
+        if self._compact_active:
+            return True                      # 已激活: 持续生效, 不重复通知
         compact_result = compact_session(
-            messages=curr_session.messages,
+            messages=self._session.messages,
             config=CompactionConfig(
                 max_estimated_tokens = 0
             ),
         )
-        # 语义: auto_compacted = "实际压缩了"。过阈值但没东西可压
-        # （消息数 <= preserve_recent, 如单条超大粘贴）时不亮信号
+        # 语义: auto_compacted = "本请求使用了压缩视图"。过阈值但没东西
+        # 可压（消息数 <= preserve_recent, 如单条超大粘贴）时不亮信号
         if compact_result.removed_count == 0:
             return False
-        curr_session.messages = compact_result.compacted_messages
+        self._compact_active = True
         if self._on_compacted is not None:
             try:
                 self._on_compacted()
@@ -440,6 +447,16 @@ class ConversationRuntime:
                 print(f"[WARN] compact hook failed: {e}")
 
         return True
+
+    def _model_view(self) -> List[Message]:
+        """给模型的会话视图: 压缩激活时 = [续接摘要] + 保留区(纯函数逐请求
+        重算), 否则原样返回全量历史。展示层永远读全量——压缩只影响模型。"""
+        if not self._compact_active:
+            return self._session.messages
+        return compact_session(
+            messages=self._session.messages,
+            config=CompactionConfig(max_estimated_tokens=0),
+        ).compacted_messages
 
     def _context_over_compact_threshold(self) -> bool:
         latest = self.usage().current_turn_usage()
@@ -477,9 +494,9 @@ class ConversationRuntime:
             if iterations >= self._max_iterations:
                 iterations_exhausted = True
                 break
-            # 压缩检查点与预算检查同位置: 此刻历史一致, 压缩不会产生悬空
-            # tool_use。挪进循环让超限发生在单轮中途也能就地降载——在请求
-            # 还能成功时压缩, 而不是等上下文撑爆 API 报 400 掀翻整轮。
+            # 压缩检查点与预算检查同位置: 此刻历史一致。压缩只置粘性标记
+            # （历史不被改写）, 真正的裁剪发生在下面 _model_view() 构建
+            # 请求视图时——超限发生在单轮中途也能就地降载。
             if self._maybe_auto_compact():
                 auto_compacted = True
 
@@ -487,9 +504,11 @@ class ConversationRuntime:
             # 计划模式指令段的注入/移除在 set_permission_mode →
             # _rebuild_effective_prompt 里完成, stream 一律用生效提示词
             # （此前这里算过 sys_prompt 却没传给 stream, 等于从未生效）
+            # messages 用模型视图: 压缩激活时 = [续接摘要] + 保留区,
+            # 全量历史原样留在会话里供展示与落盘。
             events = self._api_client.stream(
                 system_prompt=self._effective_system_prompt,
-                messages=curr_session.messages,
+                messages=self._model_view(),
                 thinking_level=self._thinking_level,
             )
             message,token_usage = build_assistant_message(events)

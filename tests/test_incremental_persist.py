@@ -1,7 +1,8 @@
-"""增量落盘的规格钉子: rewrite_session 原子重写 + runtime 一致点钩子。
+"""增量落盘的规格钉子: runtime 一致点钩子 + 只追加存储。
 
-输出中强杀进程时, 落盘只在"历史一致点"发生——不再丢整轮;
-压缩重写内存历史后, 存储文件原子重写保持磁盘与内存一致。
+输出中强杀进程时, 落盘只在"历史一致点"发生——不再丢整轮。
+压缩是"给模型的请求期视图": 历史不被改写, 存储永远只追加,
+on_compacted 只是纯通知(旧版会原地替换历史并重写会话文件, 已退役)。
 
 运行方式（在 x-code 目录下）:
     uv run pytest tests/test_incremental_persist.py -v
@@ -41,39 +42,6 @@ def make_events(text: str, out_tokens: int = 1, in_tokens: int = 1_000) -> list:
 
 
 # ------------------------------------------------------------
-# storage.rewrite_session
-# ------------------------------------------------------------
-
-def test_rewrite_session_重写后加载结果一致(tmp_path):
-    store = SessionStore(storage_dir=tmp_path)
-    msgs = [Message.user_text(f"消息{i}") for i in range(4)]
-    for m in msgs:
-        store.save_message("s1", m, None)
-    store.set_title("s1", "标题A")            # 非消息记录: 重写后必须保留
-    store.set_workdir("s1", "D:/w")           # 非消息记录: 重写后必须保留
-
-    new_msgs = [Message.user_text("摘要"), Message.user_text("保留1")]
-    count, last = store.rewrite_session("s1", new_msgs)
-
-    assert count == 2
-    loaded, last_uuid = store.load_session("s1")
-    assert [m.content[0].text for m in loaded] == ["摘要", "保留1"]
-    assert last_uuid == last                  # 返回的链尾与重载一致
-    assert store.get_title("s1") == "标题A"
-    assert store.get_workdir("s1") == "D:/w"
-    assert store.count_messages("s1") == 2    # 旧消息不残留
-
-
-def test_rewrite_session_链式parent连续(tmp_path):
-    store = SessionStore(storage_dir=tmp_path)
-    new_msgs = [Message.user_text("a"), Message.user_text("b"), Message.user_text("c")]
-    _, last = store.rewrite_session("s1", new_msgs)
-    # 重载即验证链可完整回溯（_rebuild_chain 走 parent_uuid）
-    loaded, _ = store.load_session("s1")
-    assert [m.content[0].text for m in loaded] == ["a", "b", "c"]
-
-
-# ------------------------------------------------------------
 # runtime 钩子触发时机
 # ------------------------------------------------------------
 
@@ -105,7 +73,9 @@ def test_on_iterate_用户消息后与工具结果后各触发一次():
     assert marks == [1, 3]
 
 
-def test_on_compacted_压缩替换后触发():
+def test_on_compacted_压缩视图激活时触发_历史不被改写():
+    """压缩激活 = 纯通知: 历史原样保留（含完整早期消息, 无摘要消息),
+    存储不需要重写——磁盘与内存天然一致。"""
     session = Session(messages=[Message.user_text(f"旧{i} " + "x" * 40) for i in range(6)])
     client = ScriptedClient([make_events("ok", in_tokens=500_000)])
     runtime = make_runtime(session, client).with_auto_compact_threshold(10_000)
@@ -115,7 +85,17 @@ def test_on_compacted_压缩替换后触发():
     runtime.run_turn("hi")
 
     assert len(fired) == 1
-    assert "continued from a previous conversation" in fired[0][0].content[0].text
+    # 通知携带的是当时的完整历史快照, 不含续接摘要
+    assert "continued from a previous conversation" not in fired[0][0].content[0].text
+    # 轮次结束后历史依旧原样: 6 旧 + user"hi" + assistant
+    assert len(session.messages) == 8
+    assert all(
+        "continued from a previous conversation" not in b.text
+        for m in session.messages
+        for b in m.content
+        if hasattr(b, "text")
+    )
+    assert runtime._compact_active is True       # 粘性: 后续请求继续使用压缩视图
 
 
 def test_钩子抛异常不炸对话():

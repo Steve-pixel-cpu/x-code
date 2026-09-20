@@ -8,7 +8,7 @@ from typing import Optional
 
 from pydantic import BaseModel, ValidationError
 
-from fsatomic import atomic_replace, read_text_with_retry, unique_tmp_path
+from fsatomic import read_text_with_retry
 from models import Message
 
 
@@ -69,49 +69,9 @@ class SessionStore:
         self._append_entry(file_path, entry)
         return curr_id
 
-    def rewrite_session(self, session_id: str, messages: List[Message]) -> tuple[int, Optional[str]]:
-        """原子重写整个会话文件为给定消息序列（重建 uuid 链）。
-
-        用于上下文压缩后: 内存历史被替换为"摘要+保留区", 追加式落盘的
-        persisted_count 从此失准——重写让磁盘与内存重新一致。
-        标题/工作目录等非消息记录原样保留。返回 (消息数, 新链尾 uuid)。
-
-        临时文件唯一命名 + 替换带重试（fsatomic）: 重写发生在 turn 工作
-        线程（auto-compact 后）, 而 HTTP 读者（历史接口的 load_session）
-        可能正开着同一个会话文件——固定名 tmp 会被并发重写互踩, Windows
-        上目标被读者占住时 replace 抛 PermissionError, 由重试兜住。
-        """
-        file_path = self._session_path(session_id)
-        others = [e for e in self._read_entries(file_path)
-                  if not isinstance(e, StorageEntry)]
-        tmp = unique_tmp_path(file_path)
-        try:
-            tmp.write_text("", encoding="utf-8")
-            for e in others:
-                self._append_entry(tmp, e)
-            last: Optional[str] = None
-            for m in messages:
-                last = self.save_message_to(tmp, m, last)
-            atomic_replace(tmp, file_path)
-        finally:
-            # 替换成功后 tmp 已不存在; 失败路径清掉残片
-            try:
-                tmp.unlink(missing_ok=True)
-            except OSError:
-                pass
-        return len(messages), last
-
-    def save_message_to(self, path: Path, message: Message,
-                         parent_uuid: Optional[str]) -> str:
-        """save_message 的指定文件变体（rewrite_session 用）。"""
-        entry = StorageEntry(
-            uuid=str(uuid.uuid4()),
-            parent_uuid=parent_uuid,
-            message=message.model_dump(),
-            timestamp=datetime.now(timezone.utc).isoformat()
-        ).model_dump()
-        self._append_entry(path, entry)
-        return entry["uuid"]
+    # 注: 曾有 rewrite_session(压缩后重写整个会话文件)。压缩已改为
+    # "给模型的请求期视图"(runtime._model_view), 历史不再被改写,
+    # 存储永远只追加, 该函数随之退役。
 
     def load_session(self, session_id:str) -> tuple[list[Message], Optional[str]]:
         file_path = self._session_path(session_id)
@@ -216,8 +176,8 @@ class SessionStore:
 
         result : list[StorageEntry] = []
         if not file_path.exists(): return result
-        # 读走重试: rewrite_session 的原子替换过渡窗口里, Windows 新开
-        # 读句柄会瞬时被拒（delete pending）; 整体读入再按行解析
+        # 读走重试: 原子替换的过渡窗口里, Windows 新开读句柄会瞬时被拒
+        # （delete pending）; 整体读入再按行解析
         text = read_text_with_retry(file_path)
         for line_no, line in enumerate(text.splitlines(), 1):
             if line.strip() == "":

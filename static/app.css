@@ -855,6 +855,11 @@
     color: var(--text-3); font-size: calc(12.5px * var(--fs-ui)); padding: 0 2px 12px;
     border-bottom: 1px solid var(--border); border-radius: 0;
   }
+  /* 压缩提示: 旧会话持久化的续接指令 / 实时压缩通知, 一行素雅样式 */
+  .note.compact-note {
+    color: var(--text-3); background: transparent;
+    border-color: transparent; font-size: calc(11.5px * var(--fs-ui));
+  }
   @supports not (background: color-mix(in srgb, red 50%, blue)) {
     .note.warn { border-color: transparent; } .note.err { border-color: transparent; }
   }

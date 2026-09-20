@@ -141,8 +141,8 @@ def test_max_iterations_stops_gracefully():
 
 # ------------------------------------------------------------
 # auto-compact 信号 — 用最近一次调用的真实上下文占用（input + 缓存读写）,
-# 而不是只增不减的累计 input; auto_compacted 语义 = "实际压缩了",
-# 不是"闸门触发过"
+# 而不是只增不减的累计 input; auto_compacted 语义 = "本请求使用了压缩
+# 视图", 不是"闸门触发过"; 历史(内存/磁盘)不被改写——压缩只影响模型视图
 # ------------------------------------------------------------
 
 def test_auto_compact_triggers_on_latest_input():
@@ -162,7 +162,11 @@ def test_auto_compact_triggers_on_latest_input():
     summary = runtime.run_turn("hi")
 
     assert summary.auto_compacted is True
-    assert len(runtime.session().messages) == 5   # 摘要 + 保留 4 条
+    # 历史(内存)不被改写: 6 旧 + user"hi" + assistant 完整保留
+    assert len(runtime.session().messages) == 8
+    # 当轮请求时 usage 未知 → 全量视图; 轮末激活, 自下一次请求起压缩
+    assert len(client.seen[0]) == 7
+    assert runtime._compact_active is True
 
 
 def test_auto_compact_not_fires_when_nothing_removable():
@@ -205,13 +209,15 @@ def test_auto_compact_fires_mid_turn_before_next_call():
 
     assert summary.auto_compacted is True
     assert client.calls == 2
-    # 第二次调用看到的是压缩后历史: 摘要开头 + 保留的最近几条, 不再是全量
+    # 第二次调用看到的是压缩视图: 摘要开头 + 保留的最近几条, 不再是全量
     second_call = client.seen[1]
     assert len(second_call) < 9                   # 未压缩应为 6旧+user+assistant+tool
     assert "continued from a previous conversation" in second_call[0].content[0].text
     # 压缩不产生悬空 tool_use: tool_use 与 tool_result 必须成对保留在末尾
     assert second_call[-2].role == "assistant"
     assert second_call[-1].role == "tool"
+    # 历史(内存)不被改写: 6旧 + user + assistant(tool_use) + tool + assistant(终答)
+    assert len(runtime.session().messages) == 10
 
 
 def test_context_tokens_counts_cache_usage():

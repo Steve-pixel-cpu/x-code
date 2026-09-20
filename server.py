@@ -375,6 +375,21 @@ api_client.client = _LiveClientProxy(api_client.client)
 # providers / activeProvider 两个 key）, 这里只保留运行态副本
 # ============================================================================
 
+_BASE_URL_V1_TAIL = re.compile(r"/v1/?$", re.IGNORECASE)
+
+
+def _normalize_base_url(url) -> str:
+    """规范化供应商 base_url。
+
+    x-code 走 anthropic SDK, 它在 base_url 后自动拼 /v1/messages; 用户照
+    OpenAI 习惯粘贴带 /v1 的地址会请求 /v1/v1/messages → 404。这里统一
+    剥掉结尾的字面 /v1 段与多余斜杠（智谱 /api/anthropic 这类真实路径
+    原样保留）。保存/测试/应用三处都过这一道, 行为一致。"""
+    text = str(url or "").strip()
+    while text.endswith("/"):
+        text = text[:-1]
+    return _BASE_URL_V1_TAIL.sub("", text)
+
 
 def _provider_ready(cfg: dict) -> bool:
     """active 指向的供应商是否可用（启用 + 有接口地址 + 有 key）, 即是否已初始化。
@@ -396,7 +411,7 @@ def _apply_provider_config(cfg: dict) -> None:
         prov = next((p for p in cfg.get("providers", [])
                      if p.get("id") == active.get("provider")), None)
         api_client.configure(
-            base_url=prov.get("base_url") or None,
+            base_url=_normalize_base_url(prov.get("base_url")) or None,
             api_key=prov.get("api_key"),
             model=active.get("model"),   # None/缺失 = 保持当前模型
         )
@@ -714,18 +729,13 @@ def load_runtime_for(web_session: WebSession) -> None:
     web_session.runtime.set_on_tool_finalized(_emit_finalized_tool_result)
     web_session.last_uuid = last_uuid
     # 增量落盘: 历史一致点即写盘, 输出中强杀/崩溃最多丢最后一次一致点
-    # 之后的内容, 不再是整轮。压缩会重写内存历史使追加式存储失准,
-    # 此时原子重写会话文件让磁盘与内存重新对齐。
+    # 之后的内容, 不再是整轮。存储永远只追加——压缩只是给模型的请求期
+    # 视图, 历史不被改写, persisted_count 永不失准。
     web_session.runtime.set_on_iterate(lambda: persist_turn(web_session))
+    # 压缩视图激活: 纯通知——前端当场插一张"已自动压缩"提示卡
+    # （历史照常显示, 摘要只给模型）; 不再重写会话文件。
     web_session.runtime.set_on_compacted(
-        lambda: _rewrite_after_compact(web_session))
-
-
-def _rewrite_after_compact(web_session: WebSession) -> None:
-    messages = web_session.runtime.session().messages
-    count, last_uuid = store.rewrite_session(web_session.session_id, messages)
-    web_session.persisted_count = count
-    web_session.last_uuid = last_uuid
+        lambda: web_session.broadcast({"type": "context_compacted"}))
 
 
 # ============================================================================
@@ -1474,8 +1484,10 @@ async def api_save_providers(request: dict):
             raise HTTPException(status_code=400, detail="供应商缺少 id 或名称")
         if not isinstance(p.get("models"), list):
             raise HTTPException(status_code=400, detail=f"供应商 {p.get('name')} 缺少模型列表")
+        # 照 OpenAI 习惯粘贴的 https://xxx/v1 在此归一（SDK 会自动拼 /v1/messages）
+        p["base_url"] = _normalize_base_url(p.get("base_url"))
         # 接口地址必填: 留空会让 SDK 回退到 Anthropic 官方地址, 智谱 key 必被 403
-        if p.get("enabled") is not False and not str(p.get("base_url") or "").strip():
+        if p.get("enabled") is not False and not p["base_url"]:
             raise HTTPException(
                 status_code=400,
                 detail=f"供应商 {p.get('name')} 缺少接口地址 Base URL",
@@ -1494,7 +1506,7 @@ async def api_save_providers(request: dict):
 @app.post("/api/providers/test")
 async def api_test_provider(request: dict):
     """用给定配置发一次最小请求, 验证供应商连通性。"""
-    base_url = request.get("base_url") or None
+    base_url = _normalize_base_url(request.get("base_url")) or None
     api_key = request.get("api_key") or ""
     model = request.get("model") or ""
     if not api_key or not model:
