@@ -1135,32 +1135,70 @@ async def index():
 
 @app.get("/favicon.ico", include_in_schema=False)
 async def favicon():
-    # 浏览器/工具的默认图标请求路径兜底（页面里已用 <link> 指到 /static/icon.png）
-    return FileResponse(STATIC_DIR / "icon.png")
+    # 浏览器/工具的默认图标请求路径兜底（页面里已用 <link> 指到 /api/icon）
+    if _ICON_LIVE.exists():
+        return FileResponse(_ICON_LIVE)
+    return FileResponse(_ICON_DEFAULT)
 
 
-# --- 应用图标: 设置 → 外观 可上传替换; icon-default.png 是出厂副本 ---
+# --- 外观资产（应用图标/壁纸）: 用户上传件一律落在 APPEARANCE_DIR
+#     (~/.x-code/appearance/)。绝对不能写进 STATIC_DIR——PyInstaller
+#     onefile 模式下那是 _MEIxxxx 临时解包目录, 进程退出即焚, 用户上传
+#     的壁纸/头像重启全丢（实测 4 个历史 _MEI 目录里全是残骸）。
+#     icon-default.png 是打包进来的出厂副本, 只读。 ---
+APPEARANCE_DIR = USER_DIR / "appearance"
+_ICON_LIVE = APPEARANCE_DIR / "icon.png"
+_BG_LIVE = APPEARANCE_DIR / "bg-user.png"
 _ICON_DEFAULT = STATIC_DIR / "icon-default.png"
 _ICON_RE = re.compile(r"^data:image/(png|jpeg|webp);base64,(.+)$", re.S)
 
 
-def _icon_ver() -> int:
-    """图标文件 mtime 当版本号: 前端拿它做缓存穿透 (?v=ver)。"""
+def _migrate_legacy_appearance() -> None:
+    """升级迁移: 旧版把用户上传件写在 STATIC_DIR。源码态运行时那里有
+    真实残留, 一次性搬进用户目录; 冻结态 _MEI 每次全新解包不会有旧文件,
+    本函数自然跳过。图标与出厂副本逐字节相同时无需迁移。失败静默——
+    迁移失败只影响旧文件延续, 不影响新写入。"""
     try:
-        return int((STATIC_DIR / "icon.png").stat().st_mtime)
+        legacy_icon = STATIC_DIR / "icon.png"
+        legacy_bg = STATIC_DIR / "bg-user.png"
+        if legacy_bg.exists() and not _BG_LIVE.exists():
+            APPEARANCE_DIR.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(legacy_bg), str(_BG_LIVE))
+        if (legacy_icon.exists() and _ICON_DEFAULT.exists()
+                and legacy_icon.read_bytes() != _ICON_DEFAULT.read_bytes()
+                and not _ICON_LIVE.exists()):
+            APPEARANCE_DIR.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(legacy_icon), str(_ICON_LIVE))
+    except OSError:
+        pass
+
+
+_migrate_legacy_appearance()
+
+
+def _icon_ver() -> int:
+    """图标文件 mtime 当版本号: 前端拿它做缓存穿透 (?v=ver)。0 = 出厂图标。"""
+    try:
+        return int(_ICON_LIVE.stat().st_mtime)
     except OSError:
         return 0
 
 
+@app.get("/api/icon", include_in_schema=False)
+async def api_get_icon():
+    """应用图标: 有用户上传件给上传件, 否则出厂兜底。"""
+    if _ICON_LIVE.exists():
+        return FileResponse(_ICON_LIVE, headers={"Cache-Control": "no-cache"})
+    return FileResponse(_ICON_DEFAULT, headers={"Cache-Control": "no-cache"})
+
+
 @app.post("/api/icon")
 async def api_post_icon(request: dict):
-    """data 为 dataURL 时覆盖应用图标, null 恢复出厂; 返回新版本号。"""
+    """data 为 dataURL 时覆盖应用图标, null 恢复出厂; 返回新版本号。
+    恢复出厂 = 删除用户副本, 读取端自动回落出厂件。"""
     data = request.get("data")
-    live = STATIC_DIR / "icon.png"
     if data is None:
-        if not _ICON_DEFAULT.exists():
-            raise HTTPException(status_code=400, detail="出厂图标缺失，无法恢复")
-        shutil.copyfile(_ICON_DEFAULT, live)
+        _ICON_LIVE.unlink(missing_ok=True)
     else:
         m = _ICON_RE.match(str(data))
         if not m:
@@ -1168,28 +1206,36 @@ async def api_post_icon(request: dict):
         raw = base64.b64decode(m.group(2))
         if len(raw) > 512 * 1024:
             raise HTTPException(status_code=400, detail="图标过大（解码后限 512KB）")
-        live.write_bytes(raw)
+        APPEARANCE_DIR.mkdir(parents=True, exist_ok=True)
+        _ICON_LIVE.write_bytes(raw)
     return {"ok": True, "ver": _icon_ver()}
 
 
-# --- 背景图片: 设置 → 外观 可上传; 存 static/bg-user.png, 前端经 /static/ 读取 ---
+# --- 背景图片: 设置 → 外观 可上传; 存用户目录, 经 GET /api/bg 读取 ---
 _BG_MAX = 20 * 1024 * 1024
 
 
 def _bg_ver() -> int:
     try:
-        return int((STATIC_DIR / "bg-user.png").stat().st_mtime)
+        return int(_BG_LIVE.stat().st_mtime)
     except OSError:
         return 0
+
+
+@app.get("/api/bg", include_in_schema=False)
+async def api_get_bg():
+    """壁纸: 未设置时 404（前端以 bg_ver=0 为"无壁纸"口径, 不会盲拉）。"""
+    if not _BG_LIVE.exists():
+        raise HTTPException(status_code=404, detail="未设置背景图片")
+    return FileResponse(_BG_LIVE, headers={"Cache-Control": "no-cache"})
 
 
 @app.post("/api/bg")
 async def api_post_bg(request: dict):
     """data 为 dataURL 时写入背景图, null 删除; 返回新版本号。"""
     data = request.get("data")
-    live = STATIC_DIR / "bg-user.png"
     if data is None:
-        live.unlink(missing_ok=True)
+        _BG_LIVE.unlink(missing_ok=True)
     else:
         m = _ICON_RE.match(str(data))
         if not m:
@@ -1197,7 +1243,8 @@ async def api_post_bg(request: dict):
         raw = base64.b64decode(m.group(2))
         if len(raw) > _BG_MAX:
             raise HTTPException(status_code=400, detail="背景图过大（解码后限 20MB）")
-        live.write_bytes(raw)
+        APPEARANCE_DIR.mkdir(parents=True, exist_ok=True)
+        _BG_LIVE.write_bytes(raw)
     return {"ok": True, "ver": _bg_ver()}
 
 

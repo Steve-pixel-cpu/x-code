@@ -15,7 +15,7 @@ if (!DESKTOP) {
     '<div style="height:100vh;display:flex;flex-direction:column;gap:10px;' +
     'align-items:center;justify-content:center;font-family:system-ui,' +
     '"Microsoft YaHei",sans-serif;color:#a0a1ab;font-size:15px">' +
-    '<img src="/static/icon.png" alt="" style="width:56px;height:56px;' +
+    '<img src="/api/icon" alt="" style="width:56px;height:56px;' +
     'border-radius:14px;object-fit:cover">' +
     "<div>请通过 x-code 桌面应用打开</div></div></body>";
   throw new Error("x-code: 网页入口已关闭, 请使用桌面应用");
@@ -3104,9 +3104,9 @@ async function loadSettings() {
   } catch (e) { console.error("加载设置失败", e); }
 }
 
-/* ---------- 应用图标: 设置 → 外观 可上传替换, 服务端落盘 static/icon.png ---------- */
+/* ---------- 应用图标: 设置 → 外观 可上传替换, 服务端落盘 ~/.x-code/appearance/icon.png ---------- */
 let iconVer = 0;   // 图标文件版本（mtime）: 用 ?v= 穿透浏览器缓存
-const iconUrl = () => "/static/icon.png" + (iconVer ? `?v=${iconVer}` : "");
+const iconUrl = () => "/api/icon" + (iconVer ? `?v=${iconVer}` : "");
 function applyIconEverywhere(src) {
   document.querySelectorAll("img.mark, img.avatar").forEach(el => { el.src = src; });
   const fav = document.querySelector('link[rel="icon"]');
@@ -3281,11 +3281,11 @@ $("btn-add-provider").onclick = () => {
 };
 
 /* ---------- 设置 → 外观: 背景图片（亚克力磨砂的"壁纸"） ----------
- * 与应用图标同模式: POST /api/bg 落盘 static/bg-user.png, localStorage 只存
+ * 与应用图标同模式: POST /api/bg 落盘 ~/.x-code/appearance/bg-user.png, localStorage 只存
  * 启用标记（xc-bg=1）。应用方式: <html data-bg="1"> 让遮罩/半透明令牌生效
  * （预绘制脚本抢在首帧前设置, 避免闪烁）; 壁纸本体由 syncBgLayers 预加载
  * 成功后再写到 body 内联背景上, 避免解码期间半成品闪烁。 */
-const bgUrl = () => "/static/bg-user.png" + (bgVer ? `?v=${bgVer}` : "");
+const bgUrl = () => "/api/bg" + (bgVer ? `?v=${bgVer}` : "");
 function bgPref() { return localStorage.getItem(BG_KEY) === "1"; }
 
 function syncBgLayers() {

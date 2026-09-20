@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <meta name="color-scheme" content="dark light">
 <title>x-code</title>
-<link rel="icon" type="image/png" href="/static/icon.png">
+<link rel="icon" type="image/png" href="/api/icon">
 <script>/* 桌面壳经 ?token= 打开页面: 把令牌种成 cookie, 后续 API/静态资源请求自动携带 */ (function(){try{var t=new URLSearchParams(location.search).get("token");if(t)document.cookie="xcode_token="+encodeURIComponent(t)+"; path=/; max-age=31536000; SameSite=Strict";}catch(e){}})();</script>
 <script>/* 主题/材质/壁纸在绘制前应用，避免闪白 (dark | light | system | acrylic | acrylic-light) */ (function(){var de=document.documentElement,p=localStorage.getItem("xc-theme")||"system",acrylic=(p==="acrylic"||p==="acrylic-light");de.dataset.theme=acrylic?(p==="acrylic"?"dark":"light"):(p==="system"&&window.matchMedia("(prefers-color-scheme: dark)").matches?"dark":"light");if(acrylic)de.dataset.fx="acrylic";var a=localStorage.getItem("xc-accent");if(a&&a!=="gray")de.dataset.accent=a;if(localStorage.getItem("xc-bg")==="1")de.dataset.bg="1";})();</script>
 <!-- 渲染库本地化: jsdelivr 在国内时通时断, 同步 CDN 脚本一卡住, 整页解析
@@ -24,7 +24,7 @@
 
 <!-- ============ 自绘标题栏（仅桌面壳显示, 高度/主题跟随应用） ============ -->
 <div id="titlebar">
-  <img class="tb-icon" src="/static/icon.png" alt="" draggable="false">
+  <img class="tb-icon" src="/api/icon" alt="" draggable="false">
   <span class="tb-name">x-code</span>
   <div class="tb-controls">
     <button class="tb-btn" id="tb-min" title="最小化">
@@ -74,7 +74,7 @@
   <div id="music-dock" hidden>
     <div class="md-progress" id="music-seek"><span id="music-progress-fill"></span></div>
     <div class="md-row">
-      <img id="music-cover" src="/static/icon.png" alt="" draggable="false">
+      <img id="music-cover" src="/api/icon" alt="" draggable="false">
       <div class="md-meta">
         <span id="music-title">未在播放</span>
         <span id="music-artist"></span>
@@ -230,7 +230,7 @@
     <!-- ============ 初始化引导页 = 欢迎页: 全屏只显示这张卡片 ============ -->
     <div id="onboarding-page">
       <div class="ob-card">
-        <img class="ob-logo" src="/static/icon.png" alt="">
+        <img class="ob-logo" src="/api/icon" alt="">
         <h2>欢迎使用 x-code</h2>
         <p class="ob-desc">首次使用需要先配置一个模型供应商, 填写后立即可用; 之后可随时在「设置 → 模型」里调整或追加。</p>
         <div class="ob-field">
@@ -306,7 +306,7 @@
           <div class="set-name">应用图标</div>
           <div class="set-desc">替换侧栏与消息头像的标志；PNG/JPEG/WebP，建议 256×256（限 384KB）</div>
         </div>
-        <img id="icon-preview" src="/static/icon.png" alt="">
+        <img id="icon-preview" src="/api/icon" alt="">
         <button type="button" class="icon-act" id="btn-icon-upload">上传图片</button>
         <button type="button" class="icon-act" id="btn-icon-reset">恢复默认</button>
         <input type="file" id="icon-file" accept="image/png,image/jpeg,image/webp" hidden>
