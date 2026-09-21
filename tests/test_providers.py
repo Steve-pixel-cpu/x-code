@@ -113,3 +113,58 @@ def test_normalize_base_url_empty():
 def test_normalize_base_url_trims_whitespace():
     assert _normalize_base_url("  https://codecraftapi.com/v1  ") \
         == "https://codecraftapi.com"
+
+
+# ---------------------------------------------------------------------------
+# 协议感知（OpenAI 兼容支持）
+# ---------------------------------------------------------------------------
+def test_normalize_base_url_openai_protocol():
+    # 裸主机 → 补缺省 /v1（OpenAI SDK 在其后拼 /chat/completions）
+    assert _normalize_base_url("https://api.deepseek.com",
+                               protocol="openai") == "https://api.deepseek.com/v1"
+    assert _normalize_base_url("https://api.deepseek.com/",
+                               protocol="openai") == "https://api.deepseek.com/v1"
+    # 已带 /v1 → 原样保留（与 anthropic 规则相反）
+    assert _normalize_base_url("https://api.openai.com/v1/",
+                               protocol="openai") == "https://api.openai.com/v1"
+    # 自定义网关前缀路径原样保留
+    assert _normalize_base_url("https://gw.corp/api/openai",
+                               protocol="openai") == "https://gw.corp/api/openai"
+    assert _normalize_base_url("", protocol="openai") == ""
+
+
+def test_normalize_base_url_anthropic_rules_unchanged():
+    # 缺省协议 = anthropic: 剥字面 /v1 段（既有行为不变）
+    assert _normalize_base_url("https://x.com/v1") == "https://x.com"
+    assert _normalize_base_url("https://x.com/api/paas/v4") == "https://x.com/api/paas/v4"
+
+
+def test_apply_switches_protocol_rebuilds_client(providers_file):
+    """跨协议切换: 工厂重建客户端实例; 切回 anthropic 亦然。"""
+    import server
+    from api_client import OpenAIApiClient, ClaudeApiClient
+    original = server.api_client
+    try:
+        cfg = _cfg()
+        cfg["providers"][0]["protocol"] = "openai"
+        cfg["providers"][0]["base_url"] = "https://api.deepseek.com"
+        server._apply_provider_config(cfg)
+        assert isinstance(server.api_client, OpenAIApiClient)
+        assert server.api_client.protocol == "openai"
+        assert server.api_client.base_url == "https://api.deepseek.com/v1"
+        assert server.api_client.api_key == "k"
+        assert server.api_client.model == "m1"
+
+        # 切回 anthropic → 重建回原实现, 连接信息照 anthropic 规则归一
+        server._apply_provider_config(_cfg())
+        assert isinstance(server.api_client, ClaudeApiClient)
+        assert server.api_client.protocol == "anthropic"
+        assert server.api_client.base_url == "https://example.com/api"
+
+        # 同协议二次应用: 原地 configure, 不换实例（保留运行态）
+        same = server.api_client
+        server._apply_provider_config(_cfg(active_model="m2"))
+        assert server.api_client is same
+        assert server.api_client.model == "m2"
+    finally:
+        server.api_client = original

@@ -94,9 +94,10 @@ class _FakeStream:
 def _install(monkeypatch, script, tool_results):
     """替换 api_client 的底层流与工具注册表, 保留镜像/发射装饰层。"""
     fake_messages = _FakeMessages(script)
-    # server.api_client.client 是 _LiveClientProxy; 其 .messages 是
-    # _LiveMessagesProxy, 真流在 ._real。换掉 _real 即保留全部镜像转发。
-    monkeypatch.setattr(server.api_client.client.messages, "_real", fake_messages)
+    # 镜像观察者挂在 api_client 的 on_event_provider 上（每次开流解析当前
+    # 会话的 sink）, 与底层流来源解耦; 只需把 SDK 入口换成假流。
+    monkeypatch.setattr(server.api_client.raw_client.messages, "stream",
+                        fake_messages.stream)
 
     inner = ToolRegistry()
     inner.register("echo_test",
@@ -242,8 +243,9 @@ def test_two_concurrent_sessions_no_cross_talk(client, isolated_store, monkeypat
     inner = ToolRegistry()
     inner.register("echo_test", lambda params, workdir: "ok")
     monkeypatch.setattr(server, "registry", EmittingToolRegistry(inner))
-    monkeypatch.setattr(server.api_client.client.messages, "_real",
-                        PerSessionMessages())
+    # SDK 入口换成按会话自识别的假流（镜像观察者经 on_event_provider 照常挂接）
+    monkeypatch.setattr(server.api_client.raw_client.messages, "stream",
+                        PerSessionMessages().stream)
 
     collected = {}
     with client.websocket_connect("/ws/cc-a") as ws_a, \

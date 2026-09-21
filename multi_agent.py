@@ -11,7 +11,7 @@ from typing import Optional, Callable
 from dotenv import load_dotenv
 from pydantic import BaseModel
 
-from api_client import ClaudeApiClient
+from api_client import ClaudeApiClient, make_api_client
 from fsatomic import atomic_write_text, read_text_with_retry
 from models import Session, TextContentBlock
 from permissions import ALLOW_MODE, PermissionPolicy
@@ -136,7 +136,7 @@ def build_subagent_runtime(job: AgentJob) -> ConversationRuntime:
     - 递归防护: 工具规格经 _tool_specs_for 过滤，agent 工具永远不在
       worker 的请求里（TOOL_WHITELIST 亦不含, 双保险）
     """
-    api_key, base_url, model = _api_config_provider()
+    api_key, base_url, model, protocol = _api_config_provider()
 
     registry = ToolRegistry()
     for tool_name in sorted(job.allowed_tools):
@@ -146,7 +146,8 @@ def build_subagent_runtime(job: AgentJob) -> ConversationRuntime:
 
     return ConversationRuntime(
         session=Session(),
-        api_client=ClaudeApiClient(
+        api_client=make_api_client(
+            protocol,
             api_key=api_key,
             model=model,
             base_url=base_url,
