@@ -530,12 +530,12 @@ document.addEventListener("click", ev => {
  * 轻提示
  * ============================================================ */
 let toastTimer = null;
-function toast(text) {
+function toast(text, ms = 1600) {
   const t = $("toast");
   t.textContent = text;
   t.classList.add("show");
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => t.classList.remove("show"), 1600);
+  toastTimer = setTimeout(() => t.classList.remove("show"), ms);
 }
 window.xcodeToast = toast;   // 摸鱼电台(music.js)共用同一枚轻提示
 
@@ -1017,10 +1017,8 @@ function renderSessionList() {
     ev.stopPropagation();
     // 桌面端: 系统原生"选择文件夹"对话框; 浏览器/预览: 页面内目录选择兜底
     if (window.xcodePickFolder) {
-      try {
-        const dir = await window.xcodePickFolder();
-        if (dir) addProject(dir);
-      } catch (e) { /* 用户取消 */ }
+      const dir = await pickNativeFolder();
+      if (dir) addProject(dir);
       return;
     }
     openDirPop();
@@ -1055,12 +1053,17 @@ function renderSessionList() {
     header.innerHTML = FOLDER_SVG + '<span class="p-name"></span>'
       + '<span class="p-count"></span>'
       + '<button class="p-add" data-tip="在此项目新建任务">' + PLUS_SMALL_SVG + '</button>'
+      + '<button class="p-del" data-tip="移除项目">' + TRASH_SMALL_SVG + '</button>'
       + chev;
     header.querySelector(".p-name").textContent = projectDisplayName(wd);
     header.querySelector(".p-count").textContent = items.length ? String(items.length) : "";
     header.querySelector(".p-add").onclick = ev => {
       ev.stopPropagation();   // 别触发折叠/展开
       startDraft(wd);
+    };
+    header.querySelector(".p-del").onclick = ev => {
+      ev.stopPropagation();   // 别触发折叠/展开
+      removeProject(wd, items.length);
     };
     header.onclick = () => toggleProject(wd);
     list.appendChild(header);
@@ -1109,6 +1112,68 @@ function addProject(wd) {
   }
   renderSessionList();
   toast("已添加项目：" + dirName(wd));
+}
+
+/* 移除项目: 空项目仅从侧栏消失; 有会话的项目先解绑其下会话
+ * （会话保留为独立"任务", 磁盘文件不动）, 再清手动添加记录。 */
+async function removeProject(wd, count) {
+  const name = projectDisplayName(wd);
+  if (count > 0) {
+    const ok = await confirmDialog(
+      `移除项目「${name}」？其下 ${count} 个会话将保留为独立任务（不删除）, 磁盘文件不受影响。`,
+      { title: "移除项目", okText: "移除", danger: true });
+    if (!ok) return;
+  } else {
+    const ok = await confirmDialog(`移除项目「${name}」？仅从侧栏移除, 不影响磁盘文件。`,
+      { title: "移除项目", okText: "移除" });
+    if (!ok) return;
+  }
+  // 有会话的项目: 逐个解绑; 失败的（如恰在对话中）跳过并提示, 项目保留
+  const sessions = state.sessions.filter(s => s.workdir === wd);
+  let failed = 0;
+  for (const s of sessions) {
+    try {
+      const r = await fetch(`/api/sessions/${s.id}/workdir`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ workdir: null }),
+      });
+      if (!r.ok) {
+        const err = await r.json().catch(() => ({}));
+        throw new Error(err.detail || r.status);
+      }
+      s.workdir = null;
+      const run = state.runs[s.id];
+      if (run) run.currentWorkdir = null;      // 顶栏标签/恢复对话不再绑回旧目录
+      if (s.id === state.sessionId) refreshWorkdirTag();
+    } catch (e) {
+      failed++;
+      console.error("[xcode] 解绑会话失败:", s.id, e);
+    }
+  }
+  if (failed) {
+    toast(`${failed} 个会话解绑失败（可能对话进行中）, 项目保留`);
+    return;
+  }
+  state.customProjects = state.customProjects.filter(w => w !== wd);
+  localStorage.setItem("xc-projects", JSON.stringify(state.customProjects));
+  state.collapsedProjects.delete(wd);
+  localStorage.setItem("xc-collapsed", JSON.stringify([...state.collapsedProjects]));
+  renderSessionList();
+  toast("已移除项目：" + name);
+}
+
+/* 桌面端选文件夹统一入口（侧栏「添加项目」与工作区「打开文件夹…」共用）。
+ * 失败不再静默: reject（ACL/IPC/桥缺失/对话框崩溃）→ console.error + toast 上屏;
+ * 用户取消（桥返回 null）静默返回 null——只有真实失败才打扰用户。 */
+async function pickNativeFolder() {
+  try {
+    return await window.xcodePickFolder();
+  } catch (e) {
+    console.error("[xcode] 打开文件夹失败:", e);
+    toast("打开文件夹失败：" + (e && e.message ? e.message : e), 4000);
+    return null;
+  }
 }
 
 /* 项目分组的组标题: 与顶栏 ws-tag 一致取目录名(末段), 空路径兜底 */
@@ -1405,10 +1470,8 @@ function openWsPop(anchor) {
   pop.querySelector("[data-act='browse']").onclick = async () => {
     closeWsPop();
     if (window.xcodePickFolder) {   // 桌面端: 原生文件夹对话框
-      try {
-        const dir = await window.xcodePickFolder();
-        if (dir) { addProject(dir); state.draftDir = dir; renderWsChip(); }
-      } catch (e) { /* 用户取消 */ }
+      const dir = await pickNativeFolder();
+      if (dir) { addProject(dir); state.draftDir = dir; renderWsChip(); }
       return;
     }
     openDirPop(anchor);             // 浏览器/预览: 页面内目录浏览兜底
@@ -1789,9 +1852,12 @@ function onThinkingEnd(msg, sid) {
   // "等待+思考合并计时"的语义（等待就是用户真实等待的一部分）。
   const ms = (cur.optimistic || typeof msg.duration_ms !== "number")
     ? Date.now() - cur.t0 : msg.duration_ms;
+  const rlMs = run.rlDelayMs || 0;
+  run.rlDelayMs = 0;
+  const suffix = rlMs > 0 ? '（含限流重试 ' + fmtDuration(rlMs) + '）' : '';
   cur.el.classList.remove("thinking");
   cur.el.innerHTML = '<span class="t-ico">' + ICON_MIND + '</span>' +
-    '<span>思考 · 持续了 ' + fmtDuration(ms) + '</span>';
+    '<span>思考 · 持续了 ' + fmtDuration(ms) + suffix + '</span>';
   run.curThinking = null;
   run.lastThinkRow = cur.el;
   if (active) scrollToBottom();
@@ -2419,6 +2485,9 @@ function addCompactNotice(col, live) {
 /* ---------- 限流退避提示: 同一轮的多条原地更新一行, 有进展/收口即撤 ---------- */
 function onRateLimitedRetry(msg, sid) {
   const run = runOf(sid);
+  // 累计本条思考行里的退避等待: 收口时在"思考 · 持续了 X"后标注,
+  // 不让纯 API 等待被读成模型在思考
+  run.rlDelayMs = (run.rlDelayMs || 0) + Math.max(0, Number(msg.delay_s) || 0) * 1000;
   let el = run.rlNote;
   if (!el || !el.isConnected) {
     el = document.createElement("div");

@@ -340,23 +340,55 @@ fn error_box(title: &str, text: &str) {
     }
 }
 
+/// pick_folder 链路日志 tag（落 ~/.x-code/boot.log, 打包版无控制台时的可见性兜底）
+const PICK_LOG: &str = "pick_folder";
+
 /// 原生"选择文件夹"对话框（前端经 window.xcodePickFolder() 调用）
 ///
 /// 必须是 async + spawn_blocking: 同步命令在主线程执行, 阻塞式 rfd 对话框
 /// 会在主线程上等窗口消息——而消息循环正是被它自己卡住的 → 对话框永远
 /// 弹不出来, 前端 await 悬死。挪进阻塞线程池后主线程照常泵消息。
+///
+/// set_parent(主窗口): 打包版 windows_subsystem=windows 没有控制台, 无父窗口的
+/// 对话框可能落在桌面层/被主窗口挡住——用户看来就是"点击无反应"。
+/// 返回 Result<Option<String>, String>: Ok(None)=用户取消, Err=真实失败。
+/// 此前所有失败路径（JoinError/窗口缺失/ACL/IPC）都被折叠成 null, 无从排查。
 #[tauri::command]
-async fn pick_folder() -> Option<String> {
+async fn pick_folder(app: AppHandle) -> Result<Option<String>, String> {
+    boot_log(PICK_LOG, "called");
+    eprintln!("[pick_folder] called");
+    let Some(win) = app.get_webview_window("main") else {
+        boot_log(PICK_LOG, "ERROR: main 窗口不存在");
+        eprintln!("[pick_folder] ERROR: main window not found");
+        return Err("主窗口不存在，无法打开选择对话框".into());
+    };
     // spawn_blocking: rfd 的阻塞式对话框不能跑在主线程——会卡死 UI 消息泵
-    tauri::async_runtime::spawn_blocking(move || {
+    let picked = tauri::async_runtime::spawn_blocking(move || {
         rfd::FileDialog::new()
             .set_title("选择文件夹")
+            .set_parent(&win)
             .pick_folder()
             .map(|p| p.to_string_lossy().to_string())
     })
     .await
-    .ok()
-    .flatten()
+    .map_err(|e| {
+        // JoinError（任务 panic/运行时关闭）: 此前被 .ok() 静默折叠成 null
+        boot_log(PICK_LOG, &format!("ERROR: 对话框线程失败: {e}"));
+        eprintln!("[pick_folder] ERROR: dialog task failed: {e}");
+        format!("对话框线程失败: {e}")
+    })?;
+    match picked {
+        Some(p) => {
+            boot_log(PICK_LOG, &format!("picked: {p}"));
+            eprintln!("[pick_folder] picked: {p}");
+            Ok(Some(p))
+        }
+        None => {
+            boot_log(PICK_LOG, "cancelled");
+            eprintln!("[pick_folder] cancelled");
+            Ok(None)
+        }
+    }
 }
 
 // ---------- 自绘标题栏的窗口控制（decorations: false 后自己实现） ----------
@@ -398,25 +430,52 @@ fn start_drag_main(app: AppHandle) {
 /// on_page_load 还会 eval 重申一次——注入偶发失效时兜底。
 const BRIDGE_JS: &str = r#"
 (() => {
-  if (window.__xcodeBridgeInstalled) return;
-  window.__xcodeBridgeInstalled = true;
-  Object.defineProperty(window, 'xcodeDesktop', { value: true });
-  document.documentElement.classList.add('xcode-desktop');   // 显示自绘标题栏
-  // 桌面应用形态, 三层配合:
-  // 1) Rust: SetAreDefaultContextMenusEnabled(false) + SetAreBrowserAcceleratorKeysEnabled(false)
-  // 2) 这里: contextmenu 捕获阶段 preventDefault（右键菜单由 app.js 自建）
-  // 3) 这里: F5/Ctrl+R 兜底拦截——设置应用前的窗口期也不许刷新
-  document.addEventListener('contextmenu', e => e.preventDefault(), true);
-  document.addEventListener('keydown', e => {
-    const isReload = e.key === 'F5' || (e.ctrlKey && e.key.toLowerCase() === 'r');
-    if (isReload) { e.preventDefault(); e.stopPropagation(); }
-  }, true);
-  ['dragover', 'drop'].forEach(t =>
-    document.addEventListener(t, e => e.preventDefault()));
-  window.xcodePickFolder = async () => {
-    try { return await window.__TAURI_INTERNALS__.invoke('pick_folder'); }
-    catch (e) { return null; }
+  // 结构即健壮性: 哨兵必须在全部安装完成后才置位。此前哨兵在最前, 脚本中途
+  // 抛错(注入脚本跑在文档解析前, documentElement 可能为 null → classList
+  // 抛 TypeError)会留下"哨兵已装、桥没装"的半安装态, on_page_load 的重申
+  // 也被哨兵拦截 → xcodePickFolder 永远缺失, 页面静默走进浏览器兜底
+  // (#dir-pop), 用户看到的就是"弹不出原生文件夹对话框"。
+  // 1) 桥最优先: 后面任何一步失败都不影响 xcodePickFolder 存在
+  if (!window.xcodePickFolder) {
+    window.xcodePickFolder = async () => {
+      // 失败必须可见: Promise reject = 真实失败（ACL/IPC/对话框崩溃）,
+      // 页面 catch 据此 toast 报错; 用户取消由 Rust 返回 null 表达, 不走 reject。
+      if (!window.__TAURI_INTERNALS__) {
+        console.error('[xcode] __TAURI_INTERNALS__ 缺失: pick_folder 无法调用');
+        throw new Error('桌面桥未就绪（__TAURI_INTERNALS__ 缺失）');
+      }
+      try {
+        return await window.__TAURI_INTERNALS__.invoke('pick_folder');
+      } catch (e) {
+        console.error('[xcode] pick_folder IPC 失败:', e);
+        throw e;
+      }
+    };
+  }
+  if (!window.xcodeDesktop) {
+    Object.defineProperty(window, 'xcodeDesktop', { value: true });
+  }
+  // 2) DOM 相关: 注入时机 documentElement 可能尚未创建 → 空值安全 + 就绪后补挂
+  const installDom = () => {
+    if (document.documentElement.dataset.xcodeDomInstalled) return;  // 重申幂等
+    document.documentElement.dataset.xcodeDomInstalled = '1';
+    // 桌面应用形态, 三层配合:
+    // 1) Rust: SetAreDefaultContextMenusEnabled(false) + SetAreBrowserAcceleratorKeysEnabled(false)
+    // 2) 这里: contextmenu 捕获阶段 preventDefault（右键菜单由 app.js 自建）
+    // 3) 这里: F5/Ctrl+R 兜底拦截——设置应用前的窗口期也不许刷新
+    document.documentElement.classList.add('xcode-desktop');   // 显示自绘标题栏
+    document.addEventListener('contextmenu', e => e.preventDefault(), true);
+    document.addEventListener('keydown', e => {
+      const isReload = e.key === 'F5' || (e.ctrlKey && e.key.toLowerCase() === 'r');
+      if (isReload) { e.preventDefault(); e.stopPropagation(); }
+    }, true);
+    ['dragover', 'drop'].forEach(t =>
+      document.addEventListener(t, e => e.preventDefault()));
   };
+  if (document.documentElement) installDom();
+  else document.addEventListener('DOMContentLoaded', installDom, { once: true });
+  // 3) 哨兵最后: 只有全部装完才标记——半安装态不再拦截重申, 重申反而能自愈
+  window.__xcodeBridgeInstalled = true;
 })();
 "#;
 

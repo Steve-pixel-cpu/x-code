@@ -812,8 +812,46 @@ def _iter_files(base: Path):
                 yield e
 
 
+def _expand_braces(pat: str) -> list[str]:
+    """展开花括号 {a,b,c} 为多个 pattern。Path.glob 不认识花括号, 只会按
+    字面匹配——'**/*.{js,ts}' 必然零命中, 而花括号是模型最顺手的批量写法。
+    支持嵌套一层; 无花括号/括号不配对时原样返回。"""
+    if "{" not in pat:
+        return [pat]
+    depth = start = 0
+    for i, ch in enumerate(pat):
+        if ch == "{":
+            if depth == 0:
+                start = i
+            depth += 1
+        elif ch == "}":
+            if depth == 0:
+                return [pat]            # 不配对的 '}': 按字面处理
+            depth -= 1
+            if depth == 0:
+                inner = pat[start + 1:i]
+                alts, d, buf = [], 0, []   # 只切顶层逗号, 嵌套组内的逗号不切
+                for c in inner:
+                    if c == "{":
+                        d += 1
+                    elif c == "}":
+                        d -= 1
+                    if c == "," and d == 0:
+                        alts.append("".join(buf))
+                        buf = []
+                    else:
+                        buf.append(c)
+                alts.append("".join(buf))
+                out: list[str] = []
+                for a in alts:
+                    out.extend(_expand_braces(pat[:start] + a + pat[i + 1:]))
+                return out
+    return [pat]                        # 有 '{' 但没有配对的 '}': 字面处理
+
+
 def glob_tool(params: dict, workdir: Optional[str] = None) -> str:
-    """按 glob 模式列出文件路径。pattern 相对 workdir, 支持递归 `**`。"""
+    """按 glob 模式列出文件路径。pattern 相对 workdir, 支持递归 `**` 与
+    `{a,b}` 花括号。"""
     pattern = str(params.get("pattern", "")).strip()
     if not pattern:
         return "ERROR: pattern is required"
@@ -822,11 +860,13 @@ def glob_tool(params: dict, workdir: Optional[str] = None) -> str:
         return f"ERROR: directory not found: {base}"
 
     pats = pattern if isinstance(pattern, list) else [pattern]
+    # 花括号先展开成具体 pattern 再逐个跑（Path.glob 按字面匹配花括号）
+    expanded: list[str] = []
+    for pat in pats:
+        expanded.extend(_expand_braces(pat.replace("\\\\", "/")))
     seen: dict[str, None] = {}
     truncated = False
-    for pat in pats:
-        # ** 跨目录递归; Path.glob 在 Windows 上大小写不敏感, 与系统一致
-        pat = pat.replace("\\\\", "/")
+    for pat in expanded:
         try:
             matches = list(base.glob(pat))
         except (ValueError, OSError) as e:
@@ -851,8 +891,8 @@ def glob_tool(params: dict, workdir: Optional[str] = None) -> str:
             f"No files found for pattern(s): {pattern}.\n"
             "[System note] Zero hits means nothing under this root matches. "
             "Do NOT retry near-identical patterns. Widen the glob "
-            "('--/**/*.ext'), point path at a parent directory, or list the "
-            "directory to see what is actually there."
+            "('**/*.ext' or '**/*'), point path at a parent directory, or "
+            "list the directory to see what is actually there."
         )
     lines = list(seen.keys())
     if truncated:

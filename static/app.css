@@ -357,6 +357,15 @@
   .project-item:hover .p-add { display: inline-flex; }
   .project-item:hover .p-count { display: none; }   /* 悬停时数量让位给新建钮 */
   .project-item .p-add:hover { color: var(--accent); background: var(--accent-soft); }
+  .project-item .p-del {
+    display: none; flex: none;
+    width: 25px; height: 25px; padding: 0;
+    border: none; background: none; border-radius: 7px;
+    color: var(--text-2); align-items: center; justify-content: center;
+    transition: all .12s;
+  }
+  .project-item:hover .p-del { display: inline-flex; }
+  .project-item .p-del:hover { color: var(--err); background: var(--err-soft); }
   .project-item .p-chev {
     flex: none; display: inline-flex; color: var(--text-3);
     transition: transform .15s;

@@ -28,9 +28,10 @@ class TitleRecord(BaseModel):
 
 
 class WorkdirRecord(BaseModel):
-    """工作目录记录: 会话所属"项目"。与 title 同一套追加式设计, 取最新一条。"""
+    """工作目录记录: 会话所属"项目"。与 title 同一套追加式设计, 取最新一条。
+    workdir=None 表示"清除归属"(解除会话与项目的绑定), 旧目录记录保留在文件里。"""
     type: Literal["workdir"] = "workdir"
-    workdir: str
+    workdir: Optional[str] = None
     timestamp: str
 
 

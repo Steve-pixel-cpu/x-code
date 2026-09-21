@@ -2,6 +2,7 @@ from typing import Protocol, Optional, List
 from concurrent.futures import ThreadPoolExecutor
 import contextvars
 import json
+import os
 import re
 import shlex
 import threading
@@ -22,7 +23,9 @@ from compact import (
 )
 from hooks import HookRunner, HookResult
 from models import Message, TextContentBlock, AnyContentBlock, ToolContentBlock, ToolResultContentBlock, Session
-from permissions import PermissionMode, PermissionPolicy, PermissionPrompter, PermissionDecision
+from permissions import (PermissionMode, PermissionPolicy, PermissionPrompter,
+                         PermissionDecision, MUTATING_SHELL_TOOLS,
+                         shell_command_is_read_only)
 from prompt import PLAN_MODE_SECTION, SYSTEM_PROMPT_DYNAMIC_BOUNDARY
 
 DEFAULT_MAX_ITERATIONS = 128
@@ -68,158 +71,45 @@ PURE_READ_TOOLS = frozenset({"read_file", "grep", "glob"})
 REPEAT_WARN_ON = 2       # 第 2 次: 照常执行, 结果附加警告
 REPEAT_DENY_FROM = 3     # 第 3 次起: 拒绝执行
 
-# --- shell 只读判定: 护栏变异序号的推进闸门 ---
-# 实测教训: 排查类会话里模型大量用 bash 跑 ls/find/grep/git log 这类只读
-# 探查, 旧规则"任何非纯读工具都推进变异序号"导致护栏计数被频繁清零——
-# 同一文件重读 4 次护栏一声不吭, 形同虚设。现在 bash/powershell 先做
-# 只读判定: 确定性只读的命令不清零计数, 只有可能改状态的才清。
-# 判定必须保守: 白名单 + 危险构造一票否决, 拿不准一律视为可能变异
-# （误判"只读"的代价只是护栏少拦一次, 误判"变异"的代价是护栏失效）。
-MUTATING_SHELL_TOOLS = frozenset({"bash", "powershell"})
-
-# bash 白名单: 文件系统/系统信息 + 文本检索处理（管道常客）。
-# 刻意排除: 解释器(python/node/awk/sed 可执行任意逻辑)、网络(curl/wget)、
-# 归档与构建(tar/make 有写入面)。
-READONLY_SHELL_COMMANDS = frozenset({
-    "ls", "pwd", "cat", "head", "tail", "wc", "file", "stat", "du", "df",
-    "find", "tree", "which", "where", "whereis", "type", "realpath",
-    "readlink", "basename", "dirname", "env", "printenv", "id", "whoami",
-    "hostname", "uname", "date", "sleep",
-    "grep", "egrep", "fgrep", "rg", "strings", "cut", "uniq", "tr", "jq",
-    "diff", "cmp", "comm", "nl", "tac", "rev", "fold", "fmt", "xxd", "od",
-    "md5sum", "sha1sum", "sha256sum", "cksum",
-})
-
-# git 只读子命令。branch/tag/remote 虽可创建引用, 但不改工作树文件内容,
-# 对"重读同文件结果必然相同"无影响, 一并放行; checkout/switch/reset/
-# clean/stash(pop) 会动文件, 不在名单。
-GIT_READONLY_SUBCOMMANDS = frozenset({
-    "log", "show", "diff", "status", "blame", "rev-parse", "ls-files",
-    "describe", "shortlog", "reflog", "branch", "tag", "remote", "grep",
-    "ls-tree", "cat-file", "worktree", "stash",
-})
-
-# powershell 白名单: Get-* 惯例只读 + 少数纯计算 cmdlet。别名(ls/cat 等)
-# 落到 bash 名单里天然覆盖。
-PS_READONLY_CMDLETS = frozenset({
-    "test-path", "get-item", "get-childitem", "get-content", "get-date",
-    "get-location", "get-command", "get-help", "get-member", "get-process",
-    "get-service", "get-filehash", "get-psdrive", "get-alias", "get-random",
-    "measure-object", "measure-command", "select-object", "sort-object",
-    "out-string", "write-output", "write-host", "select-string",
-    "compare-object", "split-path", "resolve-path",
-})
-
-_FIND_MUTATING_ACTIONS = frozenset({
-    "-delete", "-exec", "-execdir", "-ok", "-okdir",
-    "-fprint", "-fprintf", "-fls",
-})
-
-
-def _split_shell_segments(cmd: str) -> list:
-    """按 && || ; | 换行切成命令段——引号内的分隔符不算（"a|b" 是模式）。"""
-    segs, buf, quote, i = [], [], None, 0
-    while i < len(cmd):
-        ch = cmd[i]
-        if quote:
-            buf.append(ch)
-            if ch == quote:
-                quote = None
-        elif ch in "'\"":
-            quote = ch
-            buf.append(ch)
-        elif cmd[i:i + 2] in ("&&", "||"):
-            segs.append("".join(buf))
-            buf = []
-            i += 1
-        elif ch in ";|\n":
-            segs.append("".join(buf))
-            buf = []
-        else:
-            buf.append(ch)
-        i += 1
-    segs.append("".join(buf))
-    return [s.strip() for s in segs if s.strip()]
-
-
-def _first_word(tokens: list) -> str:
-    """剥掉前缀环境变量赋值（VAR=val cmd ...）后的首个命令词（取 basename）。"""
-    while tokens and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", tokens[0]):
-        tokens = tokens[1:]
-    if not tokens:
-        return ""
-    return Path(tokens[0]).name.lower()
-
-
-def _segment_is_read_only(seg: str, powershell: bool) -> bool:
-    # 命令替换/进程替换可内嵌任意命令: 一票否决
-    if "$(" in seg or "`" in seg or "<(" in seg:
-        return False
-    # 重定向清理: fd 拷贝(2>&1)与 /dev/null 弃置无害; 之余还有 > 就是写文件
-    cleaned = re.sub(r"\d?[<>]&\d", "", seg)
-    cleaned = re.sub(r"\d*>>?\s*/dev/null", "", cleaned)
-    if ">" in cleaned:
-        return False
-    try:
-        tokens = shlex.split(cleaned, posix=True)
-    except ValueError:
-        return False
-    word = _first_word(tokens)
-    if not word or word == "sudo":
-        return False
-    if word == "cd":            # cd 不改文件内容; 相对读取按 workdir 解析
-        return True
-    if powershell:
-        return word in PS_READONLY_CMDLETS
-    if word == "git":
-        return _git_read_only(tokens[1:])
-    if word == "find":
-        return not any(t.lower() in _FIND_MUTATING_ACTIONS for t in tokens[1:])
-    if word == "sort":          # sort -o 写文件; 其余用法只读
-        return not any(t.lower().startswith("-o") for t in tokens[1:])
-    return word in READONLY_SHELL_COMMANDS
-
-
-def _git_read_only(rest: list) -> bool:
-    if not rest:
-        return False
-    sub = rest[0].lower()
-    if sub == "stash":          # 只有 list/show/stat 只读, push/pop/drop 动树
-        return len(rest) > 1 and rest[1].lower() in ("list", "show", "stat")
-    return sub in GIT_READONLY_SUBCOMMANDS
-
-
-def shell_command_is_read_only(tool_name: str, tool_input: str) -> bool:
-    """bash/powershell 调用是否确定性只读。解析失败/空命令/任何拿不准的
-    构造都返回 False（视为可能变异, 推进护栏序号——保守方向兜底）。"""
-    try:
-        params = json.loads(tool_input)
-        cmd = str(params.get("command") or "")
-    except Exception:
-        return False
-    if not cmd.strip():
-        return False
-    powershell = tool_name == "powershell"
-    return all(_segment_is_read_only(s, powershell)
-               for s in _split_shell_segments(cmd))
+# shell 只读判定已下沉到 permissions.py: 权限放行（plan/workspace-write
+# 下只读探查不再硬拒）与护栏变异序号共用同一套保守判定。
 
 REPEAT_WARN_TEXT = (
-    "[System note] This is the 2nd time you ran this EXACT same read-only "
-    "call, and nothing has been written since — the result is guaranteed "
-    "identical to what you already have. Do NOT run it a 3rd time (it will "
-    "be refused). If the part you need was truncated, change the parameters "
-    "(read_file offset/limit to page through a large file, or a narrower "
-    "grep pattern/path); otherwise act on what you already have."
+    "[System note] This is the 2nd time you ran this same read-only call "
+    "against the same target, and nothing has been written since — the "
+    "result is guaranteed identical to what you already have. Do NOT run "
+    "it a 3rd time (it will be refused). If the part you need was "
+    "truncated, change the parameters (read_file offset/limit to page "
+    "through a large file, or a narrower grep pattern/path); otherwise "
+    "act on what you already have."
 )
 REPEAT_DENIED_TEXT = (
-    "REFUSED — this exact read-only call already ran twice in this session "
-    "with no writes in between, so repeating it cannot produce new "
-    "information. Change the parameters instead: read_file with offset/"
-    "limit to page through a large file, a narrower grep pattern or a "
-    "specific path — or act on the results already in this conversation. "
-    "If you suspect the content actually changed, verify that via a "
-    "different tool (e.g. bash) rather than repeating this call."
+    "REFUSED — this same read-only call against the same target already "
+    "ran twice in this session with no writes in between, so repeating it "
+    "cannot produce new information. Change the parameters instead: "
+    "read_file with offset/limit to page through a large file, a narrower "
+    "grep pattern or a specific path — or act on the results already in "
+    "this conversation. If you suspect the content actually changed, "
+    "verify that via a different tool (e.g. bash) rather than repeating "
+    "this call."
 )
+
+def _read_guard_key(tool_name: str, tool_input: str):
+    """护栏记账键。read_file 做路径规范化: normpath 折叠 ./ 与分隔符,
+    normcase 按平台处理大小写（Windows 文件系统不敏感→统一小写; POSIX
+    敏感→原样）, 让"换个写法重读同一文件"同样计入; offset/limit 保留在
+    键里——分页是设计内行为（大文件按翻页协议取窗口）, 不同范围不算
+    重复。其余工具保持精确输入。解析失败回落原始输入。"""
+    if tool_name != "read_file":
+        return (tool_name, tool_input)
+    try:
+        params = json.loads(tool_input)
+        norm = os.path.normcase(os.path.normpath(str(params.get("path") or "")))
+        if os.name == "nt":
+            norm = norm.replace("\\", "/")
+        return (tool_name, norm, params.get("offset"), params.get("limit"))
+    except Exception:
+        return (tool_name, tool_input)
 
 # --- 结论检查点: 本回合调用时钟的节奏性对靶提醒 ---
 # 治"忘记自己的目标是啥"（实测 v2 教训）: 模型查库实锤后转入支线
@@ -518,7 +408,9 @@ class ConversationRuntime:
         # 首次（文件真的变了, 重读合法）。压缩激活时清零——旧结果可能
         # 已被归档, 重读重新合法。并行执行进池线程, 访问须持锁。
         self._mutation_seq = 0
-        self._read_calls: dict[tuple[str, str], tuple[int, int]] = {}
+        # 键为 _read_guard_key 的产出（read_file 是规范化路径+范围, 其余是
+        # 精确输入）, 值为 (执行次数, 记账时的变异序号)
+        self._read_calls: dict[tuple, tuple[int, int]] = {}
         # 本回合调用时钟: 所有工具调用都 +1（与变异判定解耦——sqlcmd/
         # python 这类"可能改状态"的命令恰是排查螺旋的主力, 若挂在只读
         # 连击上会被反复清零, 检查点在唯一需要它的地方失明, 见
@@ -660,7 +552,7 @@ class ConversationRuntime:
             tool_name in MUTATING_SHELL_TOOLS
             and shell_command_is_read_only(tool_name, tool_input))
         if tool_name in PURE_READ_TOOLS:
-            key = (tool_name, tool_input)
+            key = _read_guard_key(tool_name, tool_input)
             with self._guard_lock:
                 count, at_seq = self._read_calls.get(key, (0, self._mutation_seq))
                 if at_seq != self._mutation_seq:
@@ -873,6 +765,7 @@ class ConversationRuntime:
         keep = set(result_slots[-MICROCOMPACT_KEEP_RECENT:])
         out = list(view)
         changed = False
+        cleared: list[tuple[str, str]] = []   # 被清结果的 (tool_name, tool_use_id)
         for i in result_slots:
             if i in keep:
                 continue
@@ -882,7 +775,48 @@ class ConversationRuntime:
             new_block = block.model_copy(update={"output": MICROCOMPACT_PLACEHOLDER})
             out[i] = m.model_copy(update={"content": [new_block]})
             changed = True
+            cleared.append((block.name or "", block.id))
+        if changed:
+            # 内容已清出模型视图, "重读零信息"的前提失效: 同步摘除护栏
+            # 记账, 否则死锁——模型被指去看"历史里的结果", 历史里却是
+            # 占位符, 重读又被第 3 次拒绝
+            entries = []
+            for name, tid in cleared:
+                found = self._tool_input_for_id(view, tid)
+                if found is not None:
+                    entries.append(found)
+                else:
+                    entries.append((name, ""))
+            self._forget_read_calls(entries)
         return out if changed else view
+
+    @staticmethod
+    def _tool_input_for_id(view: List[Message], tool_use_id: str):
+        """按 tool_use_id 在视图里找配对 assistant 消息的 (name, input)。
+        找不到（理论上不发生——tool_result 必有配对的 tool_use）返回 None。"""
+        for m in view:
+            if m.role != "assistant" or not m.content:
+                continue
+            for b in m.content:
+                if isinstance(b, ToolContentBlock) and b.id == tool_use_id:
+                    return b.name, b.input
+        return None
+
+    def _forget_read_calls(self, entries: list) -> None:
+        """微压缩清掉工具结果后同步摘除护栏记账。read_file 按规范化路径
+        整组摘（同路径不同范围的分页读结果同样已不可见）。"""
+        with self._guard_lock:
+            for entry in entries:
+                if not entry:
+                    continue
+                name, inp = entry
+                key = _read_guard_key(name, inp)
+                self._read_calls.pop(key, None)
+                if name == "read_file" and len(key) > 2:
+                    dead = [k for k in self._read_calls
+                            if k[0] == "read_file" and k[1] == key[1]]
+                    for k in dead:
+                        self._read_calls.pop(k, None)
 
     def _post_compact_restore_text(self, archived: List[Message]) -> str:
         """压缩后文件重注入: 从归档区收集最近读过的文件（最多 5 个, 每个

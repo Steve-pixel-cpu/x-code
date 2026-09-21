@@ -68,7 +68,7 @@ from permissions import (
     PermissionRequest,
     PermissionResult,
 )
-from prompt import SystemPromptBuilder
+from prompt import ProjectContext, SystemPromptBuilder
 from storage import SessionStore
 from tools import ToolRegistry, git_bash_unavailable_reason, TOOL_CANCEL_CHECK
 from runtime import result_meta
@@ -122,6 +122,24 @@ system_prompt = (
     .with_os(platform.system(), platform.release())
     .build()
 )
+
+
+def _session_system_prompt(workdir: Optional[str]) -> list:
+    """按会话工作目录构建系统提示: 注入真实的 cwd/日期/CLAUDE.md 指令
+    文件。没有 workdir 时回落全局默认（与旧行为一致）。环境段位于缓存
+    边界之后, 会话间不同不影响静态前缀的 prompt 缓存。没有这一步, 模型
+    看到的 Working directory 是 unknown——正是它开局跑 pwd && ls 探路、
+    用散弹枪 glob 乱扫的直接原因。"""
+    if not workdir:
+        return system_prompt
+    ctx = ProjectContext.discover(
+        Path(workdir), datetime.now().strftime("%Y-%m-%d"))
+    return (
+        SystemPromptBuilder()
+        .with_os(platform.system(), platform.release())
+        .with_project_context(ctx)
+        .build()
+    )
 def _mirror_rate_limit_retry(attempt: int, max_retries: int,
                              delay_s: float, error) -> None:
     """限流退避镜像: 长退避期间告知前端"还活着、正在重试", 不再静默卡住。
@@ -718,7 +736,7 @@ def load_runtime_for(web_session: WebSession) -> None:
         session=Session(messages=msgs),
         api_client=api_client,
         registry=registry,
-        system_prompt=system_prompt,
+        system_prompt=_session_system_prompt(web_session.workdir),
         hooks_config=runtime_config,
         permission_mode=web_session.permission_mode,
     )
@@ -1336,6 +1354,35 @@ async def api_rename_session(session_id: str, request: dict):
     if web_session is not None:
         web_session.titled = True
     return {"ok": True, "title": title}
+
+
+@app.post("/api/sessions/{session_id}/workdir")
+async def api_set_session_workdir(session_id: str, request: dict):
+    """改绑/解绑会话的项目目录: 追加一条 workdir 记录（展示取最新一条）。
+
+    workdir 传目录路径 = 改绑（校验存在并 resolve）; 传 null/空串 = 解绑,
+    会话退为"任务"。解除绑定常由"移除项目"批量调用——不删会话, 磁盘文件不动。
+    未落盘的会话（pending）同样允许解绑: 记录落盘, 与首条消息共处一个 JSONL。
+    """
+    web_session = _sessions.get(session_id)
+    if web_session is not None and web_session.busy:
+        raise HTTPException(status_code=409, detail="会话正在对话中，暂不能修改项目")
+    exists = session_id in set(store.list_sessions()) or session_id in _pending_sessions
+    if not exists:
+        raise HTTPException(status_code=404, detail="会话不存在")
+
+    raw_wd = str(request.get("workdir") or "").strip()
+    if raw_wd:
+        wd = Path(raw_wd)
+        if not wd.is_dir():
+            raise HTTPException(status_code=400, detail=f"工作目录不存在: {raw_wd}")
+        workdir: Optional[str] = str(wd.resolve())
+    else:
+        workdir = None
+    store.set_workdir(session_id, workdir)
+    if web_session is not None:
+        web_session.workdir = workdir   # 运行态同步, 恢复对话时不再绑回旧目录
+    return {"ok": True, "workdir": workdir}
 
 
 @app.get("/api/dirs")

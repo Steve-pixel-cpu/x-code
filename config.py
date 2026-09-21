@@ -66,10 +66,11 @@ class RuntimeFeatureConfig(BaseModel):
     # length。未显式配置时 = context_window × COMPACT_THRESHOLD_RATIO,
     # 在 parse_feature_config 里推导。
     token_budget: int = int(DEFAULT_CONTEXT_WINDOW * COMPACT_THRESHOLD_RATIO)
-    # 默认 high: 深思考质量优先。速度敏感场景按项目配 thinkingLevel 或
-    # CLAUDE_THINKING_LEVEL 调低（low 明显更快——输出 tokens 是每步
-    # 墙钟时间的主导项）。
-    thinking_level: str = "high"
+    # 默认 medium: 每轮思考预算 8192。high(16384) 下单轮思考的流式墙钟
+    # 就有 50~60s, 且 GLM 系强制思考、思考内容不进历史——每轮循环都全额
+    # 重付, 是长会话"思考很久不见动静"观感的大头。深任务按项目配
+    # thinkingLevel 或 CLAUDE_THINKING_LEVEL 调高（会话内可随时切档）。
+    thinking_level: str = "medium"
     # 单轮输出预算（含思考）。与 runtime.DEFAULT_TURN_OUTPUT_BUDGET 对齐:
     # 思考型模型一次大思考烧 8k~16k, 预算太紧会把轮次掐死在动手之前。
     turn_token_budget: int = 262_144
@@ -172,7 +173,7 @@ class ConfigLoader:
             permission_mode = mode_map[raw_mode]
 
         # thinking_level: 思考深浅档位，budget 映射见 api_client.THINKING_LEVEL_TO_BUDGET
-        raw_level = merged.get("thinkingLevel", "high")
+        raw_level = merged.get("thinkingLevel", "medium")
         if not isinstance(raw_level, str) or raw_level.strip().lower() not in (
             "low", "medium", "high", "max",
         ):

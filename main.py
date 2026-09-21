@@ -22,7 +22,7 @@ from permissions import (
 )
 from permissions import PermissionRequest, PermissionResult, PermissionMode, PermissionPolicy, PermissionDecision, \
     PermissionPrompter
-from prompt import SystemPromptBuilder
+from prompt import ProjectContext, SystemPromptBuilder
 from runtime import ConversationRuntime
 from storage import SessionStore
 from tools import (ToolRegistry, bash_tool, edit_file_tool, glob_tool,
@@ -956,7 +956,15 @@ def start(session_store:SessionStore,session_id:str):
         cwd=Path.cwd(),
         config_home=USER_DIR,   # x-code 自己的用户配置目录
     )
-    system_prompt = SystemPromptBuilder().with_os(platform.system(), platform.release()).build()
+    # 项目上下文（cwd/日期/CLAUDE.md）注入系统提示——没有它模型看到
+    # "Working directory: unknown", 只能靠 pwd && ls 乱摸探路
+    system_prompt = (
+        SystemPromptBuilder()
+        .with_os(platform.system(), platform.release())
+        .with_project_context(ProjectContext.discover(
+            Path.cwd(), datetime.now().strftime("%Y-%m-%d")))
+        .build()
+    )
     runtime_config = config_loader.load()
     api_client = ClaudeApiClient(
         api_key=str(api_key),

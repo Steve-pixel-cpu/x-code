@@ -352,7 +352,14 @@ class SystemPromptBuilder:
             "error lookups beyond your training data. - web_fetch: fetch a "
             "URL and extract the main article text with trafilatura "
             "(readability, no ads/nav noise); pass the concrete URL, prefer "
-            "it over raw curl for reading pages."
+            "it over raw curl for reading pages.\n"
+            "The Environment context section already tells you your working "
+            "directory and today's date — never spend calls probing for them "
+            "(pwd, ls 'to see where I am'). Orient from the environment and "
+            "a targeted glob/grep instead of shotgun patterns. Batch "
+            "independent searches (multiple grep/glob/read_file calls) in "
+            "one message instead of spreading them over several turns. Glob "
+            "patterns support {a,b} brace alternatives like '**/*.{ts,tsx}'."
         )
 
     @staticmethod

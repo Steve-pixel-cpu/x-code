@@ -1,5 +1,9 @@
 
+import json
+import re
+import shlex
 from enum import IntEnum, Enum
+from pathlib import Path
 from typing import Protocol, Dict, Optional
 
 from pydantic import BaseModel
@@ -79,6 +83,142 @@ class PermissionPrompter(Protocol):
         ...
 
 
+# ============================================================================
+# shell 只读判定。权限层与 runtime 的重复只读护栏共用同一套判定:
+# 权限层用它放行只读探查（plan/workspace-write 下 pwd/ls/tail/git log
+# 不再被硬拒/弹问）; 护栏用它决定 bash 是否推进变异序号。
+# 判定必须保守: 白名单 + 危险构造一票否决, 拿不准一律视为可能变异
+# （权限层误判"只读"的代价是放行了一条写命令——所以白名单刻意排除
+# 解释器(python/node/awk/sed 可执行任意逻辑)、网络(curl/wget)、
+# 归档与构建(tar/make 有写入面)）。
+# ============================================================================
+
+MUTATING_SHELL_TOOLS = frozenset({"bash", "powershell"})
+
+# bash 白名单: 文件系统/系统信息 + 文本检索处理（管道常客）。
+READONLY_SHELL_COMMANDS = frozenset({
+    "ls", "pwd", "cat", "head", "tail", "wc", "file", "stat", "du", "df",
+    "find", "tree", "which", "where", "whereis", "type", "realpath",
+    "readlink", "basename", "dirname", "env", "printenv", "id", "whoami",
+    "hostname", "uname", "date", "sleep",
+    "grep", "egrep", "fgrep", "rg", "strings", "cut", "uniq", "tr", "jq",
+    "diff", "cmp", "comm", "nl", "tac", "rev", "fold", "fmt", "xxd", "od",
+    "md5sum", "sha1sum", "sha256sum", "cksum",
+})
+
+# git 只读子命令。branch/tag/remote 虽可创建引用, 但不改工作树文件内容;
+# checkout/switch/reset/clean/stash(pop) 会动文件, 不在名单。
+GIT_READONLY_SUBCOMMANDS = frozenset({
+    "log", "show", "diff", "status", "blame", "rev-parse", "ls-files",
+    "describe", "shortlog", "reflog", "branch", "tag", "remote", "grep",
+    "ls-tree", "cat-file", "worktree", "stash",
+})
+
+# powershell 白名单: Get-* 惯例只读 + 少数纯计算 cmdlet。别名(ls/cat 等)
+# 落到 bash 名单里天然覆盖。
+PS_READONLY_CMDLETS = frozenset({
+    "test-path", "get-item", "get-childitem", "get-content", "get-date",
+    "get-location", "get-command", "get-help", "get-member", "get-process",
+    "get-service", "get-filehash", "get-psdrive", "get-alias", "get-random",
+    "measure-object", "measure-command", "select-object", "sort-object",
+    "out-string", "write-output", "write-host", "select-string",
+    "compare-object", "split-path", "resolve-path",
+})
+
+_FIND_MUTATING_ACTIONS = frozenset({
+    "-delete", "-exec", "-execdir", "-ok", "-okdir",
+    "-fprint", "-fprintf", "-fls",
+})
+
+
+def _split_shell_segments(cmd: str) -> list:
+    """按 && || ; | 换行切成命令段——引号内的分隔符不算（"a|b" 是模式）。"""
+    segs, buf, quote, i = [], [], None, 0
+    while i < len(cmd):
+        ch = cmd[i]
+        if quote:
+            buf.append(ch)
+            if ch == quote:
+                quote = None
+        elif ch in "'\"":
+            quote = ch
+            buf.append(ch)
+        elif cmd[i:i + 2] in ("&&", "||"):
+            segs.append("".join(buf))
+            buf = []
+            i += 1
+        elif ch in ";|\n":
+            segs.append("".join(buf))
+            buf = []
+        else:
+            buf.append(ch)
+        i += 1
+    segs.append("".join(buf))
+    return [s.strip() for s in segs if s.strip()]
+
+
+def _first_word(tokens: list) -> str:
+    """剥掉前缀环境变量赋值（VAR=val cmd ...）后的首个命令词（取 basename）。"""
+    while tokens and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", tokens[0]):
+        tokens = tokens[1:]
+    if not tokens:
+        return ""
+    return Path(tokens[0]).name.lower()
+
+
+def _segment_is_read_only(seg: str, powershell: bool) -> bool:
+    # 命令替换/进程替换可内嵌任意命令: 一票否决
+    if "$(" in seg or "`" in seg or "<(" in seg:
+        return False
+    # 重定向清理: fd 拷贝(2>&1)与 /dev/null 弃置无害; 之余还有 > 就是写文件
+    cleaned = re.sub(r"\d?[<>]&\d", "", seg)
+    cleaned = re.sub(r"\d*>>?\s*/dev/null", "", cleaned)
+    if ">" in cleaned:
+        return False
+    try:
+        tokens = shlex.split(cleaned, posix=True)
+    except ValueError:
+        return False
+    word = _first_word(tokens)
+    if not word or word == "sudo":
+        return False
+    if word == "cd":            # cd 不改文件内容; 相对读取按 workdir 解析
+        return True
+    if powershell:
+        return word in PS_READONLY_CMDLETS
+    if word == "git":
+        return _git_read_only(tokens[1:])
+    if word == "find":
+        return not any(t.lower() in _FIND_MUTATING_ACTIONS for t in tokens[1:])
+    if word == "sort":          # sort -o 写文件; 其余用法只读
+        return not any(t.lower().startswith("-o") for t in tokens[1:])
+    return word in READONLY_SHELL_COMMANDS
+
+
+def _git_read_only(rest: list) -> bool:
+    if not rest:
+        return False
+    sub = rest[0].lower()
+    if sub == "stash":          # 只有 list/show/stat 只读, push/pop/drop 动树
+        return len(rest) > 1 and rest[1].lower() in ("list", "show", "stat")
+    return sub in GIT_READONLY_SUBCOMMANDS
+
+
+def shell_command_is_read_only(tool_name: str, tool_input: str) -> bool:
+    """bash/powershell 调用是否确定性只读。解析失败/空命令/任何拿不准的
+    构造都返回 False（视为可能变异, 维持原权限档位——保守方向兜底）。"""
+    try:
+        params = json.loads(tool_input)
+        cmd = str(params.get("command") or "")
+    except Exception:
+        return False
+    if not cmd.strip():
+        return False
+    powershell = tool_name == "powershell"
+    return all(_segment_is_read_only(s, powershell)
+               for s in _split_shell_segments(cmd))
+
+
 class PermissionPolicy:
     def __init__(self, active_mode: PermissionMode):
         self._active_mode = active_mode
@@ -106,6 +246,15 @@ class PermissionPolicy:
                   tool_use_id: Optional[str] = None) -> PermissionResult:
         current = self.active_mode
         required = self.required_mode_for(tool_name)
+
+        # 只读 shell 白名单: bash/powershell 未显式登记档位（走 DANGER
+        # fallback）时, 命令经保守判定确为只读则按最低档评估——
+        # plan/workspace-write 下 pwd/ls/tail/git log 等探查直接放行,
+        # 不再"每条探查命令多烧一轮拒绝+重思考"。判定拿不准即维持原档。
+        if (required == PermissionMode.DANGER_FULL_ACCESS
+                and tool_name in MUTATING_SHELL_TOOLS
+                and shell_command_is_read_only(tool_name, input)):
+            required = PLAN_MODE   # == READ_ONLY_MODE(1): 数值比较即放行
 
         # 快速路径: Allow 模式跳过一切; 其余模式仅在"当前权限足够"时放行。
         # PROMPT(4) 数值上 >= 大多数 required, 但它的语义是"每次都问",
@@ -168,9 +317,16 @@ class PermissionPolicy:
         plan_hint = (" Plan mode is active: do not execute or modify anything. "
                      "Research with read_file, then call present_plan with "
                      "your implementation plan.")
+        # shell 拒绝附带队内替代方案: 只读查询有专用工具且永不触发权限,
+        # 给出 redirect 避免模型换个命令继续撞墙
+        shell_redirect = (
+            " If you only need information (file contents, search, "
+            "directory listing), use the dedicated read_file/grep/glob "
+            "tools instead of shell — they never trigger permission checks."
+        ) if tool_name in MUTATING_SHELL_TOOLS else ""
         return PermissionResult(
-                    decision= PermissionDecision.DENY,
+                    decision = PermissionDecision.DENY,
                     reason = f"tool '{tool_name}' requires {required.as_str()} " 
-                    f"permission; current mode is {current.as_str()}" + (plan_hint if current == PermissionMode.PLAN else "")
+                    f"permission; current mode is {current.as_str()}" + (plan_hint if current == PermissionMode.PLAN else "") + shell_redirect
                 )
 
