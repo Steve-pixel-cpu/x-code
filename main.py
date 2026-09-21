@@ -25,7 +25,8 @@ from permissions import PermissionRequest, PermissionResult, PermissionMode, Per
 from prompt import SystemPromptBuilder
 from runtime import ConversationRuntime
 from storage import SessionStore
-from tools import (ToolRegistry, bash_tool, glob_tool, grep_tool, read_tool,
+from tools import (ToolRegistry, bash_tool, edit_file_tool, glob_tool,
+                   grep_tool, read_tool,
                    write_tool, present_plan_tool, powershell_tool,
                    task_output_tool, task_stop_tool, todo_tool,
                    web_fetch_tool, web_search_tool,
@@ -173,8 +174,10 @@ write_file_spec = {
     "description": (
         "Write text content to a file at the given path. Creates the file "
         "if it does not exist, and overwrites it if it does. Use this to "
-        "create or update source code, configs, and other text files. "
-        "Parent directories must already exist."
+        "create new files or fully rewrite a file after reading it. "
+        "Overwriting an existing file requires a prior read_file of the "
+        "same path in this session — for targeted changes prefer the "
+        "edit_file tool instead. Parent directories must already exist."
     ),
     "input_schema": {
         "type": "object",
@@ -195,6 +198,53 @@ write_file_spec = {
             },
         },
         "required": ["path", "content"],
+    },
+}
+
+edit_file_spec = {
+    "name": "edit_file",
+    "description": (
+        "Edit a file with an exact string replacement: replaces the first "
+        "occurrence of old_string with new_string (all occurrences if "
+        "'replace_all' is true). This is the preferred tool for targeted "
+        "changes — it touches nothing outside the replaced span, unlike "
+        "write_file which rewrites the whole file. old_string must be "
+        "copied verbatim from the file, including indentation and "
+        "whitespace; if it matches multiple places, extend it with more "
+        "surrounding context or set replace_all. The file must have been "
+        "read this session and must not have changed since."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "path": {
+                "type": "string",
+                "description": (
+                    "Path to the file to edit, e.g. 'src/main.py'. "
+                    "Supports relative and absolute paths."
+                ),
+            },
+            "old_string": {
+                "type": "string",
+                "description": (
+                    "The exact text to replace, copied verbatim from the "
+                    "file (including whitespace/indentation). Must match "
+                    "exactly one place unless replace_all is true."
+                ),
+            },
+            "new_string": {
+                "type": "string",
+                "description": "The replacement text.",
+            },
+            "replace_all": {
+                "type": "boolean",
+                "description": (
+                    "Replace every occurrence of old_string instead of "
+                    "just the first. Default false."
+                ),
+            },
+        },
+        "required": ["path", "old_string", "new_string"],
     },
 }
 
@@ -341,7 +391,7 @@ from tools import (todo_spec as _todo_spec,     # noqa: E402  (spec 与实现同
                    web_fetch_spec, web_search_spec)
 
 TOOLS = [bash_spec, powershell_spec, read_file_spec, write_file_spec,
-         grep_spec, glob_spec, task_output_spec, task_stop_spec,
+         edit_file_spec, grep_spec, glob_spec, task_output_spec, task_stop_spec,
          present_plan_spec, _todo_spec,
          web_search_spec, web_fetch_spec] + AGENT_TOOL_SPECS
 
@@ -856,6 +906,7 @@ TOOL_REQUIREMENTS = {
     "web_search": READ_ONLY_MODE,       # 免 key 网页搜索, 纯只读
     "web_fetch": READ_ONLY_MODE,        # 抓 URL 提取正文, 不落盘
     "write_file": WORKSPACE_WRITE_MODE, # 落盘文件（本地写）
+    "edit_file": WORKSPACE_WRITE_MODE,  # 局部编辑文件（本地写）
     "agent_tool": WORKSPACE_WRITE_MODE, # 派生 subagent（写 agents 状态目录）
     # present_plan 走 WORKSPACE_WRITE 档: plan 模式下它触发"可升级弹问"
     # （Web 端渲染成计划卡）, 其余模式下直接放行
@@ -870,6 +921,7 @@ def build_registry() -> ToolRegistry:
         name="powershell", handler=powershell_tool).register(
         name="read_file", handler=read_tool).register(
         name="write_file", handler=write_tool).register(
+        name="edit_file", handler=edit_file_tool).register(
         name="task_output", handler=task_output_tool).register(
         name="task_stop", handler=task_stop_tool).register(
         name="present_plan", handler=present_plan_tool).register(

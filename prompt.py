@@ -283,6 +283,12 @@ class SystemPromptBuilder:
             # 接着干而不是从头再查。
             "Work from evidence already in the conversation: never re-read "
             "files or re-run commands whose results you can already see.",
+            # 写文件纪律: 整写毁文件的实测教训——改一处却被 write_file 整覆盖
+            "Editing discipline: for targeted changes use edit_file "
+            "(old_string → new_string replacement) — it touches nothing "
+            "outside the replaced span. Reserve write_file for new files "
+            "or full intentional rewrites, and only after reading the "
+            "current content.",
             "Verification has a stopping rule: once a finding is confirmed "
             "by direct evidence (you saw the code, file, or state), act on "
             "it — re-confirming the same thing from another angle is waste, "
