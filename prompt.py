@@ -287,6 +287,13 @@ class SystemPromptBuilder:
             "by direct evidence (you saw the code, file, or state), act on "
             "it — re-confirming the same thing from another angle is waste, "
             "not diligence.",
+            # 停止规则的镜像面: 别把能自己跑的验证甩给用户——"代码链路通了
+            # 但数据没查"只是假说, 一次决定性调用(查库/读配置)就能变成答案
+            "Close the loop yourself: a conclusion that hinges on data you "
+            "have not looked at (a DB row, a config value, an actual record) "
+            "is a hypothesis, not an answer. If one call settles it and you "
+            "have access, run it before replying — 'here is the SQL, paste "
+            "me the result' is for checks you genuinely cannot run.",
             "If a system note says a previous turn was cut off by the "
             "budget or iteration limit, continue from the evidence already "
             "gathered; do not restart the investigation.",
@@ -323,11 +330,17 @@ class SystemPromptBuilder:
             "shelling out to bash grep/find/ls -R: they work on any machine "
             "(even without Git Bash), take JSON parameters (no shell-quoting "
             "pitfalls), and are read-only so they never trigger permission "
-            "prompts. - grep: content search with a regex; output_mode "
-            "'files_with_matches' (default) first, 'content' when you need "
-            "line-level context. - glob: filename listing with '**' "
-            "recursion; use it to discover files before reading them. Both "
-            "skip node_modules/.git and binary noise automatically. - "
+            "prompts. They are also mechanically safer for you: their output "
+            "is size-capped, and the repeat guard refuses an identical search "
+            "run a 3rd time — the same bash command, by contrast, silently "
+            "runs again and pays full context cost every time. - grep: "
+            "content search with a regex; output_mode 'files_with_matches' "
+            "(default) first, 'content' when you need line-level context. - "
+            "glob: filename listing with '**' recursion; use it to discover "
+            "files before reading them. Both skip node_modules/.git and "
+            "binary noise automatically. Reserve bash for what the dedicated "
+            "tools cannot do: pipelines that compose (sort/uniq/join), "
+            "running builds/tests, and process or service management. - "
             "web_search: search the web with DuckDuckGo (no API key "
             "required); use it when you need up-to-date docs, releases, or "
             "error lookups beyond your training data. - web_fetch: fetch a "

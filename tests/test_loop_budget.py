@@ -265,7 +265,7 @@ def test_build_runtime_wires_loop_budgets():
 # ------------------------------------------------------------
 
 def test_config_turn_token_budget_default(tmp_path):
-    assert ConfigLoader(cwd=tmp_path, config_home=tmp_path).load().turn_token_budget() == 131_072
+    assert ConfigLoader(cwd=tmp_path, config_home=tmp_path).load().turn_token_budget() == 262_144
 
 
 def test_config_turn_token_budget_env_override(tmp_path, monkeypatch):
@@ -351,4 +351,6 @@ def test_summary_preserves_assistant_findings_verbatim():
 
     assert result.removed_count > 0
     assert conclusion in result.formatted_summary   # 结论逐字活着
-    assert "do NOT re-verify" in result.formatted_summary
+    # 提示语不再与证据缺失自相矛盾: 不许重读 → 改为"需要精确内容再重读"
+    assert "settled results" in result.formatted_summary
+    assert "do NOT re-verify" not in result.formatted_summary

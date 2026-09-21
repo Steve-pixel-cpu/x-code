@@ -3,7 +3,12 @@
 背景: 大文件整读被截断掐掉中段后, 模型会把同一个调用原样重发几十次
 （实测一次会话同一 read_file 重复 24 次）。提示词拦不住, 执行层兜:
 read_file/grep/glob 期间无写入时结果必然相同——第 2 次警告、第 3 次起
-拒绝; 任何写入/bash 重置计数; 压缩激活清零。
+拒绝; 可能改状态的命令重置计数; 压缩激活清零。
+
+bash/powershell 先做只读判定（shell_command_is_read_only）: ls/find/
+grep/git log 这类确定性只读探查不清零计数——旧规则"任何 bash 都清零"
+让 bash 密集的排查会话里护栏形同虚设（实测同一文件重读 4 次无告警）。
+判定保守: 白名单 + 危险构造（命令替换/重定向写/未知名令）一票否决。
 
 运行方式（在 x-code 目录下）:
     uv run pytest tests/test_repeat_guard.py -v
@@ -121,13 +126,27 @@ def test_写入后同一读取重新放行():
     assert "2nd time" not in outs[0].content[0].output
 
 
-def test_bash也推进变异序号_可轮询():
-    """bash 不受护栏约束且推进变异序号: 轮询类合法重读不被误伤。"""
+def test_只读bash不清零护栏_同参重读照旧拦截():
+    """实测教训: bash 密集的排查会话里, 旧规则每条 bash 都清零计数,
+    同一文件重读 4 次护栏一声不吭。cat/ls/git log 类只读命令不再清零。"""
     ex = RecordingExecutor()
     rt = make_runtime(ex)
-    bash = ("bash", '{"command": "cat main.py"}')
+    cat = ("bash", '{"command": "cat main.py"}')
 
-    _run_tools(rt, [READ, READ, bash])
+    _run_tools(rt, [READ, READ, cat])
+    outs = _run_tools(rt, [READ])
+
+    # cat 没有改文件 → 计数保留, 第 3 次同参重读被拒
+    assert outs[0].content[0].is_error is True
+    assert "REFUSED" in outs[0].content[0].output
+
+
+def test_变异bash清零护栏_轮询类合法重读不被误伤():
+    ex = RecordingExecutor()
+    rt = make_runtime(ex)
+    mutate = ("bash", '{"command": "echo x > main.py"}')
+
+    _run_tools(rt, [READ, READ, mutate])
     outs = _run_tools(rt, [READ])
 
     assert outs[0].content[0].is_error is False
@@ -140,6 +159,171 @@ def test_bash自身永不拒绝():
     bash = ("bash", '{"command": "sleep 1"}')
     outs = _run_tools(rt, [bash] * 5)
     assert all(o.content[0].is_error is False for o in outs)      # 轮询合法
+
+
+# ------------------------------------------------------------
+# shell 只读判定 — 护栏变异序号的推进闸门（钉真实排查会话里的命令形状）
+# ------------------------------------------------------------
+
+import json as _json
+
+import pytest
+
+from runtime import shell_command_is_read_only
+
+
+def _ro(name: str, cmd: str) -> bool:
+    return shell_command_is_read_only(name, _json.dumps({"command": cmd}))
+
+
+@pytest.mark.parametrize("cmd", [
+    "pwd && ls -la",                                   # 真实 trace 首条
+    "ls -la /d/workplace/KB 2>/dev/null",              # /dev/null 弃置无害
+    'grep -rn "切部门" --include="*.cs" -l | grep -v "/obj/"',   # 引号内 | 不算分隔
+    "git log --oneline -15 -- src/hooks/use.tsx",
+    "git show b92943f --stat | head -20 && git log -1 --format=%h",
+    "cd /d/workplace && git status",
+    'find . -name "SysUser.cs" -not -path "*/obj/*"',
+    "strings Zny.Web.Shared.dll | grep -i systemmanager",
+    "cat main.py",
+    'SQLCMD="C:/tools/sqlcmd.exe" ls',                 # 环境变量前缀 + 只读命令
+    "ls > /dev/null",
+])
+def test_确定性只读命令不清零(cmd):
+    assert _ro("bash", cmd) is True
+
+
+@pytest.mark.parametrize("cmd", [
+    "rm -rf build",
+    "echo hi > out.txt",                               # 重定向写文件
+    "git commit -m x",
+    "git checkout main",                               # 动工作树
+    "git stash pop",
+    'python -c "print(1)"',                            # 解释器一票否决
+    "for f in $(ls *.dll); do echo $f; done",          # 命令替换 + for
+    "curl https://example.com",
+    "touch newfile",
+    'find . -name "*.tmp" -delete',                    # find 的变异动作
+    "sort -o out.txt in.txt",
+    "sed -n '1,10p' main.py",                          # 保守排除: sed 有 w/e 命令面
+    "sudo cat /etc/shadow",
+])
+def test_可能变异的命令照旧清零(cmd):
+    assert _ro("bash", cmd) is False
+
+
+def test_解析失败与空命令保守视为变异():
+    assert shell_command_is_read_only("bash", "{not json") is False
+    assert shell_command_is_read_only("bash", '{"command": ""}') is False
+    assert shell_command_is_read_only("bash", "{}") is False
+
+
+def test_powershell_同规则():
+    assert _ro("powershell", "Get-ChildItem -Recurse | Select-String foo") is True
+    assert _ro("powershell", "Remove-Item x") is False
+    assert _ro("powershell", "Get-Content a.txt > b.txt") is False
+
+
+# ------------------------------------------------------------
+# 结论检查点 — 只读连击跨过阈值档位时, 自查提醒附在最新工具结果上。
+# 按调用-检查点的节奏模拟 run_turn（检查点在每批工具结果回填后调用）
+# ------------------------------------------------------------
+
+from hooks import HookResult
+from models import ToolContentBlock
+
+
+def _step(rt, msgs: list, name: str, inp: str, i: int):
+    """执行一次工具并回填检查点（= run_turn 每迭代的收尾动作）。"""
+    block = ToolContentBlock(id=f"t{i}", name=name, input=inp)
+    msg = rt._execute_tool(block, HookResult(messages=[], denied=False))
+    msgs.append(msg)
+    rt._maybe_conclusion_checkpoint(msgs)
+    return msg
+
+
+def test_只读连击跨过阈值触发结论检查点():
+    from runtime import CONCLUSION_CHECKPOINT_EVERY as EVERY
+
+    ex = RecordingExecutor()
+    rt = make_runtime(ex)
+    msgs: list = []
+
+    for i in range(EVERY):
+        _step(rt, msgs, "read_file", f'{{"path": "f{i}.py"}}', i)
+
+    # 检查点重建消息替换列表槽位, 断言对准 msgs（会话视角）
+    assert "Checkpoint" not in msgs[EVERY - 2].content[0].output
+    assert "Checkpoint" in msgs[-1].content[0].output
+    assert msgs[-1].content[0].is_error is False      # 提醒不是错误
+
+
+def test_检查点按倍数档位重复触发():
+    from runtime import CONCLUSION_CHECKPOINT_EVERY as EVERY
+
+    ex = RecordingExecutor()
+    rt = make_runtime(ex)
+    msgs: list = []
+
+    for i in range(EVERY * 2 + 1):
+        _step(rt, msgs, "read_file", f'{{"path": "f{i}.py"}}', i)
+
+    fired = ["Checkpoint" in m.content[0].output for m in msgs]
+    assert fired[EVERY - 1] is True                   # 第 16 次: 跨过 16 档, 触发
+    assert not any(fired[EVERY:EVERY * 2 - 1])        # 档位之间保持安静
+    assert fired[EVERY * 2 - 1] is True               # 第 32 次: 跨过 32 档, 再触发
+    assert fired[-1] is False                         # 触发点之后的调用是干净的
+
+
+def test_并行批次跨过档位也触发():
+    """一批 5 个调用把连击从 14 推到 19: 19 % 16 != 0, 按"取模"判定会
+    永远错过——按"跨档"判定必须命中。"""
+    from runtime import CONCLUSION_CHECKPOINT_EVERY as EVERY
+
+    ex = RecordingExecutor()
+    rt = make_runtime(ex)
+    msgs: list = []
+
+    for i in range(EVERY - 2):
+        _step(rt, msgs, "read_file", f'{{"path": "f{i}.py"}}', i)
+    assert not any("Checkpoint" in m.content[0].output for m in msgs)
+
+    for i in range(5):                                # 连击 14 → 19, 跨过 16
+        _step(rt, msgs, "read_file", f'{{"path": "g{i}.py"}}', EVERY + i)
+
+    # 提醒落在连击到 16 的那条结果上（0 基槽位 15）, 其余干净
+    assert "Checkpoint" in msgs[EVERY - 1].content[0].output
+    assert not any("Checkpoint" in m.content[0].output
+                   for i, m in enumerate(msgs) if i != EVERY - 1)
+
+
+def test_变异调用清零连击_检查点重新计数():
+    from runtime import CONCLUSION_CHECKPOINT_EVERY as EVERY
+
+    ex = RecordingExecutor()
+    rt = make_runtime(ex)
+    msgs: list = []
+
+    seq = [("read_file", f'{{"path": "f{i}.py"}}') for i in range(EVERY - 1)]
+    seq += [("bash", '{"command": "rm build.log"}'), READ]
+    for i, (name, inp) in enumerate(seq):
+        _step(rt, msgs, name, inp, i)
+
+    assert all("Checkpoint" not in m.content[0].output for m in msgs)
+
+
+def test_检查点不重复附加在同一条结果上():
+    ex = RecordingExecutor()
+    rt = make_runtime(ex)
+    msgs: list = []
+
+    for i in range(20):
+        _step(rt, msgs, "read_file", f'{{"path": "f{i}.py"}}', i)
+    rt._maybe_conclusion_checkpoint(msgs)             # 连击未变: 重复调用不追加
+
+    # 唯一提醒落在第 16 条（跨档点）; 之后到第 20 条都干净
+    assert msgs[15].content[0].output.count("Checkpoint") == 1
+    assert not any("Checkpoint" in m.content[0].output for m in msgs[16:])
 
 
 # ------------------------------------------------------------

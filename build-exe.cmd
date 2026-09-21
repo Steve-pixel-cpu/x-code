@@ -1,22 +1,41 @@
 @echo off
 REM ============================================================
-REM x-code one-click packaging (Tauri):
-REM   [1/4] install PyInstaller into the project venv
-REM   [2/4] freeze server.py into build\server\x-code-server.exe
-REM   [3/4] copy backend exe into src-tauri\server (bundle resource)
-REM   [4/4] cargo tauri build -> NSIS installer
-REM Output: dist\x-code_<ver>_x64-setup.exe
-REM Requirements: uv, Rust toolchain (rustup), Node.js (tauri-cli via npm)
+REM x-code one-click packaging (target selectable via 1st arg):
+REM   build-exe.cmd            -> tauri (default)
+REM   build-exe.cmd tauri      -> Tauri 2 shell + frozen Python backend -> NSIS installer
+REM   build-exe.cmd electron   -> Electron shell + frozen Python backend -> NSIS + portable
+REM   build-exe.cmd both       -> run tauri, then electron
+REM Shared steps:
+REM   [1/2] install PyInstaller into the project venv
+REM   [2/2] freeze server.py into build\server\x-code-server.exe
+REM Tauri branch:   copy backend exe into src-tauri\server -> cargo tauri build
+REM Electron branch: npm install (if needed) -> electron-builder --win
+REM                  (extraResources picks up build\server automatically)
+REM Output: dist\x-code_<ver>_x64-setup.exe (tauri) / dist\x-code Setup <ver>.exe
+REM         + dist\x-code <ver>.exe portable (electron)
+REM Requirements: uv, Node.js (tauri-cli / electron-builder via npm);
+REM               Rust toolchain (rustup) for the tauri target only
 REM ============================================================
 setlocal
 cd /d %~dp0
 
-echo [1/4] Installing PyInstaller into project venv...
+set "TARGET=%~1"
+if "%TARGET%"=="" set "TARGET=tauri"
+if /i "%TARGET%"=="tauri" goto :target_ok
+if /i "%TARGET%"=="electron" goto :target_ok
+if /i "%TARGET%"=="both" goto :target_ok
+echo Unknown target: %TARGET%
+echo Usage: build-exe.cmd [tauri^|electron^|both]  (default: tauri)
+exit /b 1
+:target_ok
+
+echo.
+echo ====== [1/2] Installing PyInstaller into project venv ======
 uv pip install --python .venv\Scripts\python.exe pyinstaller
 if errorlevel 1 exit /b 1
 
 echo.
-echo [2/4] Freezing Python backend (static/ bundled, uvicorn hidden imports declared)...
+echo ====== [2/2] Freezing Python backend (static/ bundled, uvicorn hidden imports) ======
 if not exist build\server mkdir build\server
 .venv\Scripts\python.exe -m PyInstaller --noconfirm --clean --onefile ^
   --name x-code-server ^
@@ -37,14 +56,17 @@ if not exist build\server mkdir build\server
   server.py
 if errorlevel 1 exit /b 1
 
+if /i "%TARGET%"=="electron" goto :do_electron
+if /i "%TARGET%"=="both" goto :do_tauri
+:do_tauri
 echo.
-echo [3/4] Copying backend exe into src-tauri\server ...
+echo ====== Tauri [1/2] Copying backend exe into src-tauri\server ======
 if not exist src-tauri\server mkdir src-tauri\server
 copy /y build\server\x-code-server.exe src-tauri\server\
 if errorlevel 1 exit /b 1
 
 echo.
-echo [4/4] Building desktop app (Tauri, NSIS installer)...
+echo ====== Tauri [2/2] Building desktop app (NSIS installer) ======
 call npx tauri build
 if errorlevel 1 exit /b 1
 
@@ -55,8 +77,24 @@ copy /y "src-tauri\target\release\bundle\nsis\x-code_*_x64-setup.exe" dist\ >nul
 if errorlevel 1 exit /b 1
 del /q "dist\x-code 0.1.0.exe" >nul 2>&1
 del /q "dist\x-code Setup 0.1.0.exe" >nul 2>&1
+if /i not "%TARGET%"=="both" goto :done
+
+:do_electron
+echo.
+echo ====== Electron [1/2] Installing npm dependencies (skipped if present) ======
+if not exist node_modules\electron-builder (
+  call npm install
+  if errorlevel 1 exit /b 1
+)
 
 echo.
+echo ====== Electron [2/2] Building desktop app (NSIS installer + portable) ======
+call npx electron-builder --win
+if errorlevel 1 exit /b 1
+
+:done
+echo.
+if not exist dist mkdir dist
 echo Done. Artifacts in dist\:
 dir /b dist\*.exe
 endlocal

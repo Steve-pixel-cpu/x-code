@@ -1,13 +1,19 @@
 from typing import Protocol, Optional, List
 from concurrent.futures import ThreadPoolExecutor
 import contextvars
+import json
+import re
+import shlex
 import threading
+from pathlib import Path
 
 from pydantic import BaseModel
 
 from api_client import AssistantEvent, TextDeltaEvent, ToolUseEvent, MessageStopEvent, ApiClient
 from compact import (
     CompactionConfig,
+    SUMMARIZER_SYSTEM_PROMPT,
+    SUMMARY_INSTRUCTION,
     continuation_message,
     cut_point,
     format_compact_summary,
@@ -21,13 +27,16 @@ from prompt import PLAN_MODE_SECTION, SYSTEM_PROMPT_DYNAMIC_BOUNDARY
 DEFAULT_MAX_ITERATIONS = 128
 # auto-compact 触发阈值: 必须明显低于模型真实上下文窗口——一次请求还要
 # 装 max_tokens=32768 的输出位, 阈值若贴着窗口设, 永远轮不到它触发,
-# 只会等 API 报 context length 而整轮炸掉。取 128k 窗口的 ~75%。
-DEFAULT_AUTO_COMPACT_THRESHOLD = 100_000
+# 只会等 API 报 context length 而整轮炸掉。
+# 750_000 = GLM-5.3 官方 1M 窗口的 ~75%。口径是"最近一次 API 调用的
+# input+缓存读写"（见 _context_over_compact_threshold）, 不是本轮累加。
+# 第三方中转若砍窗口, 用配置 contextWindow / tokenBudget 调小。
+DEFAULT_AUTO_COMPACT_THRESHOLD = 750_000
 # 单轮输出预算（output_tokens 含思考）。思考型模型一次"汇总证据"级的
 # 大思考就能烧掉 1/4 预算（GLM 系强制思考, high 档上限 16k/次）, 预算太紧
 # 会把轮次稳定掐死在"证据齐了"和"动手改"之间——排查死循环的一环。
-# 131072 ≈ 容纳 8 次大思考调用; CLAUDE_TURN_TOKEN_BUDGET 可覆盖。
-DEFAULT_TURN_OUTPUT_BUDGET = 131_072
+# 262144 ≈ 容纳 16 次大思考调用; CLAUDE_TURN_TOKEN_BUDGET 可覆盖。
+DEFAULT_TURN_OUTPUT_BUDGET = 262_144
 
 # --- 轮次收束说明: 预算/迭代耗尽对模型是不可见的截断——只把警告发给
 # 前端的话, 模型不知道自己被掐过, 下一轮只会重新排查。把收束原因作为
@@ -57,6 +66,142 @@ TURN_ITERATIONS_EXHAUSTED_NOTICE = (
 PURE_READ_TOOLS = frozenset({"read_file", "grep", "glob"})
 REPEAT_WARN_ON = 2       # 第 2 次: 照常执行, 结果附加警告
 REPEAT_DENY_FROM = 3     # 第 3 次起: 拒绝执行
+
+# --- shell 只读判定: 护栏变异序号的推进闸门 ---
+# 实测教训: 排查类会话里模型大量用 bash 跑 ls/find/grep/git log 这类只读
+# 探查, 旧规则"任何非纯读工具都推进变异序号"导致护栏计数被频繁清零——
+# 同一文件重读 4 次护栏一声不吭, 形同虚设。现在 bash/powershell 先做
+# 只读判定: 确定性只读的命令不清零计数, 只有可能改状态的才清。
+# 判定必须保守: 白名单 + 危险构造一票否决, 拿不准一律视为可能变异
+# （误判"只读"的代价只是护栏少拦一次, 误判"变异"的代价是护栏失效）。
+MUTATING_SHELL_TOOLS = frozenset({"bash", "powershell"})
+
+# bash 白名单: 文件系统/系统信息 + 文本检索处理（管道常客）。
+# 刻意排除: 解释器(python/node/awk/sed 可执行任意逻辑)、网络(curl/wget)、
+# 归档与构建(tar/make 有写入面)。
+READONLY_SHELL_COMMANDS = frozenset({
+    "ls", "pwd", "cat", "head", "tail", "wc", "file", "stat", "du", "df",
+    "find", "tree", "which", "where", "whereis", "type", "realpath",
+    "readlink", "basename", "dirname", "env", "printenv", "id", "whoami",
+    "hostname", "uname", "date", "sleep",
+    "grep", "egrep", "fgrep", "rg", "strings", "cut", "uniq", "tr", "jq",
+    "diff", "cmp", "comm", "nl", "tac", "rev", "fold", "fmt", "xxd", "od",
+    "md5sum", "sha1sum", "sha256sum", "cksum",
+})
+
+# git 只读子命令。branch/tag/remote 虽可创建引用, 但不改工作树文件内容,
+# 对"重读同文件结果必然相同"无影响, 一并放行; checkout/switch/reset/
+# clean/stash(pop) 会动文件, 不在名单。
+GIT_READONLY_SUBCOMMANDS = frozenset({
+    "log", "show", "diff", "status", "blame", "rev-parse", "ls-files",
+    "describe", "shortlog", "reflog", "branch", "tag", "remote", "grep",
+    "ls-tree", "cat-file", "worktree", "stash",
+})
+
+# powershell 白名单: Get-* 惯例只读 + 少数纯计算 cmdlet。别名(ls/cat 等)
+# 落到 bash 名单里天然覆盖。
+PS_READONLY_CMDLETS = frozenset({
+    "test-path", "get-item", "get-childitem", "get-content", "get-date",
+    "get-location", "get-command", "get-help", "get-member", "get-process",
+    "get-service", "get-filehash", "get-psdrive", "get-alias", "get-random",
+    "measure-object", "measure-command", "select-object", "sort-object",
+    "out-string", "write-output", "write-host", "select-string",
+    "compare-object", "split-path", "resolve-path",
+})
+
+_FIND_MUTATING_ACTIONS = frozenset({
+    "-delete", "-exec", "-execdir", "-ok", "-okdir",
+    "-fprint", "-fprintf", "-fls",
+})
+
+
+def _split_shell_segments(cmd: str) -> list:
+    """按 && || ; | 换行切成命令段——引号内的分隔符不算（"a|b" 是模式）。"""
+    segs, buf, quote, i = [], [], None, 0
+    while i < len(cmd):
+        ch = cmd[i]
+        if quote:
+            buf.append(ch)
+            if ch == quote:
+                quote = None
+        elif ch in "'\"":
+            quote = ch
+            buf.append(ch)
+        elif cmd[i:i + 2] in ("&&", "||"):
+            segs.append("".join(buf))
+            buf = []
+            i += 1
+        elif ch in ";|\n":
+            segs.append("".join(buf))
+            buf = []
+        else:
+            buf.append(ch)
+        i += 1
+    segs.append("".join(buf))
+    return [s.strip() for s in segs if s.strip()]
+
+
+def _first_word(tokens: list) -> str:
+    """剥掉前缀环境变量赋值（VAR=val cmd ...）后的首个命令词（取 basename）。"""
+    while tokens and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", tokens[0]):
+        tokens = tokens[1:]
+    if not tokens:
+        return ""
+    return Path(tokens[0]).name.lower()
+
+
+def _segment_is_read_only(seg: str, powershell: bool) -> bool:
+    # 命令替换/进程替换可内嵌任意命令: 一票否决
+    if "$(" in seg or "`" in seg or "<(" in seg:
+        return False
+    # 重定向清理: fd 拷贝(2>&1)与 /dev/null 弃置无害; 之余还有 > 就是写文件
+    cleaned = re.sub(r"\d?[<>]&\d", "", seg)
+    cleaned = re.sub(r"\d*>>?\s*/dev/null", "", cleaned)
+    if ">" in cleaned:
+        return False
+    try:
+        tokens = shlex.split(cleaned, posix=True)
+    except ValueError:
+        return False
+    word = _first_word(tokens)
+    if not word or word == "sudo":
+        return False
+    if word == "cd":            # cd 不改文件内容; 相对读取按 workdir 解析
+        return True
+    if powershell:
+        return word in PS_READONLY_CMDLETS
+    if word == "git":
+        return _git_read_only(tokens[1:])
+    if word == "find":
+        return not any(t.lower() in _FIND_MUTATING_ACTIONS for t in tokens[1:])
+    if word == "sort":          # sort -o 写文件; 其余用法只读
+        return not any(t.lower().startswith("-o") for t in tokens[1:])
+    return word in READONLY_SHELL_COMMANDS
+
+
+def _git_read_only(rest: list) -> bool:
+    if not rest:
+        return False
+    sub = rest[0].lower()
+    if sub == "stash":          # 只有 list/show/stat 只读, push/pop/drop 动树
+        return len(rest) > 1 and rest[1].lower() in ("list", "show", "stat")
+    return sub in GIT_READONLY_SUBCOMMANDS
+
+
+def shell_command_is_read_only(tool_name: str, tool_input: str) -> bool:
+    """bash/powershell 调用是否确定性只读。解析失败/空命令/任何拿不准的
+    构造都返回 False（视为可能变异, 推进护栏序号——保守方向兜底）。"""
+    try:
+        params = json.loads(tool_input)
+        cmd = str(params.get("command") or "")
+    except Exception:
+        return False
+    if not cmd.strip():
+        return False
+    powershell = tool_name == "powershell"
+    return all(_segment_is_read_only(s, powershell)
+               for s in _split_shell_segments(cmd))
+
 REPEAT_WARN_TEXT = (
     "[System note] This is the 2nd time you ran this EXACT same read-only "
     "call, and nothing has been written since — the result is guaranteed "
@@ -73,6 +218,25 @@ REPEAT_DENIED_TEXT = (
     "specific path — or act on the results already in this conversation. "
     "If you suspect the content actually changed, verify that via a "
     "different tool (e.g. bash) rather than repeating this call."
+)
+
+# --- 结论检查点: 连续只读调用的节奏性自查提醒 ---
+# 提示词里已有"验证有停止规则"（prompt 的 Verification stopping rule）, 但对
+# flash 档模型约束力不足——实测结论已闭环（数据查到、判定链路清楚）后仍会
+# 连跑几十个只读调用去"再确认一点", 直到烧光预算。每累计 N 次只读调用, 在
+# 最新工具结果上附一条自查提醒: 证据够就立刻收尾。附在工具结果上而不新插
+# user 消息: 不污染会话展示层, 模型下一次请求也一定看得到。
+CONCLUSION_CHECKPOINT_EVERY = 16
+CONCLUSION_CHECKPOINT_TEXT = (
+    "[System note] That is {n} read-only calls in a row without a "
+    "user-facing answer. Checkpoint: an answer counts only when its "
+    "facts are verified — a plausible chain over unverified data is "
+    "still a hypothesis. If one decisive call would settle it (query "
+    "the DB row, read the config, check the actual record), run that "
+    "call NOW; handing the user a 'please run this and paste the "
+    "result' is acceptable only when you truly lack access. If the "
+    "chain is already closed by facts in hand, stop and write the "
+    "final answer — more sweeps of what you already have are waste."
 )
 
 # --- Token 用量追踪 ---
@@ -98,6 +262,7 @@ class UsageTracker:
     def __init__(self):
         self._turn_accum = TokenUsage()
         self._cumulative = TokenUsage()
+        self._last_call = TokenUsage()
         self._turns = 0
 
     def begin_turn(self):
@@ -106,6 +271,7 @@ class UsageTracker:
         self._turn_accum = TokenUsage()
 
     def record(self, usage: TokenUsage):
+        self._last_call = usage   # 单次口径: 最近一次调用原样保存, 不累加
         self._turn_accum.input_tokens += usage.input_tokens
         self._turn_accum.output_tokens += usage.output_tokens
         self._turn_accum.cache_creation_input_tokens += usage.cache_creation_input_tokens
@@ -121,8 +287,16 @@ class UsageTracker:
     def current_turn_usage(self) -> TokenUsage:
         """本轮（一次 run_turn）的累计用量: 多次 API 调用相加, 而非最近一次。
         旧实现返回 last-call, 曾让"预算已用尽"横幅旁挂着远小于阈值的单次
-        用量（如 5.1k vs 65k 阈值）, 读起来像预算在 5k 就误触发。"""
+        用量（如 5.1k vs 65k 阈值）, 读起来像预算在 5k 就误触发。
+        只对"输出预算"这类消耗型口径成立——上下文体积必须用 latest_call_usage。"""
         return self._turn_accum
+
+    def latest_call_usage(self) -> TokenUsage:
+        """最近一次 API 调用的单次用量（替换, 不累加）。上下文体积 =
+        该次调用的 input+缓存读写——每次调用的输入都携带全量历史, 单次
+        口径才是"此刻上下文多大"。跨 turn 不清零: 历史只增不减, 上一轮
+        末次调用就是本轮请求前的真实上下文。"""
+        return self._last_call
 
 
     def cumulative_usage(self) -> TokenUsage:
@@ -309,6 +483,11 @@ class ConversationRuntime:
         # 已被归档, 重读重新合法。并行执行进池线程, 访问须持锁。
         self._mutation_seq = 0
         self._read_calls: dict[tuple[str, str], tuple[int, int]] = {}
+        # 只读连击: 连续只读调用次数（变异调用清零, 新用户回合清零）。
+        # 跨过 CONCLUSION_CHECKPOINT_EVERY 的倍数档位时触发一次结论检查点;
+        # _checkpoint_mark 记已触发的档位——并行批次一次跨过倍数也能命中
+        self._readonly_streak = 0
+        self._checkpoint_mark = 0
         self._guard_lock = threading.Lock()
         # 事件镜像钩子（Web 端工具卡片闭合用, CLI 默认 None 行为不变）:
         # - on_tool_finalized: 工具未经执行就被终局（权限拒绝 / hook 拦截 /
@@ -435,20 +614,55 @@ class ConversationRuntime:
         return None, pre_res
 
     def _register_read_call(self, tool_name: str, tool_input: str) -> Optional[int]:
-        """护栏记账。纯读工具返回本次是第几次执行（1=首次）; 其他工具推进
-        变异序号并返回 None（不记账）。并行执行下持锁串行记账。"""
-        if tool_name not in PURE_READ_TOOLS:
+        """护栏记账 + 只读连击计数。纯读工具返回本次是第几次执行（1=首次）;
+        bash/powershell 只读命令不清零计数（ls/grep/git log 类探查不该
+        让护栏失忆——实测 bash 密集的会话里旧规则把护栏清成名存实亡）,
+        其余工具推进变异序号、清零连击, 返回 None。并行执行下持锁串行记账。"""
+        readonly = tool_name in PURE_READ_TOOLS or (
+            tool_name in MUTATING_SHELL_TOOLS
+            and shell_command_is_read_only(tool_name, tool_input))
+        if tool_name in PURE_READ_TOOLS:
+            key = (tool_name, tool_input)
             with self._guard_lock:
-                self._mutation_seq += 1
-            return None
-        key = (tool_name, tool_input)
+                count, at_seq = self._read_calls.get(key, (0, self._mutation_seq))
+                if at_seq != self._mutation_seq:
+                    count = 0               # 有写入介入: 结果会变, 视作首次
+                count += 1
+                self._read_calls[key] = (count, self._mutation_seq)
+                self._readonly_streak += 1
+                return count
         with self._guard_lock:
-            count, at_seq = self._read_calls.get(key, (0, self._mutation_seq))
-            if at_seq != self._mutation_seq:
-                count = 0               # 有写入介入: 结果会变, 视作首次
-            count += 1
-            self._read_calls[key] = (count, self._mutation_seq)
-            return count
+            if readonly:
+                self._readonly_streak += 1
+            else:
+                self._mutation_seq += 1
+                self._readonly_streak = 0
+                self._checkpoint_mark = 0
+        return None
+
+    def _maybe_conclusion_checkpoint(self, msgs: List[Message]) -> None:
+        """结论检查点: 只读连击跨过 CONCLUSION_CHECKPOINT_EVERY 的倍数档位
+        时（14→17 的并行批次也算跨过 16）, 把自查提醒附在最新的工具结果
+        输出上（不改 is_error, 不新增消息）。治"结论已闭环还在无限求证"
+        ——静态提示词的停止规则对弱模型约束力不足, 需要节奏性的机制提醒
+        在请求路径上兜底。模型全是 frozen 的: 用 model_copy 重建消息, 替换
+        列表槽位（不是原地篡改, 历史里旧对象由 GC 回收）。"""
+        with self._guard_lock:
+            streak = self._readonly_streak
+            tier = streak // CONCLUSION_CHECKPOINT_EVERY
+            if streak < CONCLUSION_CHECKPOINT_EVERY or tier <= self._checkpoint_mark:
+                return
+            self._checkpoint_mark = tier
+        note = "\n\n" + CONCLUSION_CHECKPOINT_TEXT.format(n=streak)
+        for idx in range(len(msgs) - 1, -1, -1):
+            msg = msgs[idx]
+            if msg.role != "tool" or not msg.content:
+                continue
+            block = msg.content[0]
+            if hasattr(block, "output") and CONCLUSION_CHECKPOINT_TEXT not in block.output:
+                new_block = block.model_copy(update={"output": block.output + note})
+                msgs[idx] = msg.model_copy(update={"content": [new_block]})
+            return
 
     def _execute_tool(self, tool_block: ToolContentBlock, pre_res: HookResult) -> Message:
         """执行管线: 工具本体 + Pre/Post hook 反馈合并 + 重复只读护栏。
@@ -540,9 +754,12 @@ class ConversationRuntime:
         ) == 0:
             return False
         self._compact_active = True
-        # 旧只读结果可能已被归档出模型视图: 重读重新合法, 护栏清零重记
+        # 旧只读结果可能已被归档出模型视图: 重读重新合法, 护栏清零重记;
+        # 压缩后模型需要重新取证, 结论检查点也重新计数, 别来添乱
         with self._guard_lock:
             self._read_calls.clear()
+            self._readonly_streak = 0
+            self._checkpoint_mark = 0
         if self._on_compacted is not None:
             try:
                 self._on_compacted()
@@ -555,6 +772,53 @@ class ConversationRuntime:
     # 切割+重算摘要; 未超余量就复用旧切割点, 保留区温和变长。没有这个
     # 余量, 激活后的每次迭代都会触发一次全量摘要重算。
     _COMPACT_RESUMMARY_MARGIN = 6
+
+    def _llm_summarize(self, archived: List[Message],
+                       prev_summary: Optional[str]) -> str:
+        """LLM 摘要 side-call: 把被归档的历史（或上一摘要+新归档增量）交给
+        模型生成结构化摘要。这是请求路径上的一次独立调用——
+        - 不进会话历史, usage 不进轮次累加器（不干扰预算/迭代口径）;
+        - include_tools=False: 摘要器不需要工具, 也不该有工具可调;
+        - emit_output=False: 摘要过程不在终端回放;
+        - thinking 用 low 档: 摘要是整理不是推理, 控制耗时。
+        任何失败（端点错误/打断/空返回/客户端不支持 side-call 参数）都
+        向上抛, 由 _build_compact_summary 回退规则摘要。"""
+        conv: List[Message] = []
+        if prev_summary:
+            conv.append(Message.user_text(
+                "Previous summary covering the earlier part of this "
+                "conversation:\n\n" + prev_summary))
+        conv.extend(archived)
+        conv.append(Message.user_text(SUMMARY_INSTRUCTION))
+        events = self._api_client.stream(
+            system_prompt=[SUMMARIZER_SYSTEM_PROMPT],
+            messages=conv,
+            thinking_level="low",
+            include_tools=False,
+            emit_output=False,
+        )
+        text = "".join(e.text for e in events
+                       if isinstance(e, TextDeltaEvent)).strip()
+        if not text:
+            raise ValueError("summarizer returned empty text")
+        return text
+
+    def _build_compact_summary(self, msgs: List[Message], keep_from: int) -> str:
+        """生成归档区摘要: LLM 摘要为主, 任何失败回退规则摘要。已有旧摘要
+        时只把增量部分（msgs[旧切割点:新切割点]）交给模型合并——重算发生在
+        会话已逼近阈值时, 全量重喂 750k 级历史既慢又贵。"""
+        prev_summary: Optional[str] = None
+        archived = msgs[:keep_from]
+        if self._compact_cache is not None:
+            cached_cut, cached_summary = self._compact_cache
+            if 0 < cached_cut < keep_from:
+                prev_summary = cached_summary
+                archived = msgs[cached_cut:keep_from]
+        try:
+            return self._llm_summarize(archived, prev_summary)
+        except Exception as e:
+            print(f"[WARN] llm summarize failed, fallback to rule-based: {e}")
+            return format_compact_summary(summarize_messages(msgs[:keep_from]))
 
     def _model_view(self) -> List[Message]:
         """给模型的会话视图: 压缩激活时 = [续接摘要] + 保留区(纯函数,
@@ -573,13 +837,18 @@ class ConversationRuntime:
         keep_from = cut_point(msgs, config)
         if keep_from == 0:
             return msgs
-        summary = format_compact_summary(summarize_messages(msgs[:keep_from]))
+        summary = self._build_compact_summary(msgs, keep_from)
         self._compact_cache = (keep_from, summary)
         return ([continuation_message(summary, preserved=True)]
                 + msgs[keep_from:])
 
     def _context_over_compact_threshold(self) -> bool:
-        latest = self.usage().current_turn_usage()
+        # 口径必须是"最近一次调用"的上下文体积: 每次调用的 input+缓存读写
+        # ≈ 该次请求携带的全量历史。若读 current_turn_usage()（按轮累加,
+        # 输出预算的正确口径）, 工具迭代 N 次就把 N 份上下文加在一起——
+        # 真实上下文 15~20k 时迭代几次即误触发压缩, 模型视图骤降为
+        # [摘要]+保留区, 表现为失忆→重读→死循环。
+        latest = self.usage().latest_call_usage()
         return latest.context_tokens() >= self._auto_compact_threshold
 
 
@@ -591,6 +860,9 @@ class ConversationRuntime:
         tool_results : list[Message] = []
         assistant_messages = []
         self.usage().begin_turn()    # 本轮用量归零（含思考）; 预算检查读同一累加器
+        with self._guard_lock:
+            self._readonly_streak = 0    # 新用户回合: 结论检查点连击重新计数
+            self._checkpoint_mark = 0
         budget_exhausted = False
         iterations_exhausted = False
         auto_compacted = False
@@ -717,6 +989,7 @@ class ConversationRuntime:
                 if tool_result_msg:
                     curr_session.messages.append(tool_result_msg)
                     tool_results.append(tool_result_msg)
+            self._maybe_conclusion_checkpoint(curr_session.messages)
             self._notify_iterate()   # 一致点: 本迭代的工具结果已全部回填
 
         if self._maybe_auto_compact():

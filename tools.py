@@ -728,7 +728,13 @@ def glob_tool(params: dict, workdir: Optional[str] = None) -> str:
         if truncated:
             break
     if not seen:
-        return f"No files found for pattern(s): {pattern}"
+        return (
+            f"No files found for pattern(s): {pattern}.\n"
+            "[System note] Zero hits means nothing under this root matches. "
+            "Do NOT retry near-identical patterns. Widen the glob "
+            "('--/**/*.ext'), point path at a parent directory, or list the "
+            "directory to see what is actually there."
+        )
     lines = list(seen.keys())
     if truncated:
         lines.append(f"... (truncated at {_MAX_LIST} files, refine the pattern)")
@@ -808,7 +814,15 @@ def grep_tool(params: dict, workdir: Optional[str] = None) -> str:
             break
 
     if not hits:
-        return f"No matches for /{pattern}/ in {target}"
+        return (
+            f"No matches for /{pattern}/ in {target}.\n"
+            "[System note] Zero matches means this pattern does not exist in "
+            "this scope. Do NOT re-issue the same search with cosmetic keyword "
+            "variations — that is how turns get burned. Change the approach "
+            "instead: widen or narrow the path/glob, search for an identifier "
+            "you already saw in earlier output, or open the most likely file "
+            "with read_file and navigate it."
+        )
     if truncated:
         hits.append(f"... (truncated at {_MAX_RESULTS} results, narrow the search)")
     if mode == "files_with_matches":

@@ -31,6 +31,13 @@ class ConfigError(Exception):
         super().__init__(message)
 
 
+# 模型上下文窗口默认值: GLM-5.3 官方端点为 1M tokens。第三方中转可能砍到
+# 128k/200k——配置 contextWindow 或 env CLAUDE_CONTEXT_WINDOW 调小,
+# auto-compact 阈值随之收缩（未显式配置时 = 窗口 × COMPACT_THRESHOLD_RATIO）。
+DEFAULT_CONTEXT_WINDOW = 1_000_000
+COMPACT_THRESHOLD_RATIO = 0.75
+
+
 def deep_merge(target: dict, source: dict) -> dict:
     result = dict(target)
 
@@ -52,17 +59,20 @@ class RuntimeFeatureConfig(BaseModel):
     # 默认与 runtime.DEFAULT_MAX_ITERATIONS 对齐。10 是历史占位值，
     # 接线前从未生效——真放出来正常任务一轮就会被掐断
     max_iterations: int = 128
+    # 模型上下文窗口（GLM-5.3 官方 1M; 第三方中转按实际窗口配）
+    context_window: int = DEFAULT_CONTEXT_WINDOW
     # auto-compact 触发阈值。必须明显低于模型真实上下文窗口（还要给
-    # max_tokens 留位），否则永远轮不到它触发——只会等 API 报 context length。
-    # 取 128k 窗口的 ~75%，上下文过半即压，避免长会话每步拖着巨量历史。
-    token_budget: int = 100_000
+    # max_tokens 留位）, 否则永远轮不到它触发——只会等 API 报 context
+    # length。未显式配置时 = context_window × COMPACT_THRESHOLD_RATIO,
+    # 在 parse_feature_config 里推导。
+    token_budget: int = int(DEFAULT_CONTEXT_WINDOW * COMPACT_THRESHOLD_RATIO)
     # 默认 high: 深思考质量优先。速度敏感场景按项目配 thinkingLevel 或
     # CLAUDE_THINKING_LEVEL 调低（low 明显更快——输出 tokens 是每步
     # 墙钟时间的主导项）。
     thinking_level: str = "high"
     # 单轮输出预算（含思考）。与 runtime.DEFAULT_TURN_OUTPUT_BUDGET 对齐:
     # 思考型模型一次大思考烧 8k~16k, 预算太紧会把轮次掐死在动手之前。
-    turn_token_budget: int = 131_072
+    turn_token_budget: int = 262_144
 
 class RuntimeConfig(BaseModel):
     merged: dict = Field(default_factory=dict)
@@ -96,6 +106,9 @@ class RuntimeConfig(BaseModel):
 
     def token_budget(self) -> int:
         return self.feature_config.token_budget
+
+    def context_window(self) -> int:
+        return self.feature_config.context_window
 
     def max_iterations(self) -> int:
         return self.feature_config.max_iterations
@@ -165,6 +178,24 @@ class ConfigLoader:
         ):
             raise ConfigError(f"thinkingLevel: unsupported level '{raw_level}'", kind="parse")
 
+        # context_window: 模型真实上下文窗口, 决定 auto-compact 阈值的
+        # 推导基数。tokenBudget 未显式配置时 = 窗口 × 0.75; 显式配置仍覆盖。
+        context_window = merged.get("contextWindow", DEFAULT_CONTEXT_WINDOW)
+        if not isinstance(context_window, int) or context_window <= 0:
+            raise ConfigError(
+                f"contextWindow: expected positive integer, got {context_window!r}",
+                kind="parse",
+            )
+        raw_budget = merged.get("tokenBudget")
+        if raw_budget is not None and (
+                not isinstance(raw_budget, int) or raw_budget <= 0):
+            raise ConfigError(
+                f"tokenBudget: expected positive integer, got {raw_budget!r}",
+                kind="parse",
+            )
+        token_budget = (raw_budget if raw_budget is not None
+                        else int(context_window * COMPACT_THRESHOLD_RATIO))
+
         return RuntimeFeatureConfig(
             hooks_pre_tool_use=pre,
             hooks_post_tool_use=post,
@@ -172,9 +203,10 @@ class ConfigLoader:
             permission_mode=permission_mode,
             timeout=merged.get("timeout", 30),
             max_iterations=merged.get("maxIterations", 128),
-            token_budget=merged.get("tokenBudget", 100_000),
+            context_window=context_window,
+            token_budget=token_budget,
             thinking_level=raw_level.strip().lower(),
-            turn_token_budget=merged.get("turnTokenBudget", 131_072),
+            turn_token_budget=merged.get("turnTokenBudget", 262_144),
         )
 
     @staticmethod
@@ -217,6 +249,7 @@ class ConfigLoader:
             "CLAUDE_MODEL": "model",
             "CLAUDE_TIMEOUT": ("timeout", int),
             "CLAUDE_MAX_ITERATIONS": ("maxIterations", int),
+            "CLAUDE_CONTEXT_WINDOW": ("contextWindow", int),
             "CLAUDE_TOKEN_BUDGET": ("tokenBudget", int),
             "CLAUDE_TURN_TOKEN_BUDGET": ("turnTokenBudget", int),
             "CLAUDE_THINKING_LEVEL": "thinkingLevel",

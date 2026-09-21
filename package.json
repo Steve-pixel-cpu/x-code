@@ -54,7 +54,7 @@
       ]
     },
     "win": {
-      "icon": "build/icon.ico",
+      "icon": "src-tauri/icons/icon.ico",
       "target": [
         {
           "target": "nsis",
