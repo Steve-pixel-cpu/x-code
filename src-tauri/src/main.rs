@@ -587,13 +587,14 @@ fn create_main_window(app: &AppHandle) -> Result<(), String> {
 /// 把 WebView2 的浏览器行为关成桌面应用形态:
 /// - 默认右键菜单（"刷新/返回/打印"等浏览器项）→ 前端自建菜单替代
 /// - 浏览器加速键（F5/Ctrl+R 刷新、Ctrl+P 打印、Ctrl+F 查找等）
+/// - 表单自动填充（搜索框上"保存的信息"弹层）
 ///
 /// 每次页面加载完成都调用: 一次性 with_webview 在窗口创建期有竞态
 /// （实测偶发不执行, debug-nav.txt 里可见）, on_page_load 则必然触发;
 /// Set* 幂等, 重复只是重申。设置是 webview 级的, 导航后持续生效。
 #[cfg(windows)]
 fn apply_desktop_webview_settings(win: &tauri::WebviewWindow) {
-    use webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2Settings3;
+    use webview2_com::Microsoft::Web::WebView2::Win32::{ICoreWebView2Settings3, ICoreWebView2Settings4};
     use windows::core::Interface;
 
     let scheduled = win.with_webview(|wv| {
@@ -604,6 +605,9 @@ fn apply_desktop_webview_settings(win: &tauri::WebviewWindow) {
                 settings.SetAreDefaultContextMenusEnabled(false)?;
                 let s3 = settings.cast::<ICoreWebView2Settings3>()?;
                 s3.SetAreBrowserAcceleratorKeysEnabled(false)?;
+                let s4 = settings.cast::<ICoreWebView2Settings4>()?;
+                s4.SetIsGeneralAutofillEnabled(false)?;
+                s4.SetIsPasswordAutosaveEnabled(false)?;
                 Ok(())
             })()
         };
