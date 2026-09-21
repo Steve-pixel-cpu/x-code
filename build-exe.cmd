@@ -1,10 +1,14 @@
 @echo off
 REM ============================================================
-REM x-code one-click packaging (target selectable via 1st arg):
-REM   build-exe.cmd            -> tauri (default)
-REM   build-exe.cmd tauri      -> Tauri 2 shell + frozen Python backend -> NSIS installer
-REM   build-exe.cmd electron   -> Electron shell + frozen Python backend -> NSIS + portable
-REM   build-exe.cmd both       -> run tauri, then electron
+REM x-code one-click packaging:
+REM   build-exe.cmd                 -> tauri, keep current version
+REM   build-exe.cmd tauri           -> Tauri 2 shell + frozen Python backend -> NSIS installer
+REM   build-exe.cmd electron        -> Electron shell + frozen Python backend -> NSIS + portable
+REM   build-exe.cmd both            -> run tauri, then electron
+REM   build-exe.cmd <ver>           -> set version (e.g. 1.0.6), target = tauri
+REM   build-exe.cmd tauri <ver>     -> set version, then build tauri
+REM Setting a version syncs tauri.conf.json, Cargo.toml, pyproject.toml
+REM (scripts\set-version.js) and package.json / package-lock.json (npm version).
 REM Shared steps:
 REM   [1/2] install PyInstaller into the project venv
 REM   [2/2] freeze server.py into build\server\x-code-server.exe
@@ -20,14 +24,30 @@ setlocal
 cd /d %~dp0
 
 set "TARGET=%~1"
+set "VERSION=%~2"
 if "%TARGET%"=="" set "TARGET=tauri"
+
+REM allow "build-exe.cmd 1.0.6" (version as 1st arg -> default target tauri)
+set "FIRST=%TARGET:~0,1%"
+if "%FIRST%" GEQ "0" if "%FIRST%" LEQ "9" set "VERSION=%TARGET%"
+if "%FIRST%" GEQ "0" if "%FIRST%" LEQ "9" set "TARGET=tauri"
+
 if /i "%TARGET%"=="tauri" goto :target_ok
 if /i "%TARGET%"=="electron" goto :target_ok
 if /i "%TARGET%"=="both" goto :target_ok
 echo Unknown target: %TARGET%
-echo Usage: build-exe.cmd [tauri^|electron^|both]  (default: tauri)
+echo Usage: build-exe.cmd [tauri^|electron^|both] [x.y.z]  (default: tauri)
 exit /b 1
 :target_ok
+
+if "%VERSION%"=="" goto :version_done
+echo.
+echo ====== [0/2] Setting version %VERSION% (tauri.conf.json, Cargo.toml, pyproject.toml, package.json) ======
+node scripts\set-version.js %VERSION%
+if errorlevel 1 exit /b 1
+call npm version %VERSION% --no-git-tag-version --allow-same-version
+if errorlevel 1 exit /b 1
+:version_done
 
 echo.
 echo ====== [1/2] Installing PyInstaller into project venv ======
@@ -56,6 +76,10 @@ if not exist build\server mkdir build\server
   server.py
 if errorlevel 1 exit /b 1
 
+REM clear stale artifacts (any version) so dist\ only holds the fresh build
+if not exist dist mkdir dist
+del /q "dist\x-code*.exe" >nul 2>&1
+
 if /i "%TARGET%"=="electron" goto :do_electron
 if /i "%TARGET%"=="both" goto :do_tauri
 :do_tauri
@@ -71,12 +95,9 @@ call npx tauri build
 if errorlevel 1 exit /b 1
 
 echo.
-echo Copying installer into dist\ and removing stale Electron artifacts...
-if not exist dist mkdir dist
+echo Copying installer into dist\...
 copy /y "src-tauri\target\release\bundle\nsis\x-code_*_x64-setup.exe" dist\ >nul
 if errorlevel 1 exit /b 1
-del /q "dist\x-code 0.1.0.exe" >nul 2>&1
-del /q "dist\x-code Setup 0.1.0.exe" >nul 2>&1
 if /i not "%TARGET%"=="both" goto :done
 
 :do_electron
@@ -94,7 +115,6 @@ if errorlevel 1 exit /b 1
 
 :done
 echo.
-if not exist dist mkdir dist
 echo Done. Artifacts in dist\:
 dir /b dist\*.exe
 endlocal

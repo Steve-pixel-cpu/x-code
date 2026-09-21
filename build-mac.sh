@@ -1,10 +1,25 @@
 #!/usr/bin/env bash
 # x-code macOS 打包: PyInstaller 冻结后端 + electron-builder 出 .dmg / .zip
+# 用法: ./build-mac.sh [x.y.z]   例: ./build-mac.sh 1.0.6
+#   传版本号会先同步 package.json / package-lock.json (npm version)、
+#   tauri.conf.json、Cargo.toml、pyproject.toml 再打包; 不传则维持当前版本。
 # 产物: dist/x-code-<版本>-<arch>.dmg (安装镜像) 与 .zip (免安装压缩包)
 # 依赖: uv, Node.js/npm —— 必须在 macOS 上运行
 #       (PyInstaller 与 DMG 均无法跨平台构建, Windows/Linux 上跑不了本脚本)
 set -euo pipefail
 cd "$(dirname "$0")"
+
+VERSION="${1:-}"
+if [ -n "$VERSION" ]; then
+  if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$ ]]; then
+    echo "Invalid version: $VERSION"
+    echo "Usage: ./build-mac.sh [x.y.z]   e.g. ./build-mac.sh 1.0.6"
+    exit 1
+  fi
+  echo "[0/4] Setting version $VERSION (package.json, tauri.conf.json, Cargo.toml, pyproject.toml)..."
+  npm version "$VERSION" --no-git-tag-version --allow-same-version
+  node scripts/set-version.js "$VERSION"
+fi
 
 echo "[1/4] Syncing project venv and installing PyInstaller..."
 uv sync
