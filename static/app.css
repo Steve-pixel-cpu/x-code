@@ -525,8 +525,19 @@
   .tb-icon { width: 17px; height: 17px; pointer-events: none; }
   .tb-name {
     font-size: calc(12.5px * var(--fs-ui)); font-weight: 600; color: var(--text-2);
-    letter-spacing: .2px; flex: 1;
+    letter-spacing: .2px;
   }
+  /* 版本徽标: 紧跟应用名后的小字胶囊, 弱化展示不抢标题栏视觉。
+     名字不再 flex:1 撑满（会把徽标推到最右边）, 撑满交给徽标后的
+     弹性占位 .tb-spring; 徽标隐藏(hidden)时 .tb-spring 照样占位 */
+  .tb-ver {
+    flex: none; margin-left: 2px; padding: 1.5px 7px;
+    font-size: calc(10.5px * var(--fs-ui)); font-weight: 500;
+    color: var(--text-3); background: var(--hover);
+    border: 1px solid var(--border); border-radius: 999px;
+    pointer-events: none; user-select: text; -webkit-user-select: text;
+  }
+  .tb-spring { flex: 1; }
   .tb-controls { display: flex; height: 100%; }
   .tb-btn {
     width: 46px; border: none; background: none; color: var(--text-2);

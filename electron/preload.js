@@ -3,6 +3,7 @@
 // - xcodePickFolder: 弹系统原生"选择文件夹"对话框, 返回绝对路径或 null
 // - xcodeReadClipboard: 读系统剪贴板文本（右键"粘贴"用——渲染层 execCommand('paste')
 //   受浏览器安全模型限制不可用, 必须经主进程 clipboard 模块读取）
+// - xcodeAppVersion: 应用版本号（electron-builder 从 package.json 打进包里）, 标题栏徽标用
 const { contextBridge, ipcRenderer } = require("electron");
 contextBridge.exposeInMainWorld("xcodeDesktop", true);
 contextBridge.exposeInMainWorld("xcodePickFolder", async () => {
@@ -10,4 +11,7 @@ contextBridge.exposeInMainWorld("xcodePickFolder", async () => {
 });
 contextBridge.exposeInMainWorld("xcodeReadClipboard", async () => {
   return await ipcRenderer.invoke("read-clipboard-text");
+});
+contextBridge.exposeInMainWorld("xcodeAppVersion", async () => {
+  return await ipcRenderer.invoke("get-app-version");
 });

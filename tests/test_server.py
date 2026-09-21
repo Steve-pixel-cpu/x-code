@@ -52,6 +52,15 @@ def test_settings_roundtrip_and_validation(client):
     r = client.get("/api/settings")
     assert r.json()["thinking_level"] == "low"
 
+    # 版本号徽标: 与 pyproject.toml 同源读取（不写死, 打包脚本会同步版本）
+    import re as _re
+    from pathlib import Path as _Path
+    expected = _re.search(r'^version\s*=\s*"([^"]+)"',
+                          (_Path(server.__file__).parent / "pyproject.toml").read_text(encoding="utf-8"),
+                          _re.M).group(1)
+    assert server._app_version() == expected
+    assert client.get("/api/settings").json()["app_version"] == expected
+
     # 非法值 400 且不改当前值
     tc = TestClient(server.app)
     r = tc.post("/api/settings", json={"thinking_level": "ultra"})

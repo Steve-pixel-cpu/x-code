@@ -60,7 +60,7 @@ if not exist build\server mkdir build\server
 .venv\Scripts\python.exe -m PyInstaller --noconfirm --clean --onefile ^
   --name x-code-server ^
   --distpath build\server --workpath build\pyinstaller --specpath build\pyinstaller ^
-  --add-data "%~dp0static;static" ^
+  --add-data "%~dp0static;static" --add-data "%~dp0pyproject.toml;." ^
   --hidden-import uvicorn.logging ^
   --hidden-import uvicorn.loops ^
   --hidden-import uvicorn.loops.asyncio ^

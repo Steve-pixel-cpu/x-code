@@ -455,6 +455,23 @@ const BRIDGE_JS: &str = r#"
   if (!window.xcodeDesktop) {
     Object.defineProperty(window, 'xcodeDesktop', { value: true });
   }
+  // 应用版本号桥: 标题栏徽标用。打包后的 Python 后端不带 pyproject.toml,
+  // 服务端读不到版本 → 壳内一律问壳自己。版本号由 Rust 在注入脚本头部
+  // 烤成 window.__XCODE_VERSION__（create_main_window 处拼接）, 这里直接读;
+  // invoke('plugin:app|version') 做兜底（remote 上下文的 ACL 曾实测拒掉该命令,
+  // 故不作为主路径）。
+  if (!window.xcodeAppVersion) {
+    window.xcodeAppVersion = async () => {
+      if (window.__XCODE_VERSION__) return window.__XCODE_VERSION__;
+      if (!window.__TAURI_INTERNALS__) return null;   // 页面在浏览器里预览: 无壳
+      try {
+        return await window.__TAURI_INTERNALS__.invoke('plugin:app|version');
+      } catch (e) {
+        console.error('[xcode] get app version 失败:', e);
+        return null;
+      }
+    };
+  }
   // 2) DOM 相关: 注入时机 documentElement 可能尚未创建 → 空值安全 + 就绪后补挂
   const installDom = () => {
     if (document.documentElement.dataset.xcodeDomInstalled) return;  // 重申幂等
@@ -590,6 +607,11 @@ fn create_main_window(app: &AppHandle) -> Result<(), String> {
     // 此前窗口要等后端就绪才创建——Python 冷启动约 3s, 用户对着空白。
     // 现在窗口秒开, bootstrap 完成后由启动线程导航到真正的应用地址。
     let app_for_nav = app.clone();   // 闭包要求 'static: 捕获克隆而非函数引用
+    // 版本号烤进注入脚本头部: 编译期常量（tauri.conf.json 的 version）,
+    // 前端 window.__XCODE_VERSION__ 直接读, 不经 IPC——remote 页面对
+    // plugin:app 命令的 ACL 曾实测不放行, invoke 路线不可靠。
+    let version = &app.package_info().version;
+    let bridge_js = format!("window.__XCODE_VERSION__ = '{version}';\n{BRIDGE_JS}");
     WebviewWindowBuilder::new(app, "main", WebviewUrl::App("loading.html".into()))
         .title("x-code")
         .decorations(false)   // 自绘标题栏: 高度可控, 主题跟随应用深浅色
@@ -608,7 +630,7 @@ fn create_main_window(app: &AppHandle) -> Result<(), String> {
         .inner_size(1440.0, 900.0)
         .min_inner_size(960.0, 600.0)
         .visible(false) // 页面就绪后再显示, 避免白屏闪烁
-        .initialization_script(BRIDGE_JS)
+        .initialization_script(&bridge_js)
         .on_navigation(move |url| {
             let s = url.as_str();
             // 内部导航放行: 后端地址（任意端口）+ tauri 内嵌资产 + 浏览器内部页。
@@ -628,12 +650,12 @@ fn create_main_window(app: &AppHandle) -> Result<(), String> {
                 open
             }
         })
-        .on_page_load(|win, payload| {
+        .on_page_load(move |win, payload| {
             if payload.event() == tauri::webview::PageLoadEvent::Finished {
                 let _ = win.show();
                 let _ = win.set_focus();
                 // 桥的重申: initialization_script 偶发不注入时在此兜底
-                let _ = win.eval(BRIDGE_JS);
+                let _ = win.eval(&bridge_js);
                 apply_desktop_webview_settings(&win);
             }
         })

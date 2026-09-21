@@ -218,6 +218,8 @@ if (!gotLock) {
   });
   // 系统剪贴板文本（渲染层右键"粘贴"用; execCommand('paste') 在渲染层被禁）
   ipcMain.handle("read-clipboard-text", () => clipboard.readText());
+  // 应用版本号: 标题栏徽标用（打包后从 package.json 读取）
+  ipcMain.handle("get-app-version", () => app.getVersion());
   app.on("second-instance", () => {
     if (win) {
       if (win.isMinimized()) win.restore();

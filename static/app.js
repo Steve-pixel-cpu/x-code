@@ -1125,7 +1125,7 @@ async function removeProject(wd, count) {
     if (!ok) return;
   } else {
     const ok = await confirmDialog(`移除项目「${name}」？仅从侧栏移除, 不影响磁盘文件。`,
-      { title: "移除项目", okText: "移除" });
+      { title: "移除项目", okText: "移除", danger: true });
     if (!ok) return;
   }
   // 有会话的项目: 逐个解绑; 失败的（如恰在对话中）跳过并提示, 项目保留
@@ -3170,6 +3170,15 @@ async function loadSettings() {
     if (s.icon_ver) { iconVer = s.icon_ver; applyIconEverywhere(iconUrl()); }
     if (s.bg_ver) { bgVer = s.bg_ver; syncBgLayers(); }
     else syncBgLayers();   // 服务端无壁纸: 走一遍以清掉本地残留标记的效果
+    // 标题栏版本徽标: 桌面壳优先（打包后的后端不带 pyproject.toml, 服务端读不到）,
+    // 服务端值兜底（浏览器/源码运行）。都拿不到就藏着, 不留空壳。
+    const ver = $("tb-version");
+    let v = null;
+    if (window.xcodeAppVersion) {
+      try { v = await window.xcodeAppVersion(); } catch (_) { /* 壳异常 → 兜底 */ }
+    }
+    if (!v) v = s.app_version || null;
+    if (ver && v) { ver.textContent = "v" + v; ver.hidden = false; }
   } catch (e) { console.error("加载设置失败", e); }
 }
 

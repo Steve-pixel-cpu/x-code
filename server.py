@@ -1202,6 +1202,32 @@ def _icon_ver() -> int:
         return 0
 
 
+_APP_VERSION: Optional[str] = None   # None = 尚未读取; "" = 两处来源都失败(前端隐藏徽标)
+
+
+def _app_version() -> str:
+    """应用版本号: 优先读源码旁的 pyproject.toml(开发/源码运行),
+    退包元数据(pip 安装); 打包壳里两者皆无则返回空串, 前端不显示徽标。
+    结果缓存——版本在进程生命周期内不变。"""
+    global _APP_VERSION
+    if _APP_VERSION is None:
+        ver = ""
+        try:
+            m = re.search(r'^version\s*=\s*"([^"]+)"',
+                          (Path(__file__).parent / "pyproject.toml").read_text(encoding="utf-8"),
+                          re.M)
+            if m:
+                ver = m.group(1)
+        except OSError:
+            pass
+        if not ver:
+            with suppress(Exception):
+                from importlib.metadata import version as _pkgver
+                ver = _pkgver("x-code")
+        _APP_VERSION = ver
+    return _APP_VERSION
+
+
 @app.get("/api/icon", include_in_schema=False)
 async def api_get_icon():
     """应用图标: 有用户上传件给上传件, 否则出厂兜底。"""
@@ -1480,6 +1506,7 @@ async def api_get_settings():
         "workspace": Path.cwd().name,
         "icon_ver": _icon_ver(),
         "bg_ver": _bg_ver(),
+        "app_version": _app_version(),   # 标题栏版本徽标; 空串 = 前端不显示
     }
 
 
