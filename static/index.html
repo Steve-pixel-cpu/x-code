@@ -7,14 +7,14 @@
 <title>x-code</title>
 <link rel="icon" type="image/png" href="/api/icon">
 <script>/* 桌面壳经 ?token= 打开页面: 把令牌种成 cookie, 后续 API/静态资源请求自动携带 */ (function(){try{var t=new URLSearchParams(location.search).get("token");if(t)document.cookie="xcode_token="+encodeURIComponent(t)+"; path=/; max-age=31536000; SameSite=Strict";}catch(e){}})();</script>
-<script>/* 主题/材质/壁纸在绘制前应用，避免闪白 (dark | light | system | acrylic | acrylic-light) */ (function(){var de=document.documentElement,p=localStorage.getItem("xc-theme")||"system",acrylic=(p==="acrylic"||p==="acrylic-light");de.dataset.theme=acrylic?(p==="acrylic"?"dark":"light"):(p==="system"&&window.matchMedia("(prefers-color-scheme: dark)").matches?"dark":"light");if(acrylic)de.dataset.fx="acrylic";var a=localStorage.getItem("xc-accent");if(a&&a!=="gray")de.dataset.accent=a;if(localStorage.getItem("xc-bg")==="1")de.dataset.bg="1";})();</script>
+<script>/* 主题/材质/壁纸在绘制前应用，避免闪白 (dark | light | system | acrylic | acrylic-light) */ (function(){var de=document.documentElement,p=localStorage.getItem("xc-theme")||"system",acrylic=(p==="acrylic"||p==="acrylic-light");de.dataset.theme=acrylic?(p==="acrylic"?"dark":"light"):(p==="system"&&window.matchMedia("(prefers-color-scheme: dark)").matches?"dark":"light");if(acrylic)de.dataset.fx="acrylic";var a=localStorage.getItem("xc-accent");if(a&&a!=="gray")de.dataset.accent=a;if(localStorage.getItem("xc-bg")==="1")de.dataset.bg="1";/* 壁纸亮度: 与 app.js applyBgBrightness 同一套公式, 绘制前设好防闪回默认 */var b=parseFloat(localStorage.getItem("xc-bg-bright"));if(!isFinite(b)||b<0||b>100)b=50;de.style.setProperty("--bg-dim",(2-b/50).toFixed(4));de.style.setProperty("--bg-surf",(1-.26*Math.max(-1,Math.min(1,(b-50)/50))).toFixed(4));})();</script>
 <!-- 渲染库本地化: jsdelivr 在国内时通时断, 同步 CDN 脚本一卡住, 整页解析
      阻塞、defer 的 app.js 永远不执行——表现为页面只剩骨架、点什么都没反应 -->
 <script src="/static/vendor/marked.umd.js"></script>
 <script src="/static/vendor/highlight.min.js"></script>
 <link rel="stylesheet" href="/static/vendor/katex.min.css">
 <script src="/static/vendor/katex.min.js"></script>
-<link rel="stylesheet" href="/static/app.css?v=20260922e">
+<link rel="stylesheet" href="/static/app.css?v=20260922f">
 </head>
 <body>
 
@@ -74,7 +74,7 @@
   <div id="music-dock" hidden>
     <div class="md-progress" id="music-seek"><span id="music-progress-fill"></span></div>
     <div class="md-row">
-      <img id="music-cover" src="/api/icon" alt="" draggable="false">
+      <div id="music-cover"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg></div>
       <div class="md-meta">
         <span id="music-title">未在播放</span>
         <span id="music-artist"></span>
@@ -280,6 +280,14 @@
       </div>
       <div class="set-row">
         <div class="set-info">
+          <div class="set-name">壁纸亮度</div>
+          <div class="set-desc">压暗层强度：50 为默认观感，调高更亮、调低更暗（仅开启壁纸后生效）</div>
+        </div>
+        <input type="range" id="bg-bright" min="0" max="100" step="1" value="50" aria-label="壁纸亮度">
+        <span class="bg-bright-val" id="bg-bright-val">50</span>
+      </div>
+      <div class="set-row">
+        <div class="set-info">
           <div class="set-name">界面字号</div>
           <div class="set-desc">整体界面文字大小，像素值 10–24，默认 14，清空恢复默认</div>
         </div>
@@ -383,7 +391,7 @@
   </div>
 </div>
 
-<script src="/static/app.js?v=20260922c" defer></script>
-<script src="/static/music.js?v=20260921b" defer></script>
+<script src="/static/app.js?v=20260922d" defer></script>
+<script src="/static/music.js?v=20260921c" defer></script>
 </body>
 </html>

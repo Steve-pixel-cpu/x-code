@@ -87,7 +87,6 @@
     if (s) {
       document.title = s.name + " - " + s.artist;   // 摸鱼: 标题栏只显示歌名
       if (s.pic) {
-        $("music-cover").src = s.pic;
         if ("mediaSession" in navigator) {
           try {
             navigator.mediaSession.metadata = new MediaMetadata({

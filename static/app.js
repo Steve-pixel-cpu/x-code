@@ -3290,6 +3290,7 @@ function bgPref() { return localStorage.getItem(BG_KEY) === "1"; }
 
 function syncBgLayers() {
   const on = bgPref() && bgVer > 0;
+  const bi = $("bg-bright"); if (bi) bi.disabled = !on;   // 无壁纸时滑块无意义
   if (on) document.documentElement.dataset.bg = "1";
   else delete document.documentElement.dataset.bg;
   if (!on) {
@@ -3631,11 +3632,44 @@ bindFsInput("fs-ui-input", FS_UI_KEY, FS_UI_BASE, FS_UI_RANGE);
 bindFsInput("fs-code-input", FS_CODE_KEY, FS_CODE_BASE, FS_CODE_RANGE);
 applyFontSize();
 
+/* ---------- 壁纸亮度: 0-100 滑块, 50=默认观感, 持久化 localStorage ----------
+ * 只缩放压暗层(遮罩 alpha / 亚克力 tint / 表面不透明度), 不动实底卡片:
+ * --bg-dim = 2 - v/50 (v=50→1 现状, v=100→0 不压暗, v=0→2 加倍压暗)
+ * --bg-surf = 1 - 0.26*clamp((v-50)/50) 限幅 (v>50 更透更亮, v<50 更实更暗;
+ *   用减号: 若用加号 v=100 会算出 1.26, color-mix 份额超 100% 被归一化成全实底)
+ * 注意: index.html head 预绘制脚本复制了同一套公式, 改这里必须同步改那边 */
+const BG_BRIGHT_KEY = "xc-bg-bright";
+const BG_BRIGHT_DEFAULT = 50;
+function bgBrightPref() {
+  const v = parseFloat(localStorage.getItem(BG_BRIGHT_KEY));
+  return Number.isFinite(v) && v >= 0 && v <= 100 ? v : BG_BRIGHT_DEFAULT;
+}
+function applyBgBrightness() {
+  const v = bgBrightPref();
+  const st = document.documentElement.style;
+  st.setProperty("--bg-dim", (2 - v / 50).toFixed(4));
+  st.setProperty("--bg-surf", (1 - 0.26 * Math.max(-1, Math.min(1, (v - 50) / 50))).toFixed(4)); // 与 index.html 预绘制脚本同步
+  const inp = $("bg-bright"), out = $("bg-bright-val");
+  if (inp) { inp.value = String(v); out.textContent = String(v); }
+}
+{
+  const inp = $("bg-bright");
+  inp.addEventListener("input", () => {
+    const v = Math.round(parseFloat(inp.value));
+    localStorage.setItem(BG_BRIGHT_KEY, String(v));
+    applyBgBrightness();
+  });
+  inp.addEventListener("keydown", ev => ev.stopPropagation()); // 别冒泡成全局快捷键
+}
+applyBgBrightness();
+
 /* ---------- 设置页视图切换: 侧栏换设置导航, 主区换设置内容 ---------- */
 function openSettings() {
   themeDd.setValue(themePref());   // 每次打开回显当前值
   $("fs-ui-input").value = String(fsUiPref());
   $("fs-code-input").value = String(fsCodePref());
+  $("bg-bright").value = String(bgBrightPref());
+  $("bg-bright-val").textContent = String(bgBrightPref());
   syncAccentInput();
   loadProviders().then(renderProviderSettings);   // 拉取供应商配置并渲染
   $("sidebar").classList.add("settings-view");
