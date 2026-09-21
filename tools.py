@@ -375,6 +375,7 @@ def read_tool(params: dict, workdir: Optional[str] = None) -> str:
     except OSError as e:
         return f'ERROR: cannot read {path}: {e}'
     total = len(lines)
+    _record_read_state(path, "".join(lines))   # FileStateCache: 全文口径建档（分页读也算读过）
     try:
         offset = int(params.get("offset") or 1)
         limit = int(params.get("limit") or 0)
@@ -409,9 +410,72 @@ def _unified_diff(old_text: str, new_text: str, path: str) -> str:
         fromfile=f"a/{path}", tofile=f"b/{path}"))
 
 
+# --- FileStateCache: 读后状态记录（借鉴 Claude FileEditTool 的 stale write guard）---
+# 事故驱动: 模型用 write_file "改一处"，实际只写了一行把整个 index.html 覆盖毁掉。
+# 有了 edit_file（精准替换）+ read-before-write 之后这条路径被堵死；stale 检查
+# 再挡住"读之后文件被外部改动"的静默覆盖。
+# 口径: 读与校验统一用 errors="replace" 解码算 hash，保证两边对得上。
+# 跨会话共享本模块级 state: 方向保守（最多多拦一次要求重读），可接受。
+_FILE_STATE: dict = {}          # 绝对路径 -> 读取时的内容 sha256
+_FILE_STATE_LOCK = threading.Lock()
+_FILE_STATE_CAP = 500           # 简单上限: 超过清最老的（dict 保插入序）
+
+
+def _content_hash(text: str) -> str:
+    import hashlib
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _disk_text(path) -> Optional[str]:
+    """按统一口径读磁盘文本; 文件不存在返回 None。"""
+    try:
+        return path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+
+
+def _record_read_state(path, text: str) -> None:
+    with _FILE_STATE_LOCK:
+        _FILE_STATE[str(path)] = _content_hash(text)
+        if len(_FILE_STATE) > _FILE_STATE_CAP:
+            for k in list(_FILE_STATE)[:len(_FILE_STATE) - _FILE_STATE_CAP]:
+                _FILE_STATE.pop(k, None)
+
+
+def _check_write_allowed(path) -> Optional[str]:
+    """写前校验（edit_file / 覆盖型 write_file 共用）。返回错误消息或 None。
+    规则: ① 覆盖已存在文件必须本会话读过（read-before-write）;
+    ② 读过但磁盘内容已变（stale）→ 拒绝并要求重读。"""
+    with _FILE_STATE_LOCK:
+        recorded = _FILE_STATE.get(str(path))
+    current = _disk_text(path)
+    current_hash = _content_hash(current) if current is not None else None
+    if recorded is None:
+        # ① 没读过: 已存在的文件拒绝, 新文件放行
+        if path.exists():
+            return (
+                f"REFUSED — {path} exists but has not been read in this "
+                "session. Read it first with read_file, then retry; for "
+                "targeted changes use edit_file (old_string → new_string "
+                "replacement) instead of overwriting the whole file."
+            )
+        return None
+    # ② 读过: 磁盘当前内容 vs 读取时记录（文件被删也走这条, hash 为 None）
+    if current_hash != recorded:
+        return (
+            f"REFUSED — File has been modified since read: {path}. "
+            "Read it again to refresh, then retry."
+        )
+    return None
+
+
 def write_tool(params: dict, workdir: Optional[str] = None) -> str:
     path = resolve_path(params.get('path', ''), workdir)
     content = params.get('content', '')
+    # 覆盖已存在文件: 必须 read 过 + 内容未过期（新文件创建不受限）
+    refused = _check_write_allowed(path)
+    if refused:
+        return refused
     existed = path.exists()
     old_text = ""
     if existed:
@@ -427,6 +491,7 @@ def write_tool(params: dict, workdir: Optional[str] = None) -> str:
         return f'ERROR: directory not found {path}'
     except OSError as e:
         return f'ERROR: cannot write {path}: {e}'
+    _record_read_state(path, content)   # 写后刷新档案, 后续编辑以新内容为基准
 
     new_lines = len(content.splitlines())
     if content and not content.endswith(NL):
@@ -441,6 +506,60 @@ def write_tool(params: dict, workdir: Optional[str] = None) -> str:
         diff = _unified_diff(old_text, content, str(path))
         if diff:
             meta["diff"] = diff[:8000]
+    return ToolOutput(summary).with_meta(meta)
+
+
+def edit_file_tool(params: dict, workdir: Optional[str] = None) -> str:
+    """精准编辑: old_string → new_string 的字面替换（Claude FileEditTool
+    同款语义）。局部改动的唯一正确工具——不整写文件, 不碰其余内容。
+    old_string 必须逐字复制自文件（含缩进与空白）; 多处命中需扩充上下文
+    或 replace_all。写前走 FileStateCache 校验（先读 + 未过期）。"""
+    path = resolve_path(params.get('path', ''), workdir)
+    old = params.get('old_string', '')
+    new = params.get('new_string', '')
+    replace_all = bool(params.get('replace_all'))
+    if not old:
+        return "ERROR: old_string is required"
+    if old == new:
+        return "ERROR: old_string and new_string are identical — nothing to change"
+    if not path.exists():
+        return (f"ERROR: file not found: {path} "
+                f"(new files are created with write_file)")
+    refused = _check_write_allowed(path)
+    if refused:
+        return refused
+    current = _disk_text(path)
+    if current is None:
+        return f"ERROR: cannot read {path}"
+    count = current.count(old)
+    if count == 0:
+        return (f"ERROR: old_string not found in {path}. Copy it verbatim "
+                f"from the file — mind whitespace and indentation — or "
+                f"read_file the relevant range first.")
+    if count > 1 and not replace_all:
+        return (f"ERROR: old_string matches {count} places in {path}. "
+                f"Extend it with more surrounding context to make it "
+                f"unique, or set 'replace_all': true.")
+    new_text = (current.replace(old, new) if replace_all
+                else current.replace(old, new, 1))
+    try:
+        with open(path, 'w', encoding="utf-8") as f:
+            f.write(new_text)
+    except OSError as e:
+        return f'ERROR: cannot write {path}: {e}'
+    _record_read_state(path, new_text)   # 写后刷新档案
+    replaced = count if replace_all else 1
+    delta = len(new_text) - len(current)
+    summary = (f"OK: edited {path} ({replaced} replacement"
+               f"{'s' if replaced > 1 else ''}, {delta:+d} chars)")
+    new_lines = len(new_text.splitlines())
+    if new_text and not new_text.endswith(NL):
+        new_lines += 1
+    meta: dict = {"path": str(path), "created": False,
+                  "lines": new_lines, "chars": len(new_text)}
+    diff = _unified_diff(current, new_text, str(path))
+    if diff:
+        meta["diff"] = diff[:8000]
     return ToolOutput(summary).with_meta(meta)
 
 
@@ -728,7 +847,13 @@ def glob_tool(params: dict, workdir: Optional[str] = None) -> str:
         if truncated:
             break
     if not seen:
-        return f"No files found for pattern(s): {pattern}"
+        return (
+            f"No files found for pattern(s): {pattern}.\n"
+            "[System note] Zero hits means nothing under this root matches. "
+            "Do NOT retry near-identical patterns. Widen the glob "
+            "('--/**/*.ext'), point path at a parent directory, or list the "
+            "directory to see what is actually there."
+        )
     lines = list(seen.keys())
     if truncated:
         lines.append(f"... (truncated at {_MAX_LIST} files, refine the pattern)")
@@ -808,7 +933,15 @@ def grep_tool(params: dict, workdir: Optional[str] = None) -> str:
             break
 
     if not hits:
-        return f"No matches for /{pattern}/ in {target}"
+        return (
+            f"No matches for /{pattern}/ in {target}.\n"
+            "[System note] Zero matches means this pattern does not exist in "
+            "this scope. Do NOT re-issue the same search with cosmetic keyword "
+            "variations — that is how turns get burned. Change the approach "
+            "instead: widen or narrow the path/glob, search for an identifier "
+            "you already saw in earlier output, or open the most likely file "
+            "with read_file and navigate it."
+        )
     if truncated:
         hits.append(f"... (truncated at {_MAX_RESULTS} results, narrow the search)")
     if mode == "files_with_matches":

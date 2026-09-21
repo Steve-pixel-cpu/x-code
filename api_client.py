@@ -52,6 +52,7 @@ class UsageInfo(BaseModel):
 class MessageStopEvent(BaseModel):
     type: Literal['message_stop'] = 'message_stop'
     usage: Optional[UsageInfo] = None
+    stop_reason: Optional[str] = None   # "end_turn" | "max_tokens" | ... 截断自愈靠它
 
 
 AssistantEvent = TextDeltaEvent | ToolUseEvent | MessageStopEvent
@@ -301,10 +302,13 @@ class ClaudeApiClient(ApiClient):
         self.thinking_level = level
 
     def _build_kwargs(self, converted_messages: list[dict], system_prompt: list[str],
-                      thinking_level: Optional[str], use_cache: bool) -> dict:
+                      thinking_level: Optional[str], use_cache: bool,
+                      include_tools: bool = True) -> dict:
         """组装请求参数。use_cache 时打三处 cache_control 断点: tools 末位、
         system 静态段、messages 最后一块（滚动断点）。滚动断点让"上一迭代结束
-        时的全部历史"成为下一调用的缓存前缀, 全价只付一次。"""
+        时的全部历史"成为下一调用的缓存前缀, 全价只付一次。
+        include_tools=False 用于非会话调用的 side-call（如压缩摘要器）:
+        不给工具可调, 也不把工具声明白白算进输入。"""
         static, dynamic = _split_system_prompt(system_prompt)
         system_blocks: list[dict] = []
         if static:
@@ -322,7 +326,7 @@ class ClaudeApiClient(ApiClient):
         }
         if system_blocks:
             kwargs["system"] = system_blocks
-        if self.tools:
+        if self.tools and include_tools:
             # 浅拷贝: 断点不能写进多会话共享的 spec 列表
             tools = [dict(t) for t in self.tools]
             if use_cache:
@@ -349,22 +353,29 @@ class ClaudeApiClient(ApiClient):
         return kwargs
 
     def stream(self, system_prompt: list[str], messages: list[Message],
-               thinking_level: Optional[str] = None) -> List[AssistantEvent]:
+               thinking_level: Optional[str] = None, *,
+               include_tools: bool = True,
+               emit_output: Optional[bool] = None) -> List[AssistantEvent]:
         """thinking_level 可选参数: 多会话共用 client 时, 每轮调用携带
         自己会话的思考等级, 避免共享实例状态互相串。None = 用实例默认
-        （CLI 单会话语义不变）。"""
+        （CLI 单会话语义不变）。
+        include_tools=False / emit_output=None 供 side-call（压缩摘要器）
+        使用: 不带工具声明、不在终端回放。emit_output None = 用实例默认。"""
         events: List[AssistantEvent] = []
         converted_messages = _convert_message(messages)
         level = thinking_level if thinking_level is not None else self.thinking_level
         kwargs = self._build_kwargs(converted_messages, system_prompt, level,
-                                    use_cache=self._cache_control_ok)
+                                    use_cache=self._cache_control_ok,
+                                    include_tools=include_tools)
+        emit = self.emit_output if emit_output is None else emit_output
         streaming_text = False      # 正在流式输出正式回复文本
         streaming_thinking = False  # 思考指示器行正在原地刷新（仅终端，不进事件流）
         thinking_chars = 0          # 当前思考块累计字符数
         # token 用量: input 侧在 message_start，output 侧在 message_delta。
         # output_tokens 含思考 tokens——思考文本不进历史，但用量进，循环层预算靠它。
         usage_acc: dict = {}
-        if self.emit_output and sys.stdout.isatty():
+        stop_reason: Optional[str] = None   # message_delta 报 stop_reason, message_stop 落事件
+        if emit and sys.stdout.isatty():
             _ensure_ansi()
 
         out = sys.stdout
@@ -433,7 +444,7 @@ class ClaudeApiClient(ApiClient):
 
                 elif event.type == 'content_block_delta':
                     if event.delta.type == 'text_delta':
-                        if self.emit_output:
+                        if emit:
                             # 思考→正文衔接：指示器行已在 content_block_start 收尾，
                             # 这里保证正文前光标在新行即可
                             streaming_thinking = _end_thinking_indicator(out, streaming_thinking)
@@ -451,7 +462,7 @@ class ClaudeApiClient(ApiClient):
                         # 思考内容只驱动指示器（暗灰、\r 原地刷新），绝不 append 进
                         # events 列表：一旦进入就会被存入会话历史并重放，污染上下文
                         thinking_chars += len(event.delta.thinking)
-                        if self.emit_output:
+                        if emit:
                             streaming_text = _stop_text_line(out, streaming_text)
                             if not streaming_thinking:
                                 out.write(ANSI_DIM)
@@ -482,23 +493,25 @@ class ClaudeApiClient(ApiClient):
                     usage = getattr(event, "usage", None)
                     if usage is not None:
                         _collect_usage(usage_acc, usage)
-                    if self.emit_output:
+                    if emit:
                         streaming_thinking = _end_thinking_indicator(out, streaming_thinking)
                         streaming_text = _stop_text_line(out, streaming_text)
                     if event.delta.stop_reason == "max_tokens":
-                        if self.emit_output:
+                        if emit:
                             out.write("输出被 max_tokens 截断!")
+                    stop_reason = getattr(event.delta, "stop_reason", None) or stop_reason
 
                 elif event.type == 'message_stop':
                     streaming_thinking = _end_thinking_indicator(out, streaming_thinking)
                     streaming_text = _stop_text_line(out, streaming_text)
-                    if self.emit_output:
+                    if emit:
                         # 收尾无条件复位 ANSI 样式，防止灰色泄漏到正式输出
                         out.write(ANSI_RESET)
                         out.flush()
 
                     events.append(MessageStopEvent(
                         usage=UsageInfo(**usage_acc) if usage_acc else None,
+                        stop_reason=stop_reason,
                     ))
         finally:
             stack.close()

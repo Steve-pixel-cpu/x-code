@@ -265,7 +265,7 @@ def test_build_runtime_wires_loop_budgets():
 # ------------------------------------------------------------
 
 def test_config_turn_token_budget_default(tmp_path):
-    assert ConfigLoader(cwd=tmp_path, config_home=tmp_path).load().turn_token_budget() == 131_072
+    assert ConfigLoader(cwd=tmp_path, config_home=tmp_path).load().turn_token_budget() == 262_144
 
 
 def test_config_turn_token_budget_env_override(tmp_path, monkeypatch):
@@ -288,6 +288,56 @@ def test_iterations_exhausted_appends_notice():
     roles = [m.role for m in runtime.session().messages]
     assert roles[-1] == "user"
     assert "iteration limit" in runtime.session().messages[-1].content[0].text
+
+
+# ------------------------------------------------------------
+# max_tokens 截断自愈 — 恢复提示继续循环（借鉴 Claude Code: "Resume
+# directly — no apology, no recap"）, 最多 3 次
+# ------------------------------------------------------------
+
+def _truncated_events() -> list:
+    return [
+        TextDeltaEvent(text="partial"),
+        MessageStopEvent(usage=UsageInfo(input_tokens=100, output_tokens=5_000),
+                         stop_reason="max_tokens"),
+    ]
+
+
+def test_max_tokens截断注入恢复提示继续循环():
+    client = ScriptedClient([_truncated_events(), make_events("done", out_tokens=10)])
+    runtime = make_runtime(client)
+
+    runtime.run_turn("hi")
+
+    roles = [m.role for m in runtime.session().messages]
+    assert roles == ["user", "assistant", "user", "assistant"]
+    notice = runtime.session().messages[2].content[0].text
+    assert "Output token limit hit" in notice
+    assert "no apology, no recap" in notice
+    assert client.calls == 2                      # 恢复后继续, 第二次正常收尾
+
+
+def test_截断恢复最多3次后收束():
+    client = ScriptedClient([_truncated_events()] * 5)
+    runtime = make_runtime(client)
+
+    summary = runtime.run_turn("hi")
+
+    notices = [m for m in runtime.session().messages
+               if m.role == "user" and "Output token limit hit" in m.content[0].text]
+    assert len(notices) == 3                      # 恢复上限
+    assert client.calls == 4                      # 首发 + 3 次恢复, 之后收束
+    assert summary.budget_exhausted is False
+
+
+def test_正常结束不带截断标记不受影响():
+    client = ScriptedClient([make_events("done", out_tokens=10)])
+    runtime = make_runtime(client)
+
+    runtime.run_turn("hi")
+
+    roles = [m.role for m in runtime.session().messages]
+    assert roles == ["user", "assistant"]         # 无恢复提示插入
 
 
 # ------------------------------------------------------------
@@ -351,4 +401,6 @@ def test_summary_preserves_assistant_findings_verbatim():
 
     assert result.removed_count > 0
     assert conclusion in result.formatted_summary   # 结论逐字活着
-    assert "do NOT re-verify" in result.formatted_summary
+    # 提示语不再与证据缺失自相矛盾: 不许重读 → 改为"需要精确内容再重读"
+    assert "settled results" in result.formatted_summary
+    assert "do NOT re-verify" not in result.formatted_summary

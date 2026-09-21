@@ -10,11 +10,15 @@ messages 为 [续接摘要] + 保留区; **会话历史本身不被改写**—�
   返回 False。
 - 曾经压缩会原地替换 session.messages 并重写会话文件——展示层被迫跟着
   显示一整面摘要墙。现为请求期视图, 历史原样保留。
+- 曾经触发口径读的是"本轮 usage 累加和"（current_turn_usage）——单轮
+  工具迭代 N 次就把 N 份上下文加在一起, 真实上下文 15~20k 时迭代几次
+  即误触发压缩。现口径 = 最近一次 API 调用的 input+缓存读写
+  （latest_call_usage）, 与"此刻上下文多大"对齐。
 
 运行: uv run pytest tests/test_auto_compact_signal.py -v
 """
 
-from api_client import MessageStopEvent, TextDeltaEvent, UsageInfo
+from api_client import MessageStopEvent, TextDeltaEvent, ToolUseEvent, UsageInfo
 from models import Message, Session
 from permissions import ALLOW_MODE, PermissionPolicy
 from runtime import ConversationRuntime
@@ -108,6 +112,47 @@ def test_auto_compact_over_threshold_but_nothing_removable_is_false():
     )
     # 视图 = 调用时刻的全量历史（仅 user"hi", assistant 尚未产生）
     assert client.seen[0] == runtime.session().messages[:1]
+
+
+# ------------------------------------------------------------
+# 触发口径 — 最近一次调用的上下文体积, 不是本轮 usage 累加和
+# （单轮迭代 N 次不能把 N 份上下文加在一起）
+# ------------------------------------------------------------
+
+def _tool_events(in_tokens: int) -> list:
+    return [
+        ToolUseEvent(id="t1", name="bash", input='{"command": "ls"}'),
+        MessageStopEvent(usage=UsageInfo(input_tokens=in_tokens, output_tokens=10)),
+    ]
+
+
+def test_单轮多次迭代_累加用量不触发压缩_只看最近一次():
+    """回归钉: 旧口径读 current_turn_usage()（按轮累加, 输出预算的正确口径,
+    却被压缩判断误用）。8 次迭代 × 每次 15k input, 累计 121k 远超 100k 阈值,
+    但每次调用的真实上下文只有 15~16k——正确行为是全程不压缩。旧实现会在
+    第 8 次迭代顶部误触发, 视图骤降为 [摘要]+保留区。"""
+    session = Session(messages=[Message.user_text(f"旧消息{i} " + "x" * 40) for i in range(12)])
+    client = ScriptedClient(
+        [_tool_events(15_000)] * 7
+        + [make_events("ok", out_tokens=10, in_tokens=16_000)]
+    )
+    runtime = make_runtime(session, client, threshold=100_000)
+
+    summary = runtime.run_turn("hi")
+
+    # 累计口径已超阈值, 但单次口径从未超 → 全程不压缩
+    assert runtime.usage().current_turn_usage().input_tokens == 7 * 15_000 + 16_000
+    assert runtime.usage().current_turn_usage().input_tokens >= 100_000
+    assert summary.auto_compacted is False
+    assert runtime._compact_active is False
+    # 每次请求都是当时的全量历史（12 旧 + user + 每迭代 assistant/tool 各一）,
+    # 没有任何一次被换成压缩视图
+    for i, view in enumerate(client.seen):
+        assert len(view) == 13 + 2 * i
+        assert all(
+            "continued from a previous conversation" not in b.text
+            for m in view for b in m.content if hasattr(b, "text")
+        )
 
 
 # ------------------------------------------------------------

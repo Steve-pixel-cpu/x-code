@@ -3,10 +3,17 @@
 ## 一键打包
 
 ```cmd
-build-exe.cmd
+build-exe.cmd            REM 默认: Tauri 壳
+build-exe.cmd tauri      REM 同上, 显式指定
+build-exe.cmd electron   REM Electron 壳 (NSIS 安装包 + portable 免安装版)
+build-exe.cmd both       REM 两种都打
 ```
 
-产物在 `dist\`：
+两种壳共用同一条后端流水线：装 PyInstaller → 把 `server.py` 冻结成
+`build\server\x-code-server.exe`（`static/` 已打入），之后按目标分别走 Tauri 或
+electron-builder。产物统一在 `dist\`。
+
+### Tauri（默认）
 
 | 文件 | 说明 |
 |---|---|
@@ -16,8 +23,21 @@ build-exe.cmd
 启动时 Tauri 拉起 `resources\server\x-code-server.exe`（默认监听 127.0.0.1:8000），
 WebView2 窗口加载本地服务；如果 8000 端口已有 x-code 在跑则直接复用，不重复拉进程。
 
-> 已从 Electron 迁移到 Tauri（安装包从 ~133MB 降到 ~28MB）。Electron 相关的
-> `electron/`、`node_modules`、`package.json` 保留但不再参与打包，后续可清理。
+### Electron（`electron` / `both` 参数）
+
+| 文件 | 说明 |
+|---|---|
+| `x-code Setup 0.1.0.exe` | NSIS 安装包 |
+| `x-code 0.1.0.exe` | portable 免安装版，双击即用 |
+
+技术栈：**Electron 壳（自带 Chromium）+ 同一个冻结后端**（electron-builder 经
+`extraResources` 自动把 `build\server` 打进安装包）。运行行为与 Tauri 版一致：
+端口探测/复用、令牌门禁、单实例都由 `electron/main.js` 提供。
+需要 Rust 工具链的只有 Tauri 目标；Electron 目标只依赖 Node.js。
+体积较大（~130MB+），但不需要系统 WebView2。
+
+> 项目已从 Electron 迁移到 Tauri（安装包从 ~133MB 降到 ~28MB），Tauri 仍是默认目标。
+> Electron 壳保留为可选项：`build-exe.cmd electron` 即可启用，无需清理相关文件。
 
 ## 端口自动避让
 
@@ -57,7 +77,7 @@ UTF-8 不经转码；PowerShell 5.1 的 cmdlet 会按 ANSI(GBK) 转码，读 UTF
 
 | 文件 | 作用 |
 |---|---|
-| `build-exe.cmd` | 一键打包入口：装 PyInstaller → 冻结后端 → cargo tauri build |
+| `build-exe.cmd` | 一键打包入口：装 PyInstaller → 冻结后端 → 按目标走 Tauri 或 Electron 打包 |
 | `build/server/x-code-server.exe` | PyInstaller 产物（中间产物），`static/` 已打入 exe 内部 |
 | `src-tauri/tauri.conf.json` | Tauri 配置：窗口、NSIS 打包、后端 exe 经 `bundle.resources` 进安装包 |
 | `src-tauri/src/main.rs` | 桌面壳主体：探活/拉后端/整树杀、令牌门禁、单实例、外部链接转系统浏览器 |

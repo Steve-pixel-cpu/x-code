@@ -65,6 +65,34 @@ def _clean_snippet(text: str, limit: int) -> str:
     return text[:limit] + ("…" if len(text) > limit else "")
 
 
+# --- LLM 摘要（压缩主路径） ---
+# 摘要由一次独立的 side-call 生成: 被归档历史原样喂给模型 + 下面的指令。
+# 规则摘要（summarize_messages）只作端点故障时的回退——正则抽取留不住
+# 工具结果里的证据（文件内容/命令输出）, 那正是压缩后"失忆重读循环"的根源。
+SUMMARIZER_SYSTEM_PROMPT = (
+    "You are a conversation summarizer for a coding agent. Produce dense, "
+    "factual summaries for a successor agent that will continue the work "
+    "with no other context. Write in the same language as the conversation. "
+    "Output only the summary."
+)
+
+SUMMARY_INSTRUCTION = (
+    "Write the summary of this conversation for a successor agent who will "
+    "continue the work with no other context. If a previous summary of the "
+    "earlier part was provided above, merge it with the newer messages into "
+    "one updated summary; otherwise summarize the whole conversation. "
+    "Be specific and factual: preserve exact file paths, line numbers, "
+    "commands, error messages and code identifiers — anything you omit is "
+    "lost forever, but do not pad. Use these sections (skip empty ones):\n"
+    "1. Primary request and intent (the user's ask, key phrases verbatim)\n"
+    "2. Key technical context (project layout, stack, constraints)\n"
+    "3. Files and code (path + what matters in each, with line numbers)\n"
+    "4. Errors and fixes\n"
+    "5. Settled conclusions (verified facts and decisions)\n"
+    "6. Pending work and the immediate next step"
+)
+
+
 def summarize_messages(msgs: List[Message]) -> str:
     """
     将一组消息压缩成摘要。
@@ -197,8 +225,9 @@ def summarize_messages(msgs: List[Message]) -> str:
 
     if findings:
         lines.append("- Findings and conclusions stated by the assistant "
-                     "(verbatim, oldest first — these are settled results, "
-                     "do NOT re-verify or re-read their sources):")
+                     "(verbatim, oldest first — settled results, cite them "
+                     "directly; raw tool outputs were archived, re-read the "
+                     "source only if you need exact content):")
         for i, finding in enumerate(findings, 1):
             lines.append(f"  {i}. {finding}")
 
