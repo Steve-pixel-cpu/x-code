@@ -291,6 +291,56 @@ def test_iterations_exhausted_appends_notice():
 
 
 # ------------------------------------------------------------
+# max_tokens 截断自愈 — 恢复提示继续循环（借鉴 Claude Code: "Resume
+# directly — no apology, no recap"）, 最多 3 次
+# ------------------------------------------------------------
+
+def _truncated_events() -> list:
+    return [
+        TextDeltaEvent(text="partial"),
+        MessageStopEvent(usage=UsageInfo(input_tokens=100, output_tokens=5_000),
+                         stop_reason="max_tokens"),
+    ]
+
+
+def test_max_tokens截断注入恢复提示继续循环():
+    client = ScriptedClient([_truncated_events(), make_events("done", out_tokens=10)])
+    runtime = make_runtime(client)
+
+    runtime.run_turn("hi")
+
+    roles = [m.role for m in runtime.session().messages]
+    assert roles == ["user", "assistant", "user", "assistant"]
+    notice = runtime.session().messages[2].content[0].text
+    assert "Output token limit hit" in notice
+    assert "no apology, no recap" in notice
+    assert client.calls == 2                      # 恢复后继续, 第二次正常收尾
+
+
+def test_截断恢复最多3次后收束():
+    client = ScriptedClient([_truncated_events()] * 5)
+    runtime = make_runtime(client)
+
+    summary = runtime.run_turn("hi")
+
+    notices = [m for m in runtime.session().messages
+               if m.role == "user" and "Output token limit hit" in m.content[0].text]
+    assert len(notices) == 3                      # 恢复上限
+    assert client.calls == 4                      # 首发 + 3 次恢复, 之后收束
+    assert summary.budget_exhausted is False
+
+
+def test_正常结束不带截断标记不受影响():
+    client = ScriptedClient([make_events("done", out_tokens=10)])
+    runtime = make_runtime(client)
+
+    runtime.run_turn("hi")
+
+    roles = [m.role for m in runtime.session().messages]
+    assert roles == ["user", "assistant"]         # 无恢复提示插入
+
+
+# ------------------------------------------------------------
 # 压缩摘要缓存 — 切割点未推进超余量时复用旧摘要, 保留区温和变长;
 # 推进超余量才重算。钉住: 摘要生成是"每若干条消息一次", 不是每请求一次
 # ------------------------------------------------------------

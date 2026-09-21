@@ -16,11 +16,12 @@ from compact import (
     SUMMARY_INSTRUCTION,
     continuation_message,
     cut_point,
+    estimate_session_tokens,
     format_compact_summary,
     summarize_messages,
 )
 from hooks import HookRunner, HookResult
-from models import Message, TextContentBlock, AnyContentBlock, ToolContentBlock, Session
+from models import Message, TextContentBlock, AnyContentBlock, ToolContentBlock, ToolResultContentBlock, Session
 from permissions import PermissionMode, PermissionPolicy, PermissionPrompter, PermissionDecision
 from prompt import PLAN_MODE_SECTION, SYSTEM_PROMPT_DYNAMIC_BOUNDARY
 
@@ -220,23 +221,58 @@ REPEAT_DENIED_TEXT = (
     "different tool (e.g. bash) rather than repeating this call."
 )
 
-# --- 结论检查点: 连续只读调用的节奏性自查提醒 ---
-# 提示词里已有"验证有停止规则"（prompt 的 Verification stopping rule）, 但对
-# flash 档模型约束力不足——实测结论已闭环（数据查到、判定链路清楚）后仍会
-# 连跑几十个只读调用去"再确认一点", 直到烧光预算。每累计 N 次只读调用, 在
-# 最新工具结果上附一条自查提醒: 证据够就立刻收尾。附在工具结果上而不新插
-# user 消息: 不污染会话展示层, 模型下一次请求也一定看得到。
+# --- 结论检查点: 本回合调用时钟的节奏性对靶提醒 ---
+# 治"忘记自己的目标是啥"（实测 v2 教训）: 模型查库实锤后转入支线
+# （反编译 NuGet 包确认辅助链路），连跑 20+ 条 sqlcmd/python/grep——这些
+# 命令在变异判定里全是"可能改状态"，旧设计把检查点时钟挂在"只读连击"
+# 上，每条都被清零，检查点在唯一需要它的螺旋里全程失明。
+# 现在时钟 = 本回合全部工具调用数（与变异判定解耦, 仅新用户回合清零），
+# 提醒正文直接引用原始问题: "此刻做的事在回答它, 还是途中自创的支线?"
 CONCLUSION_CHECKPOINT_EVERY = 16
 CONCLUSION_CHECKPOINT_TEXT = (
-    "[System note] That is {n} read-only calls in a row without a "
-    "user-facing answer. Checkpoint: an answer counts only when its "
-    "facts are verified — a plausible chain over unverified data is "
-    "still a hypothesis. If one decisive call would settle it (query "
-    "the DB row, read the config, check the actual record), run that "
-    "call NOW; handing the user a 'please run this and paste the "
-    "result' is acceptable only when you truly lack access. If the "
-    "chain is already closed by facts in hand, stop and write the "
-    "final answer — more sweeps of what you already have are waste."
+    "[System note] Pacing checkpoint — {n} tool calls this turn. "
+    'Your original question: "{q}". Re-read it: is your current action '
+    "answering THAT, or a side-question you invented along the way? "
+    "If the evidence in hand already answers it, stop and write the "
+    "final answer now. If one decisive call would settle the remaining "
+    "uncertainty, run it yourself and close — do not hand the user "
+    "homework. Auxiliary certainty (side-quests) can wait or be "
+    "skipped: the user asked one thing."
+)
+
+# --- MicroCompact: 旧工具结果清除（借鉴 Claude Code microCompact 设计）---
+# 工具结果是上下文膨胀的主力（读文件/命令输出动辄上万 token）。窗口再大,
+# 注意力也随上下文线性稀释, 缓存读成本随之线性上涨。把保留窗口之外的
+# 高产出可复现工具结果替换为占位符——块结构原样保留, tool_use/tool_result
+# 配对不破坏。触发用估算 token 软阈值: 超限一次性清掉旧的, 视图随即稳定
+# （缓存不再反复失效）, 直到新内容再次长过阈值。
+MICROCOMPACT_TRIGGER_TOKENS = 60_000
+MICROCOMPACT_KEEP_RECENT = 8        # 最近 N 条工具结果原文保留
+MICROCOMPACT_MIN_CHARS = 1_000      # 太短的结果不值得清（省不了几个 token）
+MICROCOMPACT_PLACEHOLDER = "[Old tool result content cleared]"
+# 可清除白名单: 高产出、可复现（重跑命令/重读文件即可拿回）。todo/plan/
+# agent 等低产出或不可复现的结果不动。
+MICROCOMPACT_COMPACTABLE_TOOLS = frozenset({
+    "read_file", "grep", "glob", "bash", "powershell",
+    "web_search", "web_fetch",
+})
+
+# --- 压缩后文件重注入（借鉴 Claude Code post-compact restore）---
+# 压缩摘要保结论, 但文件原文不进去。把归档区里最近读过的文件随续接消息
+# 带回, 模型不必为"看手上这点事"立刻重读——压缩后重读循环的第三道闸:
+# 摘要保结论 / 重注入供原文 / 护栏拦重复。
+POST_COMPACT_MAX_FILES = 5
+POST_COMPACT_CHARS_PER_FILE = 5_000
+
+# --- max_tokens 截断自愈（借鉴 Claude Code 原文设计）---
+# 输出被 max_tokens 掐断且没有工具调用时, 注入恢复提示继续循环而不是
+# 直接结束轮次——恢复提示明确禁止道歉和复述（那会烧更多输出 token 使
+# 问题恶化）。最多恢复 3 次, 防止无限循环。
+MAX_OUTPUT_TOKENS_RECOVERY = 3
+OUTPUT_TRUNCATED_NOTICE = (
+    "[System note] Output token limit hit mid-response. Resume directly "
+    "from where the output stopped — no apology, no recap, no repeating "
+    "what you already wrote."
 )
 
 # --- Token 用量追踪 ---
@@ -483,10 +519,12 @@ class ConversationRuntime:
         # 已被归档, 重读重新合法。并行执行进池线程, 访问须持锁。
         self._mutation_seq = 0
         self._read_calls: dict[tuple[str, str], tuple[int, int]] = {}
-        # 只读连击: 连续只读调用次数（变异调用清零, 新用户回合清零）。
-        # 跨过 CONCLUSION_CHECKPOINT_EVERY 的倍数档位时触发一次结论检查点;
-        # _checkpoint_mark 记已触发的档位——并行批次一次跨过倍数也能命中
-        self._readonly_streak = 0
+        # 本回合调用时钟: 所有工具调用都 +1（与变异判定解耦——sqlcmd/
+        # python 这类"可能改状态"的命令恰是排查螺旋的主力, 若挂在只读
+        # 连击上会被反复清零, 检查点在唯一需要它的地方失明, 见
+        # CONCLUSION_CHECKPOINT 注释）。仅新用户回合/压缩激活清零
+        self._turn_call_clock = 0
+        # 已触发的档位: 并行批次一次跨过倍数也要命中
         self._checkpoint_mark = 0
         self._guard_lock = threading.Lock()
         # 事件镜像钩子（Web 端工具卡片闭合用, CLI 默认 None 行为不变）:
@@ -629,37 +667,35 @@ class ConversationRuntime:
                     count = 0               # 有写入介入: 结果会变, 视作首次
                 count += 1
                 self._read_calls[key] = (count, self._mutation_seq)
-                self._readonly_streak += 1
+                self._turn_call_clock += 1
                 return count
         with self._guard_lock:
-            if readonly:
-                self._readonly_streak += 1
-            else:
+            self._turn_call_clock += 1
+            if not readonly:
                 self._mutation_seq += 1
-                self._readonly_streak = 0
-                self._checkpoint_mark = 0
         return None
 
-    def _maybe_conclusion_checkpoint(self, msgs: List[Message]) -> None:
-        """结论检查点: 只读连击跨过 CONCLUSION_CHECKPOINT_EVERY 的倍数档位
-        时（14→17 的并行批次也算跨过 16）, 把自查提醒附在最新的工具结果
-        输出上（不改 is_error, 不新增消息）。治"结论已闭环还在无限求证"
-        ——静态提示词的停止规则对弱模型约束力不足, 需要节奏性的机制提醒
-        在请求路径上兜底。模型全是 frozen 的: 用 model_copy 重建消息, 替换
-        列表槽位（不是原地篡改, 历史里旧对象由 GC 回收）。"""
+    def _maybe_conclusion_checkpoint(self, msgs: List[Message],
+                                     question: str) -> None:
+        """结论检查点: 本回合调用时钟跨过 CONCLUSION_CHECKPOINT_EVERY 的
+        倍数档位时（14→19 的并行批次也算跨过 16）, 把对靶提醒附在最新的
+        工具结果输出上（不改 is_error, 不新增消息）。提醒引用原始问题,
+        强制模型自查"此刻在回答用户, 还是在跑自创支线"。模型全是 frozen
+        的: 用 model_copy 重建消息, 替换列表槽位。"""
         with self._guard_lock:
-            streak = self._readonly_streak
-            tier = streak // CONCLUSION_CHECKPOINT_EVERY
-            if streak < CONCLUSION_CHECKPOINT_EVERY or tier <= self._checkpoint_mark:
+            n = self._turn_call_clock
+            tier = n // CONCLUSION_CHECKPOINT_EVERY
+            if n < CONCLUSION_CHECKPOINT_EVERY or tier <= self._checkpoint_mark:
                 return
             self._checkpoint_mark = tier
-        note = "\n\n" + CONCLUSION_CHECKPOINT_TEXT.format(n=streak)
+        q = " ".join((question or "").split())[:160]
+        note = "\n\n" + CONCLUSION_CHECKPOINT_TEXT.format(n=n, q=q)
         for idx in range(len(msgs) - 1, -1, -1):
             msg = msgs[idx]
             if msg.role != "tool" or not msg.content:
                 continue
             block = msg.content[0]
-            if hasattr(block, "output") and CONCLUSION_CHECKPOINT_TEXT not in block.output:
+            if hasattr(block, "output") and "[System note] Pacing checkpoint" not in block.output:
                 new_block = block.model_copy(update={"output": block.output + note})
                 msgs[idx] = msg.model_copy(update={"content": [new_block]})
             return
@@ -755,10 +791,10 @@ class ConversationRuntime:
             return False
         self._compact_active = True
         # 旧只读结果可能已被归档出模型视图: 重读重新合法, 护栏清零重记;
-        # 压缩后模型需要重新取证, 结论检查点也重新计数, 别来添乱
+        # 压缩后模型需要重新取证, 调用时钟与检查点一并清零留出宽限期
         with self._guard_lock:
             self._read_calls.clear()
-            self._readonly_streak = 0
+            self._turn_call_clock = 0
             self._checkpoint_mark = 0
         if self._on_compacted is not None:
             try:
@@ -820,27 +856,98 @@ class ConversationRuntime:
             print(f"[WARN] llm summarize failed, fallback to rule-based: {e}")
             return format_compact_summary(summarize_messages(msgs[:keep_from]))
 
+    def _microcompact_view(self, view: List[Message]) -> List[Message]:
+        """MicroCompact: 估算 token 超过软阈值时, 把保留窗口之外的可复现
+        工具结果替换为占位符（块结构与 role 原样, 配对不破坏）。纯视图
+        操作——session.messages 不动, 展示层看不到占位符。清完即稳定:
+        视图骤降, 直到新内容再次长过阈值才动下一次, 缓存不会反复失效。"""
+        if estimate_session_tokens(view) <= MICROCOMPACT_TRIGGER_TOKENS:
+            return view
+        result_slots = [
+            i for i, m in enumerate(view)
+            if m.role == "tool" and len(m.content) == 1
+            and isinstance(m.content[0], ToolResultContentBlock)
+            and m.content[0].name in MICROCOMPACT_COMPACTABLE_TOOLS
+            and len(m.content[0].output) >= MICROCOMPACT_MIN_CHARS
+        ]
+        keep = set(result_slots[-MICROCOMPACT_KEEP_RECENT:])
+        out = list(view)
+        changed = False
+        for i in result_slots:
+            if i in keep:
+                continue
+            m, block = out[i], out[i].content[0]
+            if block.output == MICROCOMPACT_PLACEHOLDER:
+                continue
+            new_block = block.model_copy(update={"output": MICROCOMPACT_PLACEHOLDER})
+            out[i] = m.model_copy(update={"content": [new_block]})
+            changed = True
+        return out if changed else view
+
+    def _post_compact_restore_text(self, archived: List[Message]) -> str:
+        """压缩后文件重注入: 从归档区收集最近读过的文件（最多 5 个, 每个
+        截 5k 字符）, 随续接摘要带回。相对路径按 cwd 解析（CLI 场景与工具
+        执行一致; 解析/读取失败静默跳过——重注入是便利, 不是正确性依赖）。"""
+        paths: List[str] = []
+        for m in reversed(archived):
+            if len(paths) >= POST_COMPACT_MAX_FILES:
+                break
+            if m.role != "assistant":
+                continue
+            for b in m.content:
+                if isinstance(b, ToolContentBlock) and b.name == "read_file":
+                    try:
+                        p = str(json.loads(b.input).get("path") or "")
+                    except Exception:
+                        continue
+                    if p and p not in paths:
+                        paths.append(p)
+                    if len(paths) >= POST_COMPACT_MAX_FILES:
+                        break
+        if not paths:
+            return ""
+        sections: List[str] = []
+        for p in paths:
+            try:
+                fp = Path(p)
+                if not fp.is_absolute():
+                    fp = Path.cwd() / fp
+                text = fp.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            snippet = text[:POST_COMPACT_CHARS_PER_FILE]
+            more = "\n[... truncated ...]" if len(text) > len(snippet) else ""
+            sections.append(f"### {p}\n{snippet}{more}")
+        if not sections:
+            return ""
+        return ("\n\n## Recently read files (re-injected verbatim — do not "
+                "re-read unless you need a different range):\n\n"
+                + "\n\n".join(sections))
+
     def _model_view(self) -> List[Message]:
         """给模型的会话视图: 压缩激活时 = [续接摘要] + 保留区(纯函数,
         摘要按切割点缓存), 否则原样返回全量历史。展示层永远读全量——
-        压缩只影响模型。"""
+        压缩只影响模型。两个分支出口都过 microcompact（旧工具结果清除）。"""
         msgs = self._session.messages
         if not self._compact_active:
-            return msgs
+            return self._microcompact_view(msgs)
         config = CompactionConfig(max_estimated_tokens=0)
         if self._compact_cache is not None:
             cached_cut, cached_summary = self._compact_cache
             if (cached_cut > 0 and len(msgs) - cached_cut
                     <= config.preserve_recent_messages + self._COMPACT_RESUMMARY_MARGIN):
-                return ([continuation_message(cached_summary, preserved=True)]
-                        + msgs[cached_cut:])
+                return self._microcompact_view(
+                    [continuation_message(cached_summary, preserved=True)]
+                    + msgs[cached_cut:])
         keep_from = cut_point(msgs, config)
         if keep_from == 0:
-            return msgs
-        summary = self._build_compact_summary(msgs, keep_from)
+            return self._microcompact_view(msgs)
+        summary = (self._build_compact_summary(msgs, keep_from)
+                   + self._post_compact_restore_text(msgs[:keep_from]))
         self._compact_cache = (keep_from, summary)
-        return ([continuation_message(summary, preserved=True)]
+        view = ([continuation_message(summary, preserved=True)]
                 + msgs[keep_from:])
+        return self._microcompact_view(view)
 
     def _context_over_compact_threshold(self) -> bool:
         # 口径必须是"最近一次调用"的上下文体积: 每次调用的 input+缓存读写
@@ -861,11 +968,12 @@ class ConversationRuntime:
         assistant_messages = []
         self.usage().begin_turn()    # 本轮用量归零（含思考）; 预算检查读同一累加器
         with self._guard_lock:
-            self._readonly_streak = 0    # 新用户回合: 结论检查点连击重新计数
+            self._turn_call_clock = 0    # 新用户回合: 调用时钟/检查点重新计数
             self._checkpoint_mark = 0
         budget_exhausted = False
         iterations_exhausted = False
         auto_compacted = False
+        output_recoveries = 0    # max_tokens 截断恢复已用次数
 
         # 附件（图片/文本文件）经 Message.user_input 组装成 image/file 块;
         # CLI 调用点不传附件, 行为不变
@@ -912,7 +1020,10 @@ class ConversationRuntime:
                 messages=self._model_view(),
                 thinking_level=self._thinking_level,
             )
-            message,token_usage = build_assistant_message(events)
+            message, token_usage = build_assistant_message(events)
+            truncated = any(
+                isinstance(e, MessageStopEvent) and e.stop_reason == "max_tokens"
+                for e in events)
             assistant_messages.append(message)
             if token_usage:
                 self.usage().record(usage=token_usage)
@@ -924,6 +1035,15 @@ class ConversationRuntime:
                     tool_use_blocks.append(block)
 
             if not tool_use_blocks:
+                # max_tokens 截断自愈: 输出被掐断且没有工具调用时, 注入恢复
+                # 提示继续循环（恢复提示禁止道歉/复述——那会烧更多输出 token
+                # 使问题恶化）。最多恢复 3 次, 之后按普通收束结束轮次。
+                if truncated and output_recoveries < MAX_OUTPUT_TOKENS_RECOVERY:
+                    output_recoveries += 1
+                    curr_session.messages.append(
+                        Message.user_text(OUTPUT_TRUNCATED_NOTICE))
+                    self._notify_iterate()
+                    continue
                 break
 
             # 授权串行（交互式 prompter 逐个弹问）, 执行并行: 同一条消息里
@@ -989,7 +1109,7 @@ class ConversationRuntime:
                 if tool_result_msg:
                     curr_session.messages.append(tool_result_msg)
                     tool_results.append(tool_result_msg)
-            self._maybe_conclusion_checkpoint(curr_session.messages)
+            self._maybe_conclusion_checkpoint(curr_session.messages, user_input)
             self._notify_iterate()   # 一致点: 本迭代的工具结果已全部回填
 
         if self._maybe_auto_compact():

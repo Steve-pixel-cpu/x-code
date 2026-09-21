@@ -225,24 +225,27 @@ def test_powershell_同规则():
 
 
 # ------------------------------------------------------------
-# 结论检查点 — 只读连击跨过阈值档位时, 自查提醒附在最新工具结果上。
-# 按调用-检查点的节奏模拟 run_turn（检查点在每批工具结果回填后调用）
+# 结论检查点 — 本回合调用时钟跨过阈值档位时, 对靶提醒（引用原始问题）
+# 附在最新工具结果上。按调用-检查点的节奏模拟 run_turn（检查点在每批
+# 工具结果回填后调用）
 # ------------------------------------------------------------
 
 from hooks import HookResult
 from models import ToolContentBlock
 
+QUESTION = "马乐不是企业知识库管理员，有切部门的功能。排查一下原因"
 
-def _step(rt, msgs: list, name: str, inp: str, i: int):
+
+def _step(rt, msgs: list, name: str, inp: str, i: int, q: str = QUESTION):
     """执行一次工具并回填检查点（= run_turn 每迭代的收尾动作）。"""
     block = ToolContentBlock(id=f"t{i}", name=name, input=inp)
     msg = rt._execute_tool(block, HookResult(messages=[], denied=False))
     msgs.append(msg)
-    rt._maybe_conclusion_checkpoint(msgs)
+    rt._maybe_conclusion_checkpoint(msgs, q)
     return msg
 
 
-def test_只读连击跨过阈值触发结论检查点():
+def test_调用时钟跨过阈值触发检查点_附原始问题引述():
     from runtime import CONCLUSION_CHECKPOINT_EVERY as EVERY
 
     ex = RecordingExecutor()
@@ -253,9 +256,11 @@ def test_只读连击跨过阈值触发结论检查点():
         _step(rt, msgs, "read_file", f'{{"path": "f{i}.py"}}', i)
 
     # 检查点重建消息替换列表槽位, 断言对准 msgs（会话视角）
-    assert "Checkpoint" not in msgs[EVERY - 2].content[0].output
-    assert "Checkpoint" in msgs[-1].content[0].output
+    assert "Pacing checkpoint" not in msgs[EVERY - 2].content[0].output
+    assert "Pacing checkpoint" in msgs[-1].content[0].output
     assert msgs[-1].content[0].is_error is False      # 提醒不是错误
+    # 提醒引用原始问题, 逼模型对靶自查
+    assert QUESTION in msgs[-1].content[0].output
 
 
 def test_检查点按倍数档位重复触发():
@@ -268,7 +273,7 @@ def test_检查点按倍数档位重复触发():
     for i in range(EVERY * 2 + 1):
         _step(rt, msgs, "read_file", f'{{"path": "f{i}.py"}}', i)
 
-    fired = ["Checkpoint" in m.content[0].output for m in msgs]
+    fired = ["Pacing checkpoint" in m.content[0].output for m in msgs]
     assert fired[EVERY - 1] is True                   # 第 16 次: 跨过 16 档, 触发
     assert not any(fired[EVERY:EVERY * 2 - 1])        # 档位之间保持安静
     assert fired[EVERY * 2 - 1] is True               # 第 32 次: 跨过 32 档, 再触发
@@ -276,7 +281,7 @@ def test_检查点按倍数档位重复触发():
 
 
 def test_并行批次跨过档位也触发():
-    """一批 5 个调用把连击从 14 推到 19: 19 % 16 != 0, 按"取模"判定会
+    """一批 5 个调用把时钟从 14 推到 19: 19 % 16 != 0, 按"取模"判定会
     永远错过——按"跨档"判定必须命中。"""
     from runtime import CONCLUSION_CHECKPOINT_EVERY as EVERY
 
@@ -286,30 +291,60 @@ def test_并行批次跨过档位也触发():
 
     for i in range(EVERY - 2):
         _step(rt, msgs, "read_file", f'{{"path": "f{i}.py"}}', i)
-    assert not any("Checkpoint" in m.content[0].output for m in msgs)
+    assert not any("Pacing checkpoint" in m.content[0].output for m in msgs)
 
-    for i in range(5):                                # 连击 14 → 19, 跨过 16
+    for i in range(5):                                # 时钟 14 → 19, 跨过 16
         _step(rt, msgs, "read_file", f'{{"path": "g{i}.py"}}', EVERY + i)
 
-    # 提醒落在连击到 16 的那条结果上（0 基槽位 15）, 其余干净
-    assert "Checkpoint" in msgs[EVERY - 1].content[0].output
-    assert not any("Checkpoint" in m.content[0].output
+    # 提醒落在时钟到 16 的那条结果上（0 基槽位 15）, 其余干净
+    assert "Pacing checkpoint" in msgs[EVERY - 1].content[0].output
+    assert not any("Pacing checkpoint" in m.content[0].output
                    for i, m in enumerate(msgs) if i != EVERY - 1)
 
 
-def test_变异调用清零连击_检查点重新计数():
+def test_sqlcmd_python螺旋不清零时钟_检查点照常触发():
+    """v2 实测回归钉: 查库实锤后模型转入支线, 连跑 sqlcmd/python 反编译
+    ——这些命令在变异判定里全是"可能改状态", 旧设计把检查点时钟挂在只读
+    连击上被反复清零, 检查点在唯一需要它的螺旋里全程失明。时钟与变异判定
+    解耦后, 混合螺旋照常计数、照常触发。"""
     from runtime import CONCLUSION_CHECKPOINT_EVERY as EVERY
 
     ex = RecordingExecutor()
     rt = make_runtime(ex)
     msgs: list = []
 
-    seq = [("read_file", f'{{"path": "f{i}.py"}}') for i in range(EVERY - 1)]
-    seq += [("bash", '{"command": "rm build.log"}'), READ]
-    for i, (name, inp) in enumerate(seq):
+    spiral = [("read_file", '{"path": "a.cs"}')] * 6
+    spiral += [("bash", '{"command": "sqlcmd -S db -Q \\"select 1\\""}'),
+               ("bash", '{"command": "python - <<EOF\\nprint(1)\\nEOF"}')]
+    spiral += [("grep", '{"pattern": "x"}')] * 3
+    spiral += [("bash", '{"command": "strings a.dll | grep IsSystemManager"}')]
+    spiral += [("read_file", '{"path": "b.cs"}')] * 4   # 共 16 个调用
+
+    for i, (name, inp) in enumerate(spiral):
         _step(rt, msgs, name, inp, i)
 
-    assert all("Checkpoint" not in m.content[0].output for m in msgs)
+    fired = ["Pacing checkpoint" in m.content[0].output for m in msgs]
+    assert fired[-1] is True                          # 时钟 16: 螺旋里照常触发
+    assert not any(fired[:-1])
+
+
+def test_新回合时钟重置_检查点重新计数():
+    from runtime import CONCLUSION_CHECKPOINT_EVERY as EVERY
+
+    ex = RecordingExecutor()
+    rt = make_runtime(ex)
+    msgs: list = []
+
+    for i in range(EVERY):
+        _step(rt, msgs, "read_file", f'{{"path": "f{i}.py"}}', i)
+    assert "Pacing checkpoint" in msgs[-1].content[0].output
+
+    # 新用户回合: run_turn 顶部会清零时钟。这里手动模拟清零后的行为
+    rt._turn_call_clock = 0
+    rt._checkpoint_mark = 0
+    msg = _step(rt, msgs, "read_file", '{"path": "next.py"}', 99)
+
+    assert "Pacing checkpoint" not in msg.content[0].output   # 时钟 1: 不触发
 
 
 def test_检查点不重复附加在同一条结果上():
@@ -319,11 +354,11 @@ def test_检查点不重复附加在同一条结果上():
 
     for i in range(20):
         _step(rt, msgs, "read_file", f'{{"path": "f{i}.py"}}', i)
-    rt._maybe_conclusion_checkpoint(msgs)             # 连击未变: 重复调用不追加
+    rt._maybe_conclusion_checkpoint(msgs, QUESTION)   # 时钟未变: 重复调用不追加
 
     # 唯一提醒落在第 16 条（跨档点）; 之后到第 20 条都干净
-    assert msgs[15].content[0].output.count("Checkpoint") == 1
-    assert not any("Checkpoint" in m.content[0].output for m in msgs[16:])
+    assert msgs[15].content[0].output.count("Pacing checkpoint") == 1
+    assert not any("Pacing checkpoint" in m.content[0].output for m in msgs[16:])
 
 
 # ------------------------------------------------------------

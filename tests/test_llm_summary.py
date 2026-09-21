@@ -12,7 +12,7 @@ emit_output=False（不在终端回放）、thinking=low（摘要是整理不是
 import pytest
 
 from api_client import MessageStopEvent, TextDeltaEvent, UsageInfo
-from models import Message, Session
+from models import Message, Session, ToolContentBlock
 from permissions import ALLOW_MODE, PermissionPolicy
 from runtime import ConversationRuntime
 
@@ -124,6 +124,50 @@ def test_llm_summary_failure_falls_back_to_rule_summary(mode):
     assert len(view) == 9                    # 摘要 + 保留 8 条
     # 回退摘要同样进缓存, 不至于每次构建视图都重试失败调用
     assert runtime._compact_cache is not None
+
+
+# ------------------------------------------------------------
+# 压缩后文件重注入 — 归档区最近读过的文件随续接摘要带回, 免立刻重读
+# ------------------------------------------------------------
+
+def test_压缩视图重注入最近读过的文件(tmp_path):
+    target = tmp_path / "auth.py"
+    target.write_text("MARKER_RESTORE_CONTENT = 1\n" + "y" * 200, encoding="utf-8")
+
+    read_use = Message(role="assistant", content=[
+        ToolContentBlock(id="r1", name="read_file",
+                         input='{"path": "%s"}' % str(target).replace("\\", "\\\\")),
+    ])
+    msgs = [Message.user_text("排查鉴权"), read_use,
+            Message.tool_result(id="r1", name="read_file", output="...", is_error=False)]
+    msgs += [Message.user_text(f"填充{i}") for i in range(12)]
+    client = SummaryFakeClient()
+    runtime = make_runtime(Session(messages=msgs), client)
+    runtime._compact_active = True
+
+    view = runtime._model_view()
+
+    # 重注入文本并入续接消息: 文件内容原文在列, 且带"不必重读"指引
+    assert "Recently read files" in view[0].content[0].text
+    assert "MARKER_RESTORE_CONTENT" in view[0].content[0].text
+    assert "do not" in view[0].content[0].text
+
+
+def test_重注入文件缺失时静默跳过(tmp_path):
+    read_use = Message(role="assistant", content=[
+        ToolContentBlock(id="r1", name="read_file",
+                         input='{"path": "%s"}' % str(tmp_path / "ghost.py")),
+    ])
+    msgs = [Message.user_text("q"), read_use,
+            Message.tool_result(id="r1", name="read_file", output="...", is_error=False)]
+    msgs += [Message.user_text(f"填充{i}") for i in range(12)]
+    client = SummaryFakeClient()
+    runtime = make_runtime(Session(messages=msgs), client)
+    runtime._compact_active = True
+
+    view = runtime._model_view()
+
+    assert "Recently read files" not in view[0].content[0].text
 
 
 # ------------------------------------------------------------

@@ -52,6 +52,7 @@ class UsageInfo(BaseModel):
 class MessageStopEvent(BaseModel):
     type: Literal['message_stop'] = 'message_stop'
     usage: Optional[UsageInfo] = None
+    stop_reason: Optional[str] = None   # "end_turn" | "max_tokens" | ... 截断自愈靠它
 
 
 AssistantEvent = TextDeltaEvent | ToolUseEvent | MessageStopEvent
@@ -373,6 +374,7 @@ class ClaudeApiClient(ApiClient):
         # token 用量: input 侧在 message_start，output 侧在 message_delta。
         # output_tokens 含思考 tokens——思考文本不进历史，但用量进，循环层预算靠它。
         usage_acc: dict = {}
+        stop_reason: Optional[str] = None   # message_delta 报 stop_reason, message_stop 落事件
         if emit and sys.stdout.isatty():
             _ensure_ansi()
 
@@ -497,6 +499,7 @@ class ClaudeApiClient(ApiClient):
                     if event.delta.stop_reason == "max_tokens":
                         if emit:
                             out.write("输出被 max_tokens 截断!")
+                    stop_reason = getattr(event.delta, "stop_reason", None) or stop_reason
 
                 elif event.type == 'message_stop':
                     streaming_thinking = _end_thinking_indicator(out, streaming_thinking)
@@ -508,6 +511,7 @@ class ClaudeApiClient(ApiClient):
 
                     events.append(MessageStopEvent(
                         usage=UsageInfo(**usage_acc) if usage_acc else None,
+                        stop_reason=stop_reason,
                     ))
         finally:
             stack.close()
