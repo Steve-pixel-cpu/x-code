@@ -1112,11 +1112,12 @@ def promote_pending(web_session: WebSession, qid: str) -> bool:
 # REST: 会话列表 / 新建 / 历史回放
 # ============================================================================
 
-def _message_to_dict(msg: Message) -> dict:
+def _message_to_dict(msg: Message, ts: Optional[str] = None) -> dict:
     """历史回放: 按块类型摊平成前端易消费的形状。
 
     image 输出 {type, media_type, data}: 前端拼 data URI 渲染缩略图;
-    file 输出 {type, name, text}: 前端渲染成文件 chip。"""
+    file 输出 {type, name, text}: 前端渲染成文件 chip。
+    ts 为该条消息的落盘时间(ISO 字符串), 供前端 minimap 显示相对时间。"""
     blocks = []
     for b in msg.content:
         if isinstance(b, TextContentBlock):
@@ -1143,7 +1144,10 @@ def _message_to_dict(msg: Message) -> dict:
             if msg.result_meta:
                 entry["result_meta"] = msg.result_meta   # 历史回放重建 diff 卡
             blocks.append(entry)
-    return {"role": msg.role, "blocks": blocks}
+    ret = {"role": msg.role, "blocks": blocks}
+    if ts:
+        ret["ts"] = ts
+    return ret
 
 
 @app.get("/", include_in_schema=False)
@@ -1435,8 +1439,9 @@ async def api_get_messages(session_id: str):
         # 会走加载失败分支，渲染成空白
         return {"session_id": session_id, "messages": [],
                 "workdir": store.get_workdir(session_id)}
-    msgs, _ = store.load_session(session_id)
-    return {"session_id": session_id, "messages": [_message_to_dict(m) for m in msgs],
+    detail, _ = store.load_session_detail(session_id)
+    return {"session_id": session_id,
+            "messages": [_message_to_dict(m, ts) for m, ts in detail],
             "workdir": store.get_workdir(session_id)}
 
 

@@ -89,6 +89,20 @@ class SessionStore:
 
         return result, last_uuid
 
+    def load_session_detail(self, session_id: str) -> tuple[list[tuple[Message, str]], Optional[str]]:
+        """与 load_session 相同的消息链, 但逐条携带落盘 timestamp。
+        供历史回放场景（如 minimap 快速定位）展示相对时间, 不影响
+        请求构造链路——后者继续用 load_session。"""
+        file_path = self._session_path(session_id)
+        entries = [e for e in self._read_entries(file_path)
+                   if isinstance(e, StorageEntry)]
+        if not entries:
+            return [], None
+        chain = self._rebuild_chain(entries)
+        detail = [(Message.model_validate(entry.message), entry.timestamp)
+                  for entry in chain]
+        return detail, chain[-1].uuid
+
     def list_sessions(self) -> list[str]:
         """列出所有会话 ID。"""
         if not self._storage_dir.exists():

@@ -723,6 +723,7 @@ $("messages").addEventListener("scroll", () => {
   nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 120;
   $("scroll-btn").classList.toggle("show", !nearBottom);
   updateMsgThumb();
+  mmUpdateActive();
 });
 $("scroll-btn").onclick = () => {
   nearBottom = true;
@@ -757,7 +758,7 @@ function updateMsgThumb() {
 }
 
 /* 内容尺寸变化(流式输出/切会话/窗口变化)时同步滑块 */
-new ResizeObserver(updateMsgThumb).observe($("messages"));
+new ResizeObserver(() => { updateMsgThumb(); mmScheduleRebuild(); }).observe($("messages"));
 window.addEventListener("resize", updateMsgThumb);
 
 /* 拖拽滑块: 按位移比例反算 scrollTop */
@@ -792,6 +793,117 @@ msgThumb.addEventListener("pointerdown", ev => {
   if (track <= 0 || max <= 0) return;
   const y = ev.clientY - msgThumb.getBoundingClientRect().top - MSG_THUMB_H / 2;
   el.scrollTop = Math.max(0, Math.min(track, y)) / track * max;
+});
+
+/* ============================================================
+ * minimap: 用户消息快速定位
+ * 右缘一列刻度, 每条用户消息一个; 按消息在全文中的位置等比分布。
+ * 悬停刻度弹预览卡(摘要 + 相对时间), 点击平滑滚动定位;
+ * 滚动时高亮视口中线以上最近的一条。数据源是 addUserBubble
+ * 挂在行元素上的 _text/_ts, 无需额外后端结构。
+ * ============================================================ */
+const mm = $("msg-minimap");
+const mmPop = $("mm-pop");
+const MM_TICK_MIN_GAP = 5;   // 刻度最小间距(px), 防止长会话挤成一团
+let mmTimer = null;
+
+function mmScheduleRebuild() {
+  clearTimeout(mmTimer);
+  mmTimer = setTimeout(mmRebuild, 150);
+}
+
+function mmRebuild() {
+  const el = $("messages");
+  mmPop.hidden = true;
+  mm.textContent = "";
+  const rows = [...el.querySelectorAll(".msg.user")];
+  const scrollable = el.scrollHeight - el.clientHeight > 2;
+  if (!rows.length || !scrollable) { mm.hidden = true; return; }
+  mm.hidden = false;
+  // 轨道按消息区可视范围垂直居中: 高度收窄到 70%, 上下各留 15%
+  const trackH = Math.round(el.clientHeight * 0.7);
+  mm.style.top = el.offsetTop + Math.round((el.clientHeight - trackH) / 2) + "px";
+  mm.style.height = trackH + "px";
+  const H = mm.clientHeight;
+  const frag = document.createDocumentFragment();
+  let lastPct = -Infinity;
+  for (const row of rows) {
+    // 位置按内容坐标等比映射; 再用最小间距兜底拥挤(刻度挤压时仍可点击)
+    let pct = row.offsetTop / Math.max(1, el.scrollHeight) * 100;
+    if (pct * H - lastPct < MM_TICK_MIN_GAP) {
+      pct = (lastPct + MM_TICK_MIN_GAP) / H;
+    }
+    lastPct = pct * H;
+    const tick = document.createElement("button");
+    tick.className = "mm-tick";
+    tick.type = "button";
+    tick.style.top = pct + "%";
+    tick._row = row;
+    tick._text = mmSummary(row);
+    tick._time = mmRelTime(row._ts);
+    frag.appendChild(tick);
+  }
+  mm.appendChild(frag);
+  mmUpdateActive();
+}
+
+function mmSummary(row) {
+  const text = (row._text || "").replace(/\s+/g, " ").trim();
+  if (text) return text.length > 140 ? text.slice(0, 140) + "…" : text;
+  if (row.querySelector(".u-imgs")) return "[图片]";
+  if (row.querySelector(".file-chip")) return "[文件]";
+  return "[消息]";
+}
+
+function mmRelTime(ts) {
+  const t = ts ? new Date(ts) : null;
+  if (!t || isNaN(t)) return "";
+  const diff = (Date.now() - t.getTime()) / 1000;
+  if (diff < 90) return "刚刚";
+  if (diff < 3600) return Math.floor(diff / 60) + "分钟前";
+  if (diff < 86400) return Math.floor(diff / 3600) + "小时前";
+  if (diff < 172800) return "1天前";
+  if (diff < 604800) return Math.floor(diff / 86400) + "天前";
+  return `${t.getFullYear()}/${t.getMonth() + 1}/${t.getDate()}`;
+}
+
+/* 激活态: 视口中线以上最近的一条用户消息 */
+function mmUpdateActive() {
+  if (mm.hidden) return;
+  const el = $("messages");
+  const mid = el.scrollTop + el.clientHeight / 2;
+  let best = null;
+  for (const tick of mm.children) {
+    if (tick._row && tick._row.offsetTop <= mid) best = tick;
+  }
+  for (const tick of mm.children) tick.classList.toggle("active", tick === best);
+}
+
+/* 刻度交互: 悬停出预览卡(刻度右侧, 视口内钳位), 点击平滑定位 */
+const mmText = mmPop.querySelector(".mm-text");
+const mmTime = mmPop.querySelector(".mm-time");
+mm.addEventListener("pointerover", e => {
+  const tick = e.target.closest(".mm-tick");
+  if (!tick) return;
+  mmText.textContent = tick._text || "";
+  mmTime.textContent = tick._time || "";
+  mmPop.hidden = false;
+  const r = tick.getBoundingClientRect();
+  const pr = mmPop.getBoundingClientRect();
+  let top = r.top + r.height / 2 - pr.height / 2;
+  top = Math.max(8, Math.min(window.innerHeight - pr.height - 8, top));
+  mmPop.style.top = top + "px";
+  mmPop.style.left = (r.right + 12) + "px";
+});
+mm.addEventListener("pointerleave", () => { mmPop.hidden = true; });
+mm.addEventListener("pointerdown", e => {
+  const tick = e.target.closest(".mm-tick");
+  if (!tick || !tick._row) return;
+  const row = tick._row;
+  $("messages").scrollTo({
+    top: Math.max(0, row.offsetTop - $("messages").clientHeight / 2 + row.offsetHeight / 2),
+    behavior: "smooth",
+  });
 });
 
 /* ============================================================
@@ -1551,7 +1663,7 @@ function renderHistoryMessage(m) {
       .map(b => b.type === "image"
         ? { kind: "image", media_type: b.media_type, data: b.data }
         : { kind: "file", name: b.name, text: b.text });
-    if (text || atts.length) addUserBubble(text, atts);
+    if (text || atts.length) addUserBubble(text, atts, null, m.ts);
     return;
   }
   if (m.role === "assistant") {
@@ -1728,7 +1840,7 @@ function handleServerMessage(msg, sid) {
       const qi = run.queue.findIndex(it =>
         it.qid ? it.qid === msg.qid : it.text === msg.text);
       if (qi >= 0) run.queue.splice(qi, 1);
-      addUserBubble(msg.text, msg.attachments, colOf(sid));
+      addUserBubble(msg.text, msg.attachments, colOf(sid), msg.ts);
       beginOptimisticThinking(run, sid, colOf(sid));
     }
     return;
@@ -2326,7 +2438,7 @@ function onTurnStarted(msg, sid) {
   const qi = run.queue.findIndex(it =>
     it.qid ? it.qid === msg.qid : it.text === msg.text);
   if (qi >= 0) run.queue.splice(qi, 1);
-  addUserBubble(msg.text, msg.attachments, colOf(sid));
+  addUserBubble(msg.text, msg.attachments, colOf(sid), msg.ts);
   beginOptimisticThinking(run, sid, colOf(sid));   // 排队消息接力开跑: 立刻给反馈
   if (sid === state.sessionId) {
     renderQueueCards();
@@ -2535,12 +2647,13 @@ function msgCol() {
   return colOf(id);
 }
 
-function addUserBubble(text, attachments, col) {
+function addUserBubble(text, attachments, col, ts) {
   // 兼容旧签名 addUserBubble(text, col): 第二参传的是列元素
   if (attachments instanceof HTMLElement) { col = attachments; attachments = null; }
   const div = document.createElement("div");
   div.className = "msg user";
   div._text = text;
+  div._ts = ts || new Date().toISOString();   // minimap 相对时间用（历史回放传落盘 ts）
   const b = document.createElement("div");
   b.className = "bubble";
   if (text) {
@@ -2570,6 +2683,7 @@ function addUserBubble(text, attachments, col) {
   for (const f of files) b.appendChild(fileChipEl(f.name));
   div.appendChild(b);
   (col || msgCol()).appendChild(div);
+  mmScheduleRebuild();
   scrollToBottom();
   return b;
 }

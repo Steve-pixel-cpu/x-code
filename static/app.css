@@ -964,6 +964,47 @@
   #msg-scrollbar.dragging .thumb { background: var(--text-3); }
   #msg-scrollbar.dragging .thumb { transition: none; }
 
+  /* minimap 用户消息快速定位: 左缘刻度列(top/height 由 JS 按消息区
+     垂直居中写入), 每条用户消息一个刻度; 悬停弹预览卡(mm-pop),
+     点击平滑滚动到对应气泡 */
+  #msg-minimap {
+    position: absolute; left: 10px; top: 0; height: 100%; width: 20px;
+    z-index: 20;
+  }
+  #msg-minimap[hidden] { display: none; }
+  .mm-tick {
+    position: absolute; left: 4px; transform: translateY(-50%);
+    width: 10px; height: 2px; padding: 0; border: none; border-radius: 1px;
+    background: var(--border-strong); opacity: .5; cursor: pointer;
+    transition: width .12s, left .12s, opacity .12s, background .12s;
+  }
+  .mm-tick:hover, .mm-tick.active {
+    width: 14px; left: 0; opacity: 1; background: var(--text-2);
+  }
+  /* 预览卡: 固定定位(JS 按刻度位置写入 left/top, 出现在刻度右侧),
+     贴合全局亚克力风格 */
+  #mm-pop {
+    position: fixed; z-index: 60;
+    max-width: 320px; padding: 10px 12px 8px; border-radius: 10px;
+    background: var(--surface); box-shadow: var(--shadow-md);
+    pointer-events: none;
+  }
+  #mm-pop[hidden] { display: none; }
+  @supports (background: color-mix(in srgb, red 50%, blue)) {
+    #mm-pop {
+      background: color-mix(in srgb, var(--surface) 86%, transparent);
+      backdrop-filter: blur(18px) saturate(1.4);
+    }
+  }
+  #mm-pop .mm-text {
+    font-size: calc(12.5px * var(--fs-ui)); color: var(--text-2);
+    line-height: 1.55; display: -webkit-box; -webkit-line-clamp: 4;
+    -webkit-box-orient: vertical; overflow: hidden; word-break: break-word;
+  }
+  #mm-pop .mm-time {
+    margin-top: 5px; font-size: calc(11px * var(--fs-ui)); color: var(--text-3);
+  }
+
   /* 回到底部悬浮钮 */
   #scroll-btn {
     position: absolute; right: 34px; bottom: 168px; z-index: 5;
@@ -1101,6 +1142,7 @@
   #pane[data-view="settings"] > #messages,
   #pane[data-view="settings"] > #scroll-btn,
   #pane[data-view="settings"] > #msg-scrollbar,
+  #pane[data-view="settings"] > #msg-minimap,
   #pane[data-view="settings"] > #composer { display: none; }
   #settings-page {
     display: none; flex: 1; flex-direction: column;
@@ -1114,6 +1156,7 @@
   #pane[data-view="onboarding"] > #messages,
   #pane[data-view="onboarding"] > #scroll-btn,
   #pane[data-view="onboarding"] > #msg-scrollbar,
+  #pane[data-view="onboarding"] > #msg-minimap,
   #pane[data-view="onboarding"] > #composer { display: none; }
   body:has(#pane[data-view="onboarding"]) > #sidebar { display: none; }
   #onboarding-page {
