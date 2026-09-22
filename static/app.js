@@ -33,7 +33,12 @@ const state = {
   draftAttach: [],          // 草稿态未发送的附件（跟随会话切换）
   draftInput: "",           // 草稿态未发送的输入（跟随会话切换）
   draftDir: null,           // 草稿态预选的项目目录（侧栏项目行 + 进入时带上）
+  draftMode: null,          // 草稿态预选的权限模式: 建会话后先于首条消息下发
   serverWorkspace: null,    // 服务进程工作区名（无会话目录时的兜底展示）
+  // 三设置的全局默认值（loadSettings 从 /api/settings 填充）: 无自己覆盖值的
+  // 会话/草稿态, 下拉框回落到这里——否则会残留上一个会话的显示值,
+  // 与该会话实际用的值不一致（用户看到的"串值"大多是这条路径）
+  globalDefaults: { permissionMode: "prompt", thinkingLevel: null, modelKey: null },
   runs: {},                 // sessionId → 运行态（多会话并行: 各自 WS/流式指针/审批）
 };
 
@@ -59,6 +64,8 @@ function runOf(id) {
       queue: [],              // 待发送消息（本轮进行中追加, 停在输入框上方卡片）
       unread: 0,              // 后台完成/待审批的未读计数
       permissionMode: null,   // 该会话生效的权限模式（mode_changed / 切会话回显）
+      thinkingLevel: null,    // 该会话生效的思考等级（thinking_changed / 切会话回显）
+      modelKey: null,         // 该会话生效的模型 "provider_id|model_id"（model_changed / 切会话回显）
       loaded: false,          // 历史是否已加载过（首次切入必拉）
       loading: false,         // 历史加载进行中（防并发重复拉取）
       everConnected: false,   // 该会话 WS 是否成功连过（区分首次连接与断线重连）
@@ -1517,6 +1524,7 @@ async function loadSessionHistory(id) {
 async function selectSession(id) {
   saveCurrentInput();           // 切走前保存当前会话的未发送输入
   state.draft = false;
+  state.draftMode = null;       // 草稿态预选的模式作废: 不带到别的会话
   state.sessionId = id;
   $("pane").classList.remove("empty-view");   // 真实会话: 输入卡回到常规底部布局
   renderDraftChrome();                        // 顺带清掉草稿态的工作区条/建议 chips
@@ -1534,7 +1542,19 @@ async function selectSession(id) {
   renderSessionList();
   refreshWorkdirTag();
   setBusyUi(run.busy);
-  if (run.permissionMode) modeDd.setValue(run.permissionMode);
+  // 三设置回显: 会话运行值 → 会话列表缓存（/api/sessions 每项都带持久值/
+  // 全局默认）→ 全局默认值。必须无条件 setValue: 否则下拉框残留上一个
+  // 会话的显示值, 与本会话实际用的值不一致（"跟随全局"的会话尤其如此）
+  {
+    const s = state.sessions.find(x => x.id === id);
+    const gd = state.globalDefaults;
+    modeDd.setValue(run.permissionMode || (s && s.permission_mode) || gd.permissionMode);
+    thinkDd.setValue(run.thinkingLevel || (s && s.thinking_level) || gd.thinkingLevel || "medium");
+    const mKey = run.modelKey
+      || (s && s.model_provider && s.model_id ? s.model_provider + "|" + s.model_id : null)
+      || gd.modelKey;
+    if (mKey) modelDd.setValue(mKey);
+  }
   syncThinkingIndicator();   // 切会话必须重算: 转圈只属于"正在等待输出的那个会话"
   setConn(run.ws && run.ws.readyState === 1 ? "on" : "", run.ws ? (run.ws.readyState === 1 ? "已连接" : "连接中…") : "未连接");
   restoreCurrentInput();        // 输入框恢复成该会话未发送的内容
@@ -1708,6 +1728,14 @@ function startDraft(draftDir = null) {
                                  // （切走瞬间原会话正在 prefill 空窗, 否则没人再碰这个 DOM,
                                  //   后台轮次的空窗事件都带 sid 守卫, 不会点亮这里）
   setConn("", "未连接");
+  // 草稿态下拉 = 新会话将用的全局默认值。必须显式重置: 否则残留上一个
+  // 会话的显示值, 而首条消息实际按全局默认起跑 → 显示与实际不一致
+  {
+    const gd = state.globalDefaults;
+    modeDd.setValue(state.draftMode || gd.permissionMode);
+    thinkDd.setValue(gd.thinkingLevel || "medium");
+    if (gd.modelKey) modelDd.setValue(gd.modelKey);
+  }
   restoreCurrentInput();       // 恢复草稿态自己的输入
   $("input").focus();
 }
@@ -1844,6 +1872,12 @@ function scheduleReconnect(id) {
  * ============================================================ */
 function handleServerMessage(msg, sid) {
   const run = runOf(sid);
+  // 继续聊天 = 隐性否决未决计划: 服务端此时会把旧计划自动拒绝并叫停当前轮
+  // （见 server 的 user 分支）, turn_interrupting/turn_started 到达即收口 UI——
+  // 计划卡与右侧面板按钮定格"已过期", 正文淡化。前后台会话都要收口。
+  if (run && (msg.type === "turn_interrupting" || msg.type === "turn_started")) {
+    expirePlanCard(run, sid, "已过期 · 继续对话后重新规划");
+  }
   // 后台会话: 流式内容照常写进它自己的常驻列（隐藏）, 切回时完整可见;
   // 只对 权限/结果/结束/错误 累计未读。结束/接力时同步运行态。
   if (sid !== state.sessionId) {
@@ -1860,6 +1894,8 @@ function handleServerMessage(msg, sid) {
     }
     else if (msg.type === "context_compacted") addCompactNotice(colOf(sid), true);
     else if (msg.type === "mode_changed") onModeChanged(msg, sid);
+    else if (msg.type === "thinking_changed") onThinkingChanged(msg, sid);
+    else if (msg.type === "model_changed") onModelChanged(msg, sid);
 
     else if (msg.type === "tool_result") bumpUnread(sid);
     else if (msg.type === "turn_done" || msg.type === "error") {
@@ -1876,6 +1912,14 @@ function handleServerMessage(msg, sid) {
           const choices = card.querySelector(".pr-choices");
           if (choices) choices.remove();
           card.appendChild(makePrMark("已拒绝", false));
+        }
+        // 右侧计划面板若正显示这份计划: 按钮区一并定格, 不留死按钮
+        if (run.pendingPerms[rid]?.tool_name === "present_plan"
+            && $("plan-actions").dataset.reqId === rid) {
+          const pa = $("plan-actions");
+          pa.innerHTML = "";
+          pa.appendChild(makePrMark("已中断", false));
+          $("plan-body").classList.add("stale");
         }
       }
       run.pendingPerms = {};
@@ -1923,6 +1967,8 @@ function handleServerMessage(msg, sid) {
     case "turn_interrupting":  onTurnInterrupting(msg, sid); break;
     case "permission_request": onPermissionRequest(msg, sid); break;
     case "mode_changed":       onModeChanged(msg, sid); break;
+    case "thinking_changed":   onThinkingChanged(msg, sid); break;
+    case "model_changed":      onModelChanged(msg, sid); break;
     case "turn_done":          onTurnDone(msg); break;
     case "session_renamed":    onSessionRenamed(msg); break;
     case "error":              onError(msg); break;
@@ -2400,8 +2446,10 @@ function renderPlanCard(msg, sid2, run) {
 
   const pane = $("pane");
   const body = $("plan-body");
+  _planSource = planText;   // 复制按钮用: 始终复制 markdown 源文
   body.innerHTML = renderMd(planText);
   decorateCode(body);
+  body.classList.remove("stale");   // 新计划到达: 清掉上一份的过期淡化
   const actions = $("plan-actions");
   actions.innerHTML = "";
   actions.dataset.reqId = msg.request_id;
@@ -2425,6 +2473,45 @@ function renderPlanCard(msg, sid2, run) {
 }
 
 $("plan-close").onclick = () => $("pane").classList.remove("plan-open");
+
+/* 计划全文复制: 复制 markdown 源文（renderPlanCard 存于 _planSource）,
+ * 粘贴到文档/issue 语法结构完好; 按钮短暂显示"已复制"后回弹 */
+let _planSource = "";
+$("plan-copy").onclick = async () => {
+  if (!_planSource) return;
+  await copyText(_planSource);
+  const btn = $("plan-copy");
+  btn.innerHTML = CHECK_SVG + "<span>已复制</span>";
+  setTimeout(() => { btn.innerHTML = COPY_SVG + "<span>复制</span>"; }, 1400);
+};
+
+/* 计划过期收口: 用户不批计划而是继续发消息追加需求, 或轮次已收口时,
+ * 未决的 present_plan 在协议层已是死请求（服务端 prompter 已换新）。
+ * 前端就地定格: 聊天流计划卡与右侧面板按钮标"已过期/已中断", 正文淡化
+ * 但保留可读——模型随后会重新规划, 新计划以新 reqId 覆盖面板。
+ * 只清前端 pendingPerms, 不发 permission_response（旧 reqId 发了只会错配）。 */
+function expirePlanCard(run, sid, label) {
+  const rids = Object.keys(run.pendingPerms).filter(rid =>
+    run.pendingPerms[rid] && run.pendingPerms[rid].tool_name === "present_plan");
+  if (!rids.length) return;
+  for (const rid of rids) delete run.pendingPerms[rid];
+  for (const rid of rids) {
+    colOf(sid).querySelectorAll(`.plan-card[data-req-id="${rid}"]`).forEach(card => {
+      if (card.classList.contains("allowed") || card.classList.contains("denied")) return;
+      card.classList.add("denied", "expired");
+      const choices = card.querySelector(".pr-choices");
+      if (choices) choices.remove();
+      card.appendChild(makePrMark(label, false));
+    });
+  }
+  // 右侧面板: 显示的正是被过期的这份计划 → 按钮区定格, 正文淡化
+  const pa = $("plan-actions");
+  if (rids.includes(pa.dataset.reqId)) {
+    pa.innerHTML = "";
+    pa.appendChild(makePrMark(label, false));
+    $("plan-body").classList.add("stale");
+  }
+}
 
 function respondPermission(requestId, approved, sid) {
   const run = runOf(sid);
@@ -2499,7 +2586,11 @@ function onTurnStarted(msg, sid) {
   const qi = run.queue.findIndex(it =>
     it.qid ? it.qid === msg.qid : it.text === msg.text);
   if (qi >= 0) run.queue.splice(qi, 1);
-  addUserBubble(msg.text, msg.attachments, colOf(sid), msg.ts);
+  // 计划接力路径的气泡是乐观加的（挂 _qid）: 按 qid 查重跳过, 防双气泡。
+  // 历史回放/普通接力没有 _qid, 不受影响。
+  const col = colOf(sid);
+  const dup = msg.qid && col.querySelector(`.msg.user[_qid="${msg.qid}"]`);
+  if (!dup) addUserBubble(msg.text, msg.attachments, col, msg.ts);
   beginOptimisticThinking(run, sid, colOf(sid));   // 排队消息接力开跑: 立刻给反馈
   if (sid === state.sessionId) {
     renderQueueCards();
@@ -2708,12 +2799,15 @@ function msgCol() {
   return colOf(id);
 }
 
-function addUserBubble(text, attachments, col, ts) {
+function addUserBubble(text, attachments, col, ts, qid) {
   // 兼容旧签名 addUserBubble(text, col): 第二参传的是列元素
   if (attachments instanceof HTMLElement) { col = attachments; attachments = null; }
   const div = document.createElement("div");
   div.className = "msg user";
   div._text = text;
+  div._qid = qid || null;                     // 计划接力: turn_started 回放按 qid 去重
+  // 去重选择器查的是 DOM 属性: JS 字段不会自动映射, 必须显式 setAttribute
+  if (qid) div.setAttribute("_qid", qid);
   div._ts = ts || new Date().toISOString();   // minimap 相对时间用（历史回放传落盘 ts）
   const b = document.createElement("div");
   b.className = "bubble";
@@ -2897,6 +2991,14 @@ function setBusyUi(busy) {
   updateSendBtn();
 }
 
+/* 本会话是否正卡在计划审批（pendingPerms 全部是 present_plan）。
+ * sendCurrent 的"计划接力"路径与思考指示器的标签共用这个判断 */
+function isAwaitingPlan(run) {
+  if (!run || !run.pendingPerms) return false;
+  const pending = Object.values(run.pendingPerms);
+  return pending.length > 0 && pending.every(p => p.tool_name === "present_plan");
+}
+
 /* 底部"思考中"转圈 = 当前会话忙且正处于等待模型输出的空窗（await_output
  * 起至首个内容事件）。此前各事件分支里手工开关、切换会话不重算:
  * 切到空闲会话转圈残留、后台轮次跑完转圈不灭——统一在这里按当前会话重算。 */
@@ -2908,7 +3010,7 @@ function syncThinkingIndicator() {
     const pending = run.pendingPerms ? Object.values(run.pendingPerms) : [];
     const t = $("thinking").querySelector(".t");
     let label;
-    if (pending.length && pending.every(p => p.tool_name === "present_plan")) {
+    if (isAwaitingPlan(run)) {
       label = "等待计划审批…";
     } else if (pending.length) {
       label = "等待授权…";
@@ -2959,6 +3061,21 @@ async function sendCurrent() {
   nearBottom = true;
   scrollToBottom(true);   // 发送是用户主动行为: 无论滚到哪里, 立刻回到底部看最新消息
   const qid = genQid();   // 本地生成: 排队卡片与服务端排队区按同一 qid 配对
+  // 计划审批挂起时追加 = 否决计划并立刻接力: 不进待发送卡（否则要手动点
+  // "立即"才发得上）, 乐观加气泡 + 就地定格旧计划, 服务端打断当前轮后
+  // 以这条消息为下一棒开跑（turn_started 回执按 qid 去重, 不重复加气泡）
+  if (busy && isAwaitingPlan(runOf(state.sessionId))) {
+    const pr = runOf(state.sessionId);
+    addUserBubble(text, attachments, msgCol(), null, qid);
+    input.value = "";
+    setAttachDraft([]);          // 已发送: 清空本会话的附件草稿
+    autoGrow(input);
+    saveCurrentInput();          // 已发送: 清空本会话的输入草稿
+    updateSendBtn();             // 输入已清空: 圆钮切回"停止"形态, 随时可中断
+    expirePlanCard(pr, state.sessionId, "已过期 · 继续对话后重新规划");
+    sendWs({ type: "user", text, attachments, qid });
+    return;
+  }
   // 本轮在跑: 消息进入输入框上方的待发送卡片, 轮到它时才出现在消息列
   if (busy) {
     runOf(state.sessionId).queue.push({ qid, text, attachments });
@@ -2999,6 +3116,13 @@ async function sendCurrent() {
     markActiveSession();
     refreshDocTitle();
     connectWs(state.sessionId);
+  }
+  // 草稿态预选的权限模式: 先于首条消息冲进 pendingSends/WS,
+  // onopen 按序发送保证服务端在建会话首条消息前就切好模式
+  if (state.draftMode) {
+    myRun.permissionMode = state.draftMode;
+    sendWs({ type: "set_permission_mode", mode: state.draftMode });
+    state.draftMode = null;
   }
   sendWs({ type: "user", text, attachments, workdir: firstWorkdir, qid });
 }
@@ -3303,8 +3427,13 @@ const modeDd = makeDropdown($("sel-mode"), {
   onChange: v => {
     // 会话级: 切的是当前会话的模式（全局默认值在设置页改, 是新会话初值）
     const run = curRun();
-    if (run) run.permissionMode = v;
-    sendWs({ type: "set_permission_mode", mode: v });
+    if (run) {
+      run.permissionMode = v;
+      sendWs({ type: "set_permission_mode", mode: v });
+    } else {
+      // 草稿态: 暂存, 建会话后先于首条消息下发（sendCurrent）
+      state.draftMode = v;
+    }
   },
 });
 function onModeChanged(msg, sid) {
@@ -3318,16 +3447,47 @@ function onModeChanged(msg, sid) {
 }
 const thinkDd = makeDropdown($("sel-thinking"), {
   items: THINK_ITEMS, value: "medium",
-  onChange: v => saveSettings({ thinking_level: v }),
+  onChange: v => {
+    // 会话级: 有会话切本会话; 草稿态（无会话）切全局默认（新会话初值）
+    const run = curRun();
+    if (run) {
+      run.thinkingLevel = v;
+      sendWs({ type: "set_thinking_level", level: v });
+    } else {
+      saveSettings({ thinking_level: v });
+    }
+  },
 });
+function onThinkingChanged(msg, sid) {
+  const run = runOf(sid);
+  run.thinkingLevel = msg.thinking_level;
+  const s = state.sessions.find(x => x.id === sid);
+  if (s) s.thinking_level = msg.thinking_level;
+  if (sid === state.sessionId) thinkDd.setValue(msg.thinking_level);
+}
 /* 模型下拉: 选项来自所有启用供应商的模型（loadProviders 后填充） */
 const modelDd = makeDropdown($("sel-model"), {
   items: [], value: "",
   onChange: v => {
     const [provider_id, model_id] = v.split("|");
-    saveSettings({ provider_id, model_id });
+    // 会话级: 有会话切本会话; 草稿态（无会话）切全局 active（新会话初值）
+    const run = curRun();
+    if (run) {
+      run.modelKey = v;
+      sendWs({ type: "set_model", provider_id, model_id });
+    } else {
+      saveSettings({ provider_id, model_id });
+    }
   },
 });
+function onModelChanged(msg, sid) {
+  const run = runOf(sid);
+  const key = msg.provider_id + "|" + msg.model_id;
+  run.modelKey = key;
+  const s = state.sessions.find(x => x.id === sid);
+  if (s) { s.model_provider = msg.provider_id; s.model_id = msg.model_id; }
+  if (sid === state.sessionId) modelDd.setValue(key);
+}
 
 async function loadSettings() {
   try {
@@ -3337,6 +3497,12 @@ async function loadSettings() {
     syncModelDropdown(s.provider_id, s.model_id);
     modeDd.setValue(s.permission_mode);
     thinkDd.setValue(s.thinking_level);
+    // 全局默认值快照: 供切会话/草稿态回显兜底（见 state.globalDefaults 注释）
+    state.globalDefaults = {
+      permissionMode: s.permission_mode || "prompt",
+      thinkingLevel: s.thinking_level || null,
+      modelKey: s.provider_id && s.model_id ? s.provider_id + "|" + s.model_id : null,
+    };
     if (s.workspace) $("ws-tag-text").textContent = s.workspace;
     state.serverWorkspace = s.workspace || null;
     state.configured = s.configured !== false;   // 旧服务端无此字段时视为已配置
@@ -3726,6 +3892,13 @@ async function saveSettings(patch) {
     const s = await r.json();
     thinkDd.setValue(s.thinking_level);
     if (!state.sessionId) modeDd.setValue(s.permission_mode);   // 草稿态: 无会话, 显示全局默认
+    // 草稿态下 REST 修改的全局默认, 同步进快照（切会话/下次进草稿的兜底值）
+    if (s.thinking_level != null) state.globalDefaults.thinkingLevel = s.thinking_level;
+    if (s.permission_mode) state.globalDefaults.permissionMode = s.permission_mode;
+    if (s.provider_id && s.model_id) {
+      state.globalDefaults.modelKey = s.provider_id + "|" + s.model_id;
+      if (!state.sessionId) modelDd.setValue(state.globalDefaults.modelKey);
+    }
   } catch (e) { toast("设置失败: " + e.message); }
 }
 

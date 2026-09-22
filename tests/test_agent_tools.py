@@ -32,6 +32,8 @@ from agent_tools import (
 from main import TOOLS, build_registry
 from multi_agent import (
     TOOL_WHITELIST,
+    AgentJob,
+    AgentManifest,
     AgentOrchestrator,
     _default_api_config,
     _tool_specs_for,
@@ -155,6 +157,105 @@ def test_spawn_without_workdir_defaults_to_none():
         Path(tempfile.mkdtemp()), spawn_fn=rec)
     spawn_agent_tool({"description": "d", "prompt": "p"}, workdir=None)
     assert rec.jobs[0].workdir is None
+
+
+# ------------------------------------------------------------
+# 4b. api_config 参数流: 派生会话 → handler → AgentJob → worker runtime
+#     （worker 跟随派生会话的专属模型/供应商; CLI / 无绑定回落全局工厂）
+# ------------------------------------------------------------
+
+def test_spawn_without_session_binding_passes_none_api_config(monkeypatch):
+    """无会话绑定（CLI）: api_config=None → worker 回落全局工厂。"""
+    monkeypatch.setattr(agent_tools, "current_session_id", lambda: None)
+    rec = RecordingSpawn()
+    agent_tools._toolbox._orchestrator = AgentOrchestrator(
+        Path(tempfile.mkdtemp()), spawn_fn=rec)
+    spawn_agent_tool({"description": "d", "prompt": "p"}, workdir=None)
+    assert rec.jobs[0].api_config is None
+
+
+def test_spawn_carries_session_api_config(monkeypatch):
+    """Web 有会话绑定: job 带上派生会话解析出的连接四元组。"""
+    quad = ("sk-x", "https://api.example.com", "session-model", "openai")
+    monkeypatch.setattr(agent_tools, "current_session_id", lambda: "s-1")
+    monkeypatch.setattr(agent_tools, "current_session_api_config", lambda: quad)
+    rec = RecordingSpawn()
+    agent_tools._toolbox._orchestrator = AgentOrchestrator(
+        Path(tempfile.mkdtemp()), spawn_fn=rec)
+    spawn_agent_tool({"description": "d", "prompt": "p"}, workdir=None)
+    assert rec.jobs[0].api_config == quad
+
+
+def test_worker_runtime_uses_job_api_config_over_global(monkeypatch):
+    """job 自带连接信息时优先; 全局工厂不被调用（会话模型对子代理生效）。"""
+    import multi_agent as ma
+
+    job = AgentJob(
+        manifest=AgentManifest(
+            agent_id="a-x", name="", description="d", subagent_type="general",
+            status="running", output_file="",
+            created_at="2026-01-01T00:00:00+00:00",
+            started_at=None, completed_at=None, error=None,
+        ),
+        prompt="p",
+        allowed_tools={"read_file"},
+        api_config=("sk-job", "https://job.example.com", "job-model", "anthropic"),
+    )
+
+    def _forbidden():
+        raise AssertionError("job.api_config 存在时不应回落全局工厂")
+
+    monkeypatch.setattr(ma, "_api_config_provider", _forbidden)
+
+    class _CaptureClient:
+        thinking_level = "low"
+
+        def __init__(self, **kwargs):
+            self.init = kwargs
+
+    protocol_seen = []
+
+    def _fake_make(protocol, **kwargs):
+        protocol_seen.append(protocol)
+        return _CaptureClient(**kwargs)
+
+    monkeypatch.setattr(ma, "make_api_client", _fake_make)
+
+    captured = ma.build_subagent_runtime(job)._api_client.init
+    assert captured["api_key"] == "sk-job"
+    assert captured["model"] == "job-model"
+    assert captured["base_url"] == "https://job.example.com"
+    assert protocol_seen == ["anthropic"]
+
+
+def test_worker_runtime_none_api_config_falls_back_to_global(monkeypatch):
+    """job 未带连接信息（CLI）: 走全局工厂（原行为）。"""
+    import multi_agent as ma
+
+    job = AgentJob(
+        manifest=AgentManifest(
+            agent_id="a-y", name="", description="d", subagent_type="general",
+            status="running", output_file="",
+            created_at="2026-01-01T00:00:00+00:00",
+            started_at=None, completed_at=None, error=None,
+        ),
+        prompt="p",
+        allowed_tools={"read_file"},
+        api_config=None,
+    )
+    monkeypatch.setattr(ma, "_api_config_provider",
+                        lambda: ("sk-global", None, "global-model", "anthropic"))
+    class _FakeClient:
+        thinking_level = "low"
+
+        def __init__(self, **kwargs):
+            self.init = kwargs
+
+    monkeypatch.setattr(ma, "make_api_client",
+                        lambda protocol, **kw: _FakeClient(**kw))
+    kwargs = ma.build_subagent_runtime(job)._api_client.init
+    assert kwargs["model"] == "global-model"
+    assert kwargs["api_key"] == "sk-global"
 
 
 def test_explicit_job_workdir_beats_orchestrator_default():

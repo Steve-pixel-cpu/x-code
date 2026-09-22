@@ -20,7 +20,7 @@ class ScriptedClient:
     def __init__(self):
         self.thinking_level = "medium"
 
-    def stream(self, system_prompt, messages, thinking_level=None):
+    def stream(self, system_prompt, messages, thinking_level=None, *, model=None, include_tools=True, emit_output=None, on_event=None):
         return []
 
 

@@ -325,11 +325,15 @@ class ApiClient(ABC):
     @abstractmethod
     def stream(self, system_prompt: list[str], messages: list,
                thinking_level: Optional[str] = None, *,
+               model: Optional[str] = None,
                include_tools: bool = True,
                emit_output: Optional[bool] = None,
                on_event: Optional[WireObserver] = None) -> List[AssistantEvent]:
         """流式处理，返回事件列表。
 
+        thinking_level / model 可选参数: 多会话共用 client 时, 每轮调用
+        携带自己会话的思考等级与模型, 避免共享实例状态互相串。None =
+        用实例默认（CLI 单会话语义不变）。
         on_event: 线级事件观察者（可选）。解析过程中按线上真实顺序回调
         WireEvent; None = 无人观察。实现不得因观察者抛异常而改变聚合语义
         （观察者异常直接上抛, 由宿主自负）。
@@ -498,12 +502,14 @@ class ClaudeApiClient(ApiClient):
 
     def _build_kwargs(self, converted_messages: list[dict], system_prompt: list[str],
                       thinking_level: Optional[str], use_cache: bool,
-                      include_tools: bool = True) -> dict:
+                      include_tools: bool = True,
+                      model: Optional[str] = None) -> dict:
         """组装请求参数。use_cache 时打三处 cache_control 断点: tools 末位、
         system 静态段、messages 最后一块（滚动断点）。滚动断点让"上一迭代结束
         时的全部历史"成为下一调用的缓存前缀, 全价只付一次。
         include_tools=False 用于非会话调用的 side-call（如压缩摘要器）:
-        不给工具可调, 也不把工具声明白白算进输入。"""
+        不给工具可调, 也不把工具声明白白算进输入。
+        model 覆盖: None = 用实例默认（多会话共用 client 时按轮携带）。"""
         static, dynamic = _split_system_prompt(system_prompt)
         system_blocks: list[dict] = []
         if static:
@@ -515,7 +521,7 @@ class ClaudeApiClient(ApiClient):
             system_blocks.append({"type": "text", "text": "\n\n".join(dynamic)})
 
         kwargs: dict = {
-            "model": self.model,
+            "model": model if model is not None else self.model,
             "messages": converted_messages,
             "max_tokens": 32768,
         }
@@ -549,12 +555,13 @@ class ClaudeApiClient(ApiClient):
 
     def stream(self, system_prompt: list[str], messages: list[Message],
                thinking_level: Optional[str] = None, *,
+               model: Optional[str] = None,
                include_tools: bool = True,
                emit_output: Optional[bool] = None,
                on_event: Optional[WireObserver] = None) -> List[AssistantEvent]:
-        """thinking_level 可选参数: 多会话共用 client 时, 每轮调用携带
-        自己会话的思考等级, 避免共享实例状态互相串。None = 用实例默认
-        （CLI 单会话语义不变）。
+        """thinking_level / model 可选参数: 多会话共用 client 时, 每轮调用
+        携带自己会话的思考等级与模型, 避免共享实例状态互相串。None = 用
+        实例默认（CLI 单会话语义不变）。
         include_tools=False / emit_output=None 供 side-call（压缩摘要器）
         使用: 不带工具声明、不在终端回放。emit_output None = 用实例默认。
         on_event: 线级事件观察者（协议中立 WireEvent, 按线上顺序回调）;
@@ -571,7 +578,7 @@ class ClaudeApiClient(ApiClient):
         level = thinking_level if thinking_level is not None else self.thinking_level
         kwargs = self._build_kwargs(converted_messages, system_prompt, level,
                                     use_cache=self._cache_control_ok,
-                                    include_tools=include_tools)
+                                    include_tools=include_tools, model=model)
         emit = self.emit_output if emit_output is None else emit_output
         echo = _TerminalEcho(emit)
         # token 用量: input 侧在 message_start，output 侧在 message_delta。
@@ -600,7 +607,8 @@ class ClaudeApiClient(ApiClient):
                     if self._cache_control_ok and "cache" in str(e).lower():
                         self._cache_control_ok = False
                         no_cache_kwargs = self._build_kwargs(
-                            converted_messages, system_prompt, level, use_cache=False)
+                            converted_messages, system_prompt, level,
+                            use_cache=False, model=model)
                         try:
                             return stack.enter_context(
                                 self.client.messages.stream(**no_cache_kwargs))
@@ -907,11 +915,13 @@ class OpenAIApiClient(ApiClient):
         return None
 
     def _build_kwargs(self, converted_messages: list[dict],
-                      system_prompt: list[str], include_tools: bool) -> dict:
+                      system_prompt: list[str], include_tools: bool,
+                      model: Optional[str] = None) -> dict:
         """组装请求参数。OpenAI 协议无 cache_control 断点（各家服务端自动
-        前缀缓存）; thinking 档位 v1 不映射（无跨端点统一参数）。"""
+        前缀缓存）; thinking 档位 v1 不映射（无跨端点统一参数）。
+        model 覆盖: None = 用实例默认（多会话共用 client 时按轮携带）。"""
         kwargs: dict = {
-            "model": self.model,
+            "model": model if model is not None else self.model,
             "messages": converted_messages,
             "max_tokens": 32768,
             "stream": True,
@@ -927,6 +937,7 @@ class OpenAIApiClient(ApiClient):
 
     def stream(self, system_prompt: list[str], messages: list[Message],
                thinking_level: Optional[str] = None, *,
+               model: Optional[str] = None,
                include_tools: bool = True,
                emit_output: Optional[bool] = None,
                on_event: Optional[WireObserver] = None) -> List[AssistantEvent]:
@@ -938,6 +949,7 @@ class OpenAIApiClient(ApiClient):
         - delta.reasoning_content（DeepSeek 系思考端点）→ 思考指示器/线级事件
         - usage chunk → 用量; finish_reason → stop_reason; [DONE] 收尾
         thinking_level 形参保留与 ClaudeApiClient 相同的签名（v1 忽略）。
+        model 可选参数: None = 用实例默认（多会话按轮携带, 与 anthropic 版对齐）。
         """
         events: List[AssistantEvent] = []
         wire = on_event
@@ -946,7 +958,8 @@ class OpenAIApiClient(ApiClient):
         if wire is None:
             wire = self._on_event
         converted = _convert_message_openai(messages)
-        kwargs = self._build_kwargs(converted, system_prompt, include_tools)
+        kwargs = self._build_kwargs(converted, system_prompt, include_tools,
+                                    model=model)
         emit = self.emit_output if emit_output is None else emit_output
         echo = _TerminalEcho(emit)
         if emit and sys.stdout.isatty():

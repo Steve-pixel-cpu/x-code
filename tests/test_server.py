@@ -17,8 +17,9 @@ from fastapi.testclient import TestClient
 
 import server
 import tools
-from models import Message
+from models import Message, ImageContentBlock
 from permissions import PermissionDecision, PermissionRequest, PermissionMode
+from runtime import TurnInterrupted
 from storage import SessionStore
 
 
@@ -1015,3 +1016,92 @@ def test_worker为轮次绑定取消检查(client, isolated_store, monkeypatch):
     assert done and done[-1]["interrupted"] is True   # 轮内 stop_requested 已置位
     assert seen["during_turn"] is True         # 取消检查读到实时的 stop_requested
     assert callable(seen["tool_cancel"])       # 工具侧 contextvar 已在本轮上下文绑定
+
+
+# ------------------------------------------------------------
+# 未命名会话兜底: 打断后命名 + 列表回填
+# ------------------------------------------------------------
+
+class _InterruptRuntime:
+    """run_turn 抛 TurnInterrupted 的替身 runtime（模拟用户点停止）。
+    会话里预置首条用户消息, 与真实 runtime 的内存态一致。"""
+
+    def __init__(self, web_session, first_text: str):
+        self._ws = web_session
+        self._ws.runtime_messages = [Message.user_text(first_text)]
+
+    def set_cancel_check(self, fn):
+        return self
+
+    def session(self):
+        class _S:
+            messages = self._ws.runtime_messages
+        return _S()
+
+    def run_turn(self, text, prompter, attachments=None):
+        raise TurnInterrupted()
+
+
+def test_打断后首条消息截断命名(client, isolated_store):
+    """首轮被打断: 消息已落盘, 不该停在未命名——截断首条消息即时命名,
+    并广播 session_renamed 让侧栏立刻更新。"""
+    sid = "s-interrupt-title"
+    web_session = server.get_or_create_web_session(sid)
+    web_session.busy = True
+    monkey_text = "帮我排查会话标题的生成逻辑，这是一个足够长的首条消息用来验证截断"
+    stub = _InterruptRuntime(web_session, monkey_text)
+    # runtime 替身挂到 web_session, worker 从这里读会话内存态
+    web_session.runtime = stub
+
+    events: list = []
+    server._turn_slots.acquire()               # 平衡 worker finally 里的 release
+    server._spawn_turn_thread(web_session, monkey_text, [],
+                              server.TurnEmitter(events.append), None)
+    deadline = time.monotonic() + 10
+    while web_session.busy and time.monotonic() < deadline:
+        time.sleep(0.05)
+
+    assert web_session.busy is False
+    # 落盘发生了（打断分支 persist_turn）
+    assert server.store.count_messages(sid) >= 1
+    # 标题 = 首条消息前 30 字符
+    renamed = [e for e in events if e["type"] == "session_renamed"]
+    assert renamed and renamed[0]["title"] == monkey_text[:30]
+    assert server.store.get_title(sid) == monkey_text[:30]
+    assert web_session.titled is True
+
+
+def test_列表接口回填历史未命名会话(client, isolated_store):
+    """历史遗留（打断时还没有兜底逻辑/服务重启丢失内存态）的未命名落盘
+    会话: /api/sessions 读取时一次性截断回填, 二次读取不再写新记录（幂等）。"""
+    sid = "s-legacy-untitled"
+    isolated_store.save_message(sid, Message.user_text("修复登录页的白屏问题"), None)
+
+    sessions = client.get("/api/sessions").json()["sessions"]
+    mine = [s for s in sessions if s["id"] == sid]
+    assert mine[0]["title"] == "修复登录页的白屏问题"[:30]
+    assert isolated_store.get_title(sid) == "修复登录页的白屏问题"[:30]
+
+    # 幂等: 二次读取不再改写（标题记录数不增）
+    import storage as storage_mod
+    before = sum(1 for e in storage_mod.SessionStore._read_entries(
+        isolated_store, isolated_store._session_path(sid))
+        if type(e).__name__ == "TitleRecord")
+    client.get("/api/sessions")
+    after = sum(1 for e in storage_mod.SessionStore._read_entries(
+        isolated_store, isolated_store._session_path(sid))
+        if type(e).__name__ == "TitleRecord")
+    assert before == after == 1
+
+
+def test_纯图片首条消息不回填命名(client, isolated_store):
+    """首条消息无文本（纯图片附件）: 回填不造出空标题, 维持 UNTITLED。"""
+    sid = "s-image-only"
+    msg = Message(role="user", content=[ImageContentBlock(
+        source={"type": "base64", "media_type": "image/png", "data": "x"})])
+    isolated_store.save_message(sid, msg, None)
+
+    sessions = client.get("/api/sessions").json()["sessions"]
+    mine = [s for s in sessions if s["id"] == sid]
+    assert mine[0]["title"] == "(未命名)"
+    assert isolated_store.get_title(sid) is None

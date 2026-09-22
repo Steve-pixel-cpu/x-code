@@ -389,6 +389,9 @@ class ConversationRuntime:
         # 会话级思考等级: 初值取自 api_client（=全局默认）, 之后只改自己。
         # stream() 调用时带上, 多会话共用 client 也不会互相串设置。
         self._thinking_level = api_client.thinking_level
+        # 会话级模型: None = 跟随 api_client 当前模型（全局默认/全局切换）;
+        # 非空时 stream() 按轮携带, 会话内换模型不影响其他会话。
+        self._model: Optional[str] = None
         # 持久化钩子（Web 端增量落盘用, CLI 默认 None 行为不变）:
         # - on_iterate: 消息历史处于一致点（无悬空 tool_use）时触发——
         #   用户消息落定后、每次工具结果回填后
@@ -505,6 +508,18 @@ class ConversationRuntime:
 
     def set_thinking_level(self, level: str) -> None:
         self._thinking_level = level
+
+    def model(self) -> Optional[str]:
+        """本会话请求覆盖的模型名; None = 跟随 api_client 当前模型。"""
+        return self._model
+
+    def set_model(self, model: Optional[str]) -> None:
+        self._model = model
+
+    def set_api_client(self, api_client) -> None:
+        """热替换 api_client（会话切换到跨 provider 模型时, 服务端构建
+        会话专属 client 挂进来）。仅替换引用, 不迁移运行态。"""
+        self._api_client = api_client
 
     def _authorize_tool_use(self, tool_block: ToolContentBlock,
                             prompter: Optional[PermissionPrompter]=None
@@ -953,6 +968,7 @@ class ConversationRuntime:
                 system_prompt=self._effective_system_prompt,
                 messages=self._model_view(),
                 thinking_level=self._thinking_level,
+                model=self._model,
             )
             message, token_usage = build_assistant_message(events)
             truncated = any(

@@ -49,7 +49,9 @@ class ScriptedClient:
         self.seen: list[list] = []       # 每次调用收到的 messages 快照
         self.thinking_level = "medium"   # runtime 构建时读取（会话级等级初值）
 
-    def stream(self, system_prompt, messages, thinking_level=None) -> list:
+    def stream(self, system_prompt, messages, thinking_level=None, *, model=None, include_tools=True, emit_output=None, on_event=None) -> list:
+        if not include_tools or emit_output is not None:
+            raise TypeError("side-calls unsupported")  # 锁定旧客户端语义: 无 side-call 能力
         self.seen.append(list(messages))
         events = self.script[self.calls] if self.calls < len(self.script) else self.script[-1]
         self.calls += 1

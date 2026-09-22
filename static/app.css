@@ -508,9 +508,10 @@
   .msg-col { width: var(--content-w); margin: 0 auto; padding: 28px 32px 12px; display: none; }
   .msg-col.on { display: block; }
   /* 桌面应用形态: 界面文字（侧栏/标题/按钮等）不可选中, Ctrl+A 全选
-     只会选中聊天内容; 输入框与消息列保持正常可选 */
+     只会选中聊天内容; 输入框、消息列与计划面板正文保持正常可选 */
   body { user-select: none; -webkit-user-select: none; }
-  .msg-col, .msg-col *, input, textarea, #input {
+  .msg-col, .msg-col *, input, textarea, #input,
+  #plan-body, #plan-body * {
     user-select: text; -webkit-user-select: text;
   }
   /* 自绘标题栏: 高度 42px, 颜色走主题变量——深浅色模式自动协调。
@@ -1763,6 +1764,8 @@
   .plan-card.allowed .plan-title { color: var(--ok, #3f9b6e); }
   .plan-card.denied .plan-title { color: var(--text-3); }
   .plan-card.denied .plan-body { opacity: .55; }
+  /* 过期定格的特化标记: "已过期 · 继续对话后重新规划" */
+  .plan-card.expired .pr-mark { color: var(--text-3); font-weight: 500; }
 
 /* ============ 右侧计划面板: present_plan 审阅视图 ============
    #pane.plan-open 时主区切两栏网格(聊天列收窄), 计划全文+审批独立成栏,
@@ -1822,6 +1825,15 @@ body.col-resizing, body.col-resizing * { cursor: col-resize !important; }
 }
 #plan-head svg { color: var(--accent); }
 #plan-title { flex: 1; }
+/* 复制按钮: 与关闭钮同族但带文案, 主色弱化为文字色, hover 点亮 */
+#plan-copy {
+  display: flex; align-items: center; gap: 5px;
+  border: none; background: none; cursor: pointer;
+  color: var(--text-3); padding: 4px 8px; border-radius: 6px;
+  font-size: 12px; font-weight: 500;
+  font-family: inherit;
+}
+#plan-copy:hover { color: var(--text-1); background: var(--hover, rgba(127,127,127,.14)); }
 #plan-close {
   border: none; background: none; cursor: pointer;
   color: var(--text-3); padding: 4px; border-radius: 6px;
@@ -1830,8 +1842,64 @@ body.col-resizing, body.col-resizing * { cursor: col-resize !important; }
 #plan-close:hover { color: var(--text-1); background: var(--hover, rgba(127,127,127,.14)); }
 #plan-body {
   flex: 1; overflow-y: auto; min-height: 0;
-  padding: 16px 18px; font-size: 14px; line-height: 1.75;
+  padding: 16px 18px; font-size: 14.5px; line-height: 1.75;
 }
+/* ---- 计划正文 markdown 排版: 与聊天流 .bubble 同语言, 层级更分明
+ * （计划是结构化文档: 标题分节 + 清单为主, 段距/分隔线/行内代码都要有） ---- */
+#plan-body p { margin: 0 0 .7em; }
+#plan-body p:last-child { margin-bottom: 0; }
+#plan-body h1, #plan-body h2, #plan-body h3, #plan-body h4 {
+  margin: 1.15em 0 .5em; line-height: 1.4; font-weight: 600;
+}
+#plan-body h1 { font-size: 1.28em; }
+#plan-body h2 { font-size: 1.15em; padding-bottom: .3em; border-bottom: 1px solid var(--border); }
+#plan-body h3 { font-size: 1.04em; }
+#plan-body h1:first-child, #plan-body h2:first-child, #plan-body h3:first-child { margin-top: 0; }
+#plan-body ul, #plan-body ol { margin: 0 0 .7em; padding-left: 1.5em; }
+#plan-body li { margin: .28em 0; }
+#plan-body li::marker { color: var(--text-3); }
+#plan-body li > ul, #plan-body li > ol { margin-bottom: 0; }
+#plan-body code {
+  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  font-size: .88em;
+  background: color-mix(in srgb, var(--surface-2, rgba(127,127,127,.14)) 80%, transparent);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: .1em .4em;
+}
+#plan-body pre {
+  background: color-mix(in srgb, var(--surface-2, rgba(127,127,127,.12)) 70%, transparent);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md, 8px);
+  padding: 10px 12px;
+  overflow-x: auto;
+  margin: 0 0 .7em;
+}
+#plan-body pre code { background: none; border: none; padding: 0; font-size: 12.5px; }
+#plan-body blockquote {
+  margin: 0 0 .7em; padding: .15em 0 .15em .9em;
+  border-left: 3px solid color-mix(in srgb, var(--accent) 55%, transparent);
+  color: var(--text-2);
+}
+#plan-body table { border-collapse: collapse; margin: 0 0 .7em; font-size: .93em; width: 100%; }
+#plan-body th, #plan-body td { border: 1px solid var(--border); padding: 5px 9px; text-align: left; }
+#plan-body th { background: color-mix(in srgb, var(--surface-2, rgba(127,127,127,.12)) 70%, transparent); font-weight: 600; }
+#plan-body hr { border: none; border-top: 1px solid var(--border); margin: 1.1em 0; }
+#plan-body a { color: var(--accent); text-decoration: none; }
+#plan-body a:hover { text-decoration: underline; }
+/* GFM 任务清单: 复选框 accent 化, 勾选项弱化（计划里"已完成"一眼可见） */
+#plan-body input[type="checkbox"] {
+  appearance: none; width: 13px; height: 13px; margin: 0 .45em 0 -1.45em;
+  vertical-align: -2px; border: 1.5px solid var(--border-strong); border-radius: 3px;
+}
+#plan-body input[type="checkbox"]:checked {
+  background: var(--accent); border-color: var(--accent);
+  background-image: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round"><path d="M4.5 12.5l5 5 10-11"/></svg>');
+  background-size: 9px; background-position: center; background-repeat: no-repeat;
+}
+#plan-body li:has(> input[type="checkbox"]:checked) { color: var(--text-3); }
+/* 过期计划: 整体淡化但保留可读, 新计划到达时移除 .stale */
+#plan-body.stale { opacity: .55; }
 #plan-body h1, #plan-body h2, #plan-body h3 { margin: 1em 0 .45em; line-height: 1.4; }
 #plan-body h1:first-child, #plan-body h2:first-child, #plan-body h3:first-child { margin-top: 0; }
 #plan-body ul, #plan-body ol { margin: .4em 0; padding-left: 1.5em; }

@@ -63,20 +63,23 @@ def test_web_session_has_own_thinking_level(client, isolated_store):
     assert b.thinking_level == "low"
 
 
-def test_settings_thinking_level_propagates_to_sessions(client, isolated_store):
-    """全局设置变更: 存活会话的 runtime 与运行态同步更新。"""
+def test_settings_thinking_level_only_changes_default(client, isolated_store):
+    """全局设置变更（设置页）: 只改"新会话默认值", 存活会话不受波及——
+    会话内切换走 WS set_thinking_level（见 test_session_settings_isolation）。"""
     ws = server.get_or_create_web_session("s-lvl")
+    ws.thinking_level = "low"
 
     class _FakeRuntime:
-        level = None
+        level = "low"
         def set_thinking_level(self, level):
             self.level = level
     ws.runtime = _FakeRuntime()
 
     client.post("/api/settings", json={"thinking_level": "max"})
 
-    assert ws.thinking_level == "max"        # 运行态已更新
-    assert ws.runtime.level == "max"         # runtime 已注入
+    assert server.api_client.thinking_level == "max"  # 新会话默认已更新
+    assert ws.thinking_level == "low"                 # 存活会话不受波及
+    assert ws.runtime.level == "low"
 
 
 def test_runtime_thinking_level_isolation():

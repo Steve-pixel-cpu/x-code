@@ -43,6 +43,16 @@ class PermissionModeRecord(BaseModel):
     timestamp: str
 
 
+class ModelRecord(BaseModel):
+    """会话模型记录: 会话级模型选择的持久化。追加式取最新一条;
+    没有记录的会话跟随全局 active 模型。model_id=None 表示"清除覆盖"
+    （回到跟随全局）, 旧记录保留在文件里。"""
+    type: Literal["model"] = "model"
+    provider_id: Optional[str] = None
+    model_id: Optional[str] = None
+    timestamp: str
+
+
 class SessionStore:
 
     def __init__(self, storage_dir: Path):
@@ -184,6 +194,28 @@ class SessionStore:
                 latest = entry.mode
         return latest
 
+    def set_model(self, session_id: str, provider_id: Optional[str],
+                  model_id: Optional[str]) -> None:
+        """追加一条会话模型记录。model_id=None 表示清除覆盖（跟随全局）。"""
+        record = ModelRecord(
+            provider_id=provider_id,
+            model_id=model_id,
+            timestamp=datetime.now(timezone.utc).isoformat(),
+        )
+        self._append_entry(self._session_path(session_id), record)
+
+    def get_model(self, session_id: str) -> tuple[Optional[str], Optional[str]]:
+        """返回会话模型 (provider_id, model_id); 没有记录返回 (None, None)
+        （调用方回落全局 active）。"""
+        entries = self._read_entries(self._session_path(session_id))
+        latest: Optional[ModelRecord] = None
+        for entry in entries:
+            if isinstance(entry, ModelRecord):
+                latest = entry
+        if latest is None:
+            return (None, None)
+        return (latest.provider_id, latest.model_id)
+
     def _session_path(self, session_id: str) -> Path:
         return self._storage_dir / f"{session_id}.jsonl"
 
@@ -206,6 +238,8 @@ class SessionStore:
                     result.append(WorkdirRecord.model_validate(data))
                 elif data.get("type") == "permission_mode":
                     result.append(PermissionModeRecord.model_validate(data))
+                elif data.get("type") == "model":
+                    result.append(ModelRecord.model_validate(data))
                 else:
                     result.append(StorageEntry.model_validate(data))
             except json.JSONDecodeError as e:

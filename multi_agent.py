@@ -55,6 +55,10 @@ class AgentJob(BaseModel):
     # worker 的工具工作目录（bash cwd / 相对路径解析基点）: 从 Leader 会话继承,
     # 让子任务与主对话操作同一个项目。缺省 = 跟随进程 cwd（CLI 旧行为）。
     workdir: Optional[str] = None
+    # worker 的 API 连接信息 (api_key, base_url, model, protocol): 从派生它的
+    # 会话继承——会话专属模型/供应商对子代理同样生效。None = 跟随全局
+    # _api_config_provider（CLI 旧行为）。
+    api_config: Optional[tuple[str, Optional[str], str, str]] = None
 
 
 def allowed_tools_for_subagent(subagent_type: str) -> set[str]:
@@ -136,7 +140,8 @@ def build_subagent_runtime(job: AgentJob) -> ConversationRuntime:
     - 递归防护: 工具规格经 _tool_specs_for 过滤，agent 工具永远不在
       worker 的请求里（TOOL_WHITELIST 亦不含, 双保险）
     """
-    api_key, base_url, model, protocol = _api_config_provider()
+    # 连接信息: 会话自带（Web 多会话各选各的模型）优先, 否则全局工厂（CLI）
+    api_key, base_url, model, protocol = job.api_config or _api_config_provider()
 
     registry = ToolRegistry()
     for tool_name in sorted(job.allowed_tools):
@@ -197,7 +202,8 @@ class AgentOrchestrator:
         thread.start()  # ← 点火，立刻返回
 
     def spawn_agent(self, description: str, prompt: str, name: Optional[str] = None, subagent_type: str = "general",
-                    workdir: Optional[str] = None) -> AgentManifest:
+                    workdir: Optional[str] = None,
+                    api_config: Optional[tuple[str, Optional[str], str, str]] = None) -> AgentManifest:
         if description.strip() == "" or prompt.strip() == "":
             raise ValueError("description or prompt are null")
         self._store_dir.mkdir(parents=True, exist_ok=True)
@@ -242,12 +248,14 @@ class AgentOrchestrator:
         # 读者看到半截 JSON（解析失败被吞, agent 凭空消失）
         atomic_write_text(json_path, manifest_content)
 
-        # workdir: 调用方显式传入优先（Web 按会话传）, 否则用编排器默认
+        # workdir / api_config: 调用方显式传入优先（Web 按会话传）, 否则用
+        # 编排器默认（workdir）/ 全局工厂（api_config → CLI 行为）
         job = AgentJob(
             manifest=manifest.model_copy(),
             prompt=prompt,
             allowed_tools=white_tools.copy(),
             workdir=workdir or self._workdir,
+            api_config=api_config,
         )
         try:
             self._spawn_fn(job)

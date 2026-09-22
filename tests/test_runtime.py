@@ -36,7 +36,7 @@ class ScriptedApiClient(ApiClient):
         self.calls: list[list] = []
         self.thinking_level = "medium"   # runtime 构建时读取（会话级等级初值）
 
-    def stream(self, system_prompt, messages, thinking_level=None):
+    def stream(self, system_prompt, messages, thinking_level=None, *, model=None, include_tools=True, emit_output=None, on_event=None):
         self.calls.append(list(messages))
         return self.script.pop(0)
 

@@ -26,7 +26,7 @@ class ScriptedClient:
         self.calls = 0
         self.thinking_level = "medium"
 
-    def stream(self, system_prompt, messages, thinking_level=None) -> list:
+    def stream(self, system_prompt, messages, thinking_level=None, *, model=None, include_tools=True, emit_output=None, on_event=None) -> list:
         events = self.script[self.calls] if self.calls < len(self.script) else self.script[-1]
         self.calls += 1
         return events

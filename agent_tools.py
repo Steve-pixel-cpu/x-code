@@ -174,6 +174,22 @@ def current_session_id() -> Optional[str]:
         return None
 
 
+def current_session_api_config() -> Optional[tuple[str, Optional[str], str, str]]:
+    """当前会话的 API 连接信息 (api_key, base_url, model, protocol)。
+
+    无会话绑定（CLI）→ None: worker 回落全局工厂（原行为）。Web 端解析
+    派生会话的专属 client（跨 provider 模型）或全局 client; 解析失败也
+    回落 None, 不阻断 spawn。"""
+    sid = current_session_id()
+    if not sid:
+        return None
+    try:
+        from server import _api_config_for_session
+        return _api_config_for_session(sid)
+    except Exception:
+        return None
+
+
 # --- handlers: 签名与其他工具一致 (params: dict, workdir: Optional[str]) ---
 
 def _fmt_manifest(m) -> str:
@@ -194,6 +210,9 @@ def spawn_agent_tool(params: dict, workdir: Optional[str] = None) -> str:
             name=params.get("name") or None,
             subagent_type=params.get("subagent_type") or "general",
             workdir=workdir,
+            # worker 跟随派生会话的模型/供应商（会话专属模型对子代理同样生效）;
+            # CLI / 无会话绑定时为 None → 回落全局工厂, 行为不变
+            api_config=current_session_api_config(),
         )
     except ValueError as e:
         return f"ERROR: {e}"

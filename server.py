@@ -60,6 +60,7 @@ from api_client import (
 )
 from config import USER_DIR, SETTINGS_FILE, ConfigLoader, RuntimeConfig, load_providers, save_providers
 from main import (
+    AUTO_TITLE_LEN,
     TOOLS,
     build_registry,
     build_runtime,
@@ -446,6 +447,62 @@ def _subagent_api_config() -> tuple[str, Optional[str], str, str]:
             api_client.protocol)
 
 
+def _api_client_for(web_session):
+    """会话请求所用的 api_client: 模型跟随全局（含同 provider 内换模型,
+    per-call model 参数覆盖）→ 共享全局单例; 指向其他 provider → 按该
+    供应商配置构建会话专属 client（钩子与全局一致, 浏览器镜像/限流退避/
+    打断）。会话专属实例缓存复用, provider 配置变化时重建。"""
+    cfg_provider = web_session.model_provider
+    active = _provider_cfg.get("active") or {}
+    if not cfg_provider or cfg_provider == active.get("provider"):
+        web_session.api_client = None
+        return api_client
+    prov = next((p for p in _provider_cfg.get("providers", [])
+                 if p.get("id") == cfg_provider), None)
+    if not prov or not prov.get("enabled"):
+        # 供应商被删/禁用: 回落全局 client, 清掉无效覆盖
+        web_session.model_provider = None
+        web_session.model_id = None
+        web_session.api_client = None
+        return api_client
+    protocol = _protocol_of(prov)
+    base_url = _normalize_base_url(prov.get("base_url"), protocol=protocol) or None
+    cached = web_session.api_client
+    if (cached is not None and cached.protocol == protocol
+            and cached.api_key == (prov.get("api_key") or "")
+            and (cached.base_url or None) == base_url):
+        return cached
+    web_session.api_client = make_api_client(
+        protocol, api_key=prov.get("api_key") or "",
+        model=web_session.model_id or "", base_url=base_url,
+        tools=TOOLS, emit_output=False,
+        thinking_level=runtime_config.thinking_level(),
+        on_retry=_mirror_rate_limit_retry,
+        should_stop_provider=_should_stop_now,
+        on_event_provider=lambda: _mirror_on_event(dispatch.current_sink()),
+    )
+    return web_session.api_client
+
+
+def _api_config_for_session(session_id: Optional[str]
+                            ) -> tuple[str, Optional[str], str, str]:
+    """会话的 API 连接四元组（供 multi_agent worker 跟随会话模型）。
+
+    从会话解析连接信息, 不构建新 client: 存活会话 → 其专属 client（跨
+    provider 模型）或全局 client; 未知/无绑定 → 全局 client。模型取会话
+    覆盖值（同 provider 的覆盖只存在于 per-call 参数, 不在 client.model
+    上, 必须显式带上）, 无覆盖则跟随 client 默认。子代理由此与 Leader
+    用同一份连接信息与模型。"""
+    web_session = _sessions.get(session_id) if session_id else None
+    if web_session is not None:
+        client = _api_client_for(web_session)
+        model = web_session.model_id or client.model
+    else:
+        client = api_client
+        model = client.model
+    return (client.api_key, client.base_url, model, client.protocol)
+
+
 _provider_cfg = load_providers()
 _apply_provider_config(_provider_cfg)
 
@@ -552,12 +609,23 @@ class WebPermissionPrompter:
         self._responses: "queue.Queue[tuple[str, bool]]" = queue.Queue()
         self._seq = 0
         self._cancelled = False
+        self._pending_plan_id: Optional[str] = None   # 挂起中的 present_plan 请求 id
 
     def decide(self, request: PermissionRequest) -> PermissionResult:
         if self._cancelled:
             return self._finish_deny(request, "(用户已打断本轮，自动拒绝)")
         self._seq += 1
         request_id = f"perm-{self._seq}"
+        if request.tool_name == "present_plan":
+            self._pending_plan_id = request_id
+        try:
+            return self._decide_inner(request, request_id)
+        finally:
+            if request.tool_name == "present_plan":
+                self._pending_plan_id = None
+
+    def _decide_inner(self, request: PermissionRequest,
+                      request_id: str) -> PermissionResult:
         # 先推弹窗再阻塞等待——顺序反了浏览器永远收不到弹窗
         self._emit({
             "type": "permission_request",
@@ -575,7 +643,13 @@ class WebPermissionPrompter:
             except queue.Empty:
                 continue
             if got_id == _CANCEL_SENTINEL:
-                return self._finish_deny(request, "(用户已打断本轮，自动拒绝)")
+                # cancel 打断（stop/断连/计划追加接力）: 与手动拒绝走同一
+                # 理由回流（"修订后再弹"）, 但 stop_requested 已置位, 内核
+                # 在下一个流事件即抛 TurnInterrupted, 模型不会真的修订。
+                return self._finish_deny(
+                    request,
+                    "Plan rejected by the user. Revise the plan per the "
+                    "feedback and present it again with present_plan.")
             if got_id != request_id:
                 continue  # stale/重放的响应，忽略
             if approved:
@@ -605,6 +679,13 @@ class WebPermissionPrompter:
     def resolve(self, request_id: str, approved: bool) -> None:
         """事件循环侧: 浏览器的审批结果送达。"""
         self._responses.put((request_id, approved))
+
+    def pending_plan_request_id(self) -> Optional[str]:
+        """事件循环侧: 当前挂起的 present_plan 请求 id（无则 None）。
+
+        decide() 在工作线程阻塞等待, _pending_request_id 由它写入;
+        事件循环线程只读, 供"继续聊天隐性否决计划"判断用。"""
+        return self._pending_plan_id
 
     def cancel(self) -> None:
         """打断等待（stop / 断连）: 立即解除 decide 阻塞并朝安全侧拒绝。"""
@@ -641,12 +722,14 @@ class WebSession:
         self.workdir = store.get_workdir(session_id)  # 会话工作目录（项目）
         # 会话级思考等级: 初值取全局默认; 切换只影响本会话（runtime 注入）
         self.thinking_level = runtime_config.thinking_level()
-        # 会话级权限模式: 初值取全局默认; 下拉框切换只影响本会话,
-        # 全局设置页改的是"新会话的默认值"
         # 会话级权限模式: 持久值优先（重启不丢）, 没有记录回落全局默认;
         # 下拉框切换只影响本会话, 全局设置页改的是"新会话的默认值"
         persisted_mode = NAME_TO_MODE.get(store.get_permission_mode(session_id) or "")
         self.permission_mode = persisted_mode or app_state.permission_mode
+        # 会话级模型: 持久值优先（重启不丢）, 没有记录 (None, None) = 跟随
+        # 全局 active; 会话内切换只影响本会话（专属 client / 按轮 model）
+        self.model_provider, self.model_id = store.get_model(session_id)
+        self.api_client = None          # 会话专属 client（跨 provider 模型时构建）
         self.prompter: Optional[WebPermissionPrompter] = None
         # 排队区: 本轮进行中用户追加的后续消息（事件循环线程读写）,
         # 当前轮结束后由 _start_pending_turn 接力开跑。
@@ -733,13 +816,14 @@ def load_runtime_for(web_session: WebSession) -> None:
     msgs, last_uuid = store.load_session(web_session.session_id)
     web_session.runtime = build_runtime(
         session=Session(messages=msgs),
-        api_client=api_client,
+        api_client=_api_client_for(web_session),
         registry=registry,
         system_prompt=_session_system_prompt(web_session.workdir),
         hooks_config=runtime_config,
         permission_mode=web_session.permission_mode,
     )
     web_session.runtime.set_thinking_level(web_session.thinking_level)
+    web_session.runtime.set_model(web_session.model_id)
     # 未经执行就被终局的工具（权限拒绝 / hook 拦截 / prompter 拒绝）:
     # 补发 tool_result 镜像, 前端工具卡才能闭合——否则永远"运行中"。
     # executed 路径不经此处（EmittingToolRegistry 已发）, 不会双发。
@@ -783,6 +867,33 @@ def _ai_title(first_text: str) -> Optional[str]:
     return title[:30] or None
 
 
+def _truncated_title(messages: list[Message]) -> Optional[str]:
+    """首条用户消息的文本截断标题；无文本（纯图片等）返回 None。"""
+    if not messages or messages[0].role != "user":
+        return None
+    first_text = " ".join(
+        b.text for b in messages[0].content if isinstance(b, TextContentBlock)
+    ).strip()
+    return first_text[:AUTO_TITLE_LEN] or None
+
+
+def backfill_title(session_id: str) -> str:
+    """兜底回填: 已落盘但从未命名的会话 → 截断首条用户消息命名（一次性的）。
+
+    覆盖所有漏网路径：打断/异常分支只落盘不命名、排队跳过、历史遗留。
+    返回最终展示标题；无消息或首条无文本则维持 UNTITLED。
+    """
+    existing = store.get_title(session_id)
+    if existing is not None:
+        return existing
+    messages, _ = store.load_session(session_id)
+    title = _truncated_title(messages)
+    if not title:
+        return UNTITLED
+    store.set_title(session_id, title)
+    return title
+
+
 def maybe_auto_title(web_session: WebSession) -> bool:
     """首轮对话成功后自动命名: AI 总结标题，失败回退前 30 字符截断。
 
@@ -792,23 +903,42 @@ def maybe_auto_title(web_session: WebSession) -> bool:
     if web_session.titled:
         return False
     messages = web_session.runtime.session().messages
-    if not messages or messages[0].role != "user":
-        return False
-    first_text = " ".join(
-        b.text for b in messages[0].content if isinstance(b, TextContentBlock)
-    ).strip()
-    if not first_text:
+    fallback = _truncated_title(messages)
+    if not fallback:
         return False
     title = None
     try:
+        first_text = " ".join(
+            b.text for b in messages[0].content if isinstance(b, TextContentBlock)
+        ).strip()
         title = _ai_title(first_text)
     except Exception as e:
         print(f"⚠ AI 命名失败，回退截断标题: {e}")
     if not title:
-        title = first_text[:30]
+        title = fallback
     store.set_title(web_session.session_id, title)
     web_session.titled = True
     return True
+
+
+def fallback_title_on_interrupt(web_session: WebSession, emitter: TurnEmitter) -> None:
+    """打断/异常路径的兜底命名: 截断首条消息命名, 不发 AI 请求。
+
+    停止语义下再挂 LLM 调用违背直觉且可能撞限流; 正常完成路径仍走 AI 命名。
+    若这里跳过（首条无文本等）, 列表接口的 backfill_title 仍会在下次刷新兜底。
+    """
+    if web_session.titled:
+        return
+    title = _truncated_title(web_session.runtime.session().messages)
+    if not title:
+        return
+    store.set_title(web_session.session_id, title)
+    web_session.titled = True
+    emitter({
+        "type": "session_renamed",
+        "session_id": web_session.session_id,
+        "title": title,
+    })
 
 
 # ============================================================================
@@ -951,6 +1081,7 @@ def _spawn_turn_thread(web_session: WebSession, text: str,
             # StreamInterrupted = 打断落在重试退避/建连静默窗口（retry 轮询点抛出）
             repair_interrupted_turn(web_session.runtime.session())
             persist_turn(web_session)
+            fallback_title_on_interrupt(web_session, emitter)
             # 插队与手动停止同语义: 被打断的任务就地收束, 不自动续跑
             # （被打断的进度留在历史里, 是否继续由用户下一次消息决定）
             emitter({"type": "turn_done", "interrupted": True, "iterations": 0,
@@ -960,6 +1091,7 @@ def _spawn_turn_thread(web_session: WebSession, text: str,
             # （朝安全侧，与 CLI Ctrl+C 同路径）
             repair_interrupted_turn(web_session.runtime.session())
             persist_turn(web_session)
+            fallback_title_on_interrupt(web_session, emitter)
             emitter({"type": "error", "message": str(e)})
             emitter({"type": "turn_done", "interrupted": True, "iterations": 0,
                      "budget_exhausted": False, "iterations_exhausted": False})
@@ -1291,6 +1423,8 @@ async def api_post_bg(request: dict):
 
 @app.get("/api/sessions")
 async def api_list_sessions():
+    active = _provider_cfg.get("active") or {}
+
     def _mode_name_for(sid: str) -> str:
         """列表回显的会话权限模式: 存活会话取运行值, 否则取持久值,
         再否则全局默认——前端下拉框据此跟随各会话, 不再停留在上一个会话的值。"""
@@ -1300,24 +1434,47 @@ async def api_list_sessions():
         persisted = NAME_TO_MODE.get(store.get_permission_mode(sid) or "")
         return MODE_TO_NAME[persisted or app_state.permission_mode]
 
+    def _session_thinking(sid: str) -> str:
+        """列表回显的会话思考等级: 存活取运行值, 否则全局默认（新会话语义）。"""
+        live = _sessions.get(sid)
+        if live is not None:
+            return live.thinking_level
+        return api_client.thinking_level
+
+    def _session_model(sid: str) -> tuple[Optional[str], Optional[str]]:
+        """列表回显的会话模型 (provider_id, model_id): 存活取运行值,
+        否则持久值; (None, None) = 跟随全局 active。"""
+        live = _sessions.get(sid)
+        if live is not None:
+            return (live.model_provider, live.model_id)
+        return store.get_model(sid)
+
     on_disk = set(store.list_sessions())
     # 已落盘的会话由 store 覆盖，pending 里不再需要；未落盘的保持 pending
     _pending_sessions.difference_update(on_disk)
     items = [
         {
             "id": sid,
-            "title": store.get_title(sid) or UNTITLED,
+            # 兜底回填: 打断/异常/排队跳过等路径漏掉的命名, 在列表读取时
+            # 一次性补齐（截断首条用户消息; 无文本则维持 UNTITLED）
+            "title": backfill_title(sid),
             "message_count": store.count_messages(sid),
             # 项目归属: 会话的工作目录(WorkdirRecord, 取最新一条); 未设置时 None
             "workdir": store.get_workdir(sid),
             "permission_mode": _mode_name_for(sid),
+            "thinking_level": _session_thinking(sid),
+            "model_provider": _session_model(sid)[0],
+            "model_id": _session_model(sid)[1],
         }
         for sid in on_disk
     ]
     for sid in _pending_sessions:
         items.append({"id": sid, "title": UNTITLED, "message_count": 0,
                       "workdir": None,
-                      "permission_mode": _mode_name_for(sid)})
+                      "permission_mode": _mode_name_for(sid),
+                      "thinking_level": _session_thinking(sid),
+                      "model_provider": _session_model(sid)[0],
+                      "model_id": _session_model(sid)[1]})
     items.sort(key=lambda item: item["id"], reverse=True)  # 时间戳字典序即时间序，最新在前
     return {"sessions": items}
 
@@ -1519,11 +1676,8 @@ async def api_post_settings(request: dict):
                 detail=f"未知思考等级: {thinking}（可选: {' | '.join(THINKING_LEVELS)}）",
             )
         api_client.set_thinking_level(level)  # 新会话的默认值
-        # 存活会话各自持有等级: runtime（本轮立即生效）+ WebSession（下轮注入）
-        for web_session in _sessions.values():
-            web_session.thinking_level = level
-            if web_session.runtime is not None:
-                web_session.runtime.set_thinking_level(level)
+        # 存活会话各自持有等级（WS set_thinking_level 单独切换）,
+        # 这里只改全局默认——与其他设置的会话隔离语义对齐
 
     mode_name = request.get("permission_mode")
     if mode_name is not None:
@@ -1744,6 +1898,24 @@ async def ws_endpoint(websocket: WebSocket, session_id: str):
                 if not text and not attachments:
                     continue
                 if web_session.busy:
+                    plan_rid = (web_session.prompter.pending_plan_request_id()
+                                if web_session.prompter is not None else None)
+                    if plan_rid is not None:
+                        # 卡在计划审批上时用户继续发消息 = 隐性否决当前计划:
+                        # 新消息置顶排队 + stop_requested + prompter.cancel——
+                        # 与「立即」插队同款打断语义（cancel 使 decide 以 DENY
+                        # 解除, 模型收到计划被拒后就地收束, 不会盲目修订）。
+                        # 当前轮 turn_done 后 finally 经 _start_pending_turn
+                        # 接力, 这条消息作为下一棒立刻开跑。
+                        web_session.pending.insert(0, {
+                            "qid": str(raw.get("qid") or uuid.uuid4()),
+                            "text": text,
+                            "attachments": attachments,
+                        })
+                        web_session.stop_requested = True
+                        web_session.prompter.cancel()
+                        emit({"type": "turn_interrupting"})
+                        continue
                     # 本轮还在跑: 静默追加进会话级排队区, 当前轮结束后自动接力;
                     # 前端在待发送气泡上提供「立即」按钮, 需要插队时发 queue_promote。
                     # qid 由前端生成（本地排队卡片与后端排队区对齐）, 缺失时兜底生成
@@ -1811,6 +1983,49 @@ async def ws_endpoint(websocket: WebSocket, session_id: str):
                     "permission_mode": MODE_TO_NAME[mode],
                 })
 
+            elif msg_type == "set_thinking_level":
+                # 会话内下拉框: 只切本会话（全局默认值走 REST /api/settings）。
+                # 下一轮迭代立即生效（stream 按轮携带, 与模式升级同步）。
+                level = str(raw.get("level") or "").strip().lower()
+                if level not in THINKING_LEVELS:
+                    emit_error(f"未知思考等级: {raw.get('level')!r}")
+                    continue
+                web_session.thinking_level = level
+                if web_session.runtime is not None:
+                    web_session.runtime.set_thinking_level(level)
+                web_session.broadcast({
+                    "type": "thinking_changed",
+                    "session_id": web_session.session_id,
+                    "thinking_level": level,
+                })
+
+            elif msg_type == "set_model":
+                # 会话内下拉框: 只切本会话。同 provider → per-call model 覆盖;
+                # 跨 provider → 换绑会话专属 client。运行中下一迭代立即生效。
+                provider_id = str(raw.get("provider_id") or "").strip()
+                model_id = str(raw.get("model_id") or "").strip()
+                if not provider_id or not model_id:
+                    emit_error(f"模型选择不完整: {raw.get('provider_id')!r} | {raw.get('model_id')!r}")
+                    continue
+                prov = next((p for p in _provider_cfg.get("providers", [])
+                             if p.get("id") == provider_id and p.get("enabled")), None)
+                if prov is None or not any(
+                        m.get("id") == model_id for m in (prov.get("models") or [])):
+                    emit_error(f"未知模型: {provider_id} | {model_id}")
+                    continue
+                web_session.model_provider = provider_id
+                web_session.model_id = model_id
+                store.set_model(web_session.session_id, provider_id, model_id)
+                if web_session.runtime is not None:
+                    web_session.runtime.set_api_client(_api_client_for(web_session))
+                    web_session.runtime.set_model(model_id)
+                web_session.broadcast({
+                    "type": "model_changed",
+                    "session_id": web_session.session_id,
+                    "provider_id": provider_id,
+                    "model_id": model_id,
+                })
+
             elif msg_type == "permission_response":
                 prompter = web_session.prompter
                 if prompter is None:
@@ -1822,7 +2037,7 @@ async def ws_endpoint(websocket: WebSocket, session_id: str):
                 request_stop(web_session)
 
             else:
-                emit_error(f"未知消息类型: {msg_type!r}（已知: user / queue_promote / queue_remove / set_permission_mode / permission_response / stop）")
+                emit_error(f"未知消息类型: {msg_type!r}（已知: user / queue_promote / queue_remove / set_permission_mode / set_thinking_level / set_model / permission_response / stop）")
 
     except WebSocketDisconnect:
         # 断连但一轮对话可能还在跑: 朝安全侧叫停；落盘由工作线程完成

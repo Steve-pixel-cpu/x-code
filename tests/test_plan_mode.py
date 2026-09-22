@@ -126,7 +126,7 @@ def test_run_turn_plan_mode_appends_instruction_to_system_prompt():
         def __init__(self, script):
             super().__init__(script)
             self.system_prompts = []
-        def stream(self, system_prompt, messages, thinking_level=None):
+        def stream(self, system_prompt, messages, thinking_level=None, *, model=None, include_tools=True, emit_output=None, on_event=None):
             self.system_prompts.append(list(system_prompt))
             return super().stream(system_prompt, messages, thinking_level)
 
