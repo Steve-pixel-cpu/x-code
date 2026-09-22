@@ -130,6 +130,10 @@
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="16" rx="3"/><path d="M9 4v16M4 9h16M4 15h16M15 4v16"/></svg>
       模型
     </button>
+    <button class="menu-item nav-item" data-section="behavior">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h4l3-8 4 16 3-8h4"/></svg>
+      行为
+    </button>
     <button class="menu-item nav-item" data-section="config">
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><path d="M14 2v6h6M9 13h6M9 17h6"/></svg>
       配置
@@ -347,6 +351,17 @@
           <button type="button" id="btn-save-providers" class="prov-primary">保存模型配置</button>
         </div>
       </div>
+      <div class="sp-section-body" data-section="behavior" style="display:none">
+        <div class="sp-section">行为</div>
+        <div class="sp-section-desc">控制单轮任务循环的运行参数</div>
+        <div class="set-row">
+          <div class="set-info">
+            <div class="set-name">每轮最大迭代次数</div>
+            <div class="set-desc">单轮任务里模型连续调用工具的次数上限，达到后提前收束本轮；1–10000，默认 128，对新会话生效</div>
+          </div>
+          <input id="set-max-iter" class="hex-input num-input" spellcheck="false" inputmode="numeric" placeholder="128" maxlength="5">
+        </div>
+      </div>
       <div class="sp-section-body" data-section="config" style="display:none">
         <div class="sp-section">配置文件</div>
         <div class="sp-section-desc">所有用户级设置都存在这一个文件里（含模型供应商）；手动修改后需重启服务生效</div>
@@ -409,7 +424,7 @@
   </div>
 </div>
 
-<script src="/static/app.js?v=20260922g" defer></script>
+<script src="/static/app.js?v=20260922h" defer></script>
 <script src="/static/music.js?v=20260921c" defer></script>
 </body>
 </html>

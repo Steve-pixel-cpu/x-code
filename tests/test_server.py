@@ -882,6 +882,46 @@ def test_settings_permission_mode_unwritable_degrades(settings_file, monkeypatch
 
 
 # ------------------------------------------------------------
+# 设置: max_iterations（每轮最大迭代次数, 写 maxIterations key）
+# ------------------------------------------------------------
+
+def test_settings_max_iterations_persisted(settings_file):
+    """合法值: 内存与新会话默认值更新, 且落盘为 maxIterations（重启可读回）。"""
+    tc = TestClient(server.app)
+    r = tc.post("/api/settings", json={"max_iterations": 64})
+    assert r.status_code == 200
+    assert r.json()["max_iterations"] == 64
+    assert server.runtime_config.max_iterations() == 64   # 新会话组装 runtime 时取到
+    data = json.loads(settings_file.read_text(encoding="utf-8"))
+    assert data["maxIterations"] == 64
+
+
+def test_settings_max_iterations_merge_keeps_other_keys(settings_file):
+    """落盘只动 maxIterations key, settings.json 里已有内容原样保留。"""
+    settings_file.write_text(json.dumps(
+        {"providers": [], "activeProvider": {"provider": "p", "model": "m"},
+         "permissionMode": "prompt"},
+        ensure_ascii=False), encoding="utf-8")
+    tc = TestClient(server.app)
+    tc.post("/api/settings", json={"max_iterations": 16})
+    data = json.loads(settings_file.read_text(encoding="utf-8"))
+    assert data["maxIterations"] == 16
+    assert data["activeProvider"] == {"provider": "p", "model": "m"}
+    assert data["permissionMode"] == "prompt"
+
+
+def test_settings_max_iterations_invalid_rejected(settings_file):
+    """0/负数/超上限/小数/字符串/bool 均拒绝, 内存与文件都不动。"""
+    tc = TestClient(server.app)
+    before = server.runtime_config.max_iterations()
+    for bad in (0, -5, 10001, 1.5, "abc", True):
+        r = tc.post("/api/settings", json={"max_iterations": bad})
+        assert r.status_code == 400, f"max_iterations={bad!r} 应拒绝"
+    assert server.runtime_config.max_iterations() == before
+    assert not settings_file.exists()   # 拒绝的值不落盘
+
+
+# ------------------------------------------------------------
 # 权限模式: 会话级隔离（WS set_permission_mode 只切本会话）
 # ------------------------------------------------------------
 

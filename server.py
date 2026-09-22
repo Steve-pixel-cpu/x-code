@@ -1653,6 +1653,9 @@ async def api_get_settings():
         # 思考等级已按会话隔离, 这里返回的是"新会话的默认值"
         "thinking_level": api_client.thinking_level,
         "permission_mode": MODE_TO_NAME[app_state.permission_mode],
+        # 每轮最大迭代次数（单轮任务里模型连续调用工具的次数上限）:
+        # 同样是"新会话的默认值", 进行中的会话保持组装时的值
+        "max_iterations": runtime_config.max_iterations(),
         # 前端展示用: 输入栏的模型名 + 顶栏面包屑的工作区名
         "model": api_client.model,
         "provider_id": active.get("provider"),
@@ -1700,6 +1703,21 @@ async def api_post_settings(request: dict):
         # 各自持有, 由会话内的下拉框 / WS set_permission_mode 单独切换
         # ——与 thinking_level 的会话隔离语义对齐
 
+    # 每轮最大迭代次数: 只改全局默认（新会话组装 runtime 时的初值）,
+    # 存活会话不追改——runtime 的 _max_iterations 在 build 时定死,
+    # 与 thinking_level / permission_mode 的会话隔离语义对齐
+    raw_iterations = request.get("max_iterations")
+    if raw_iterations is not None:
+        # bool 是 int 的子类, True 会被当成 1——显式排除
+        if (not isinstance(raw_iterations, int) or isinstance(raw_iterations, bool)
+                or not 1 <= raw_iterations <= 10000):
+            raise HTTPException(
+                status_code=400,
+                detail=f"max_iterations: 须为 1–10000 的整数, got {raw_iterations!r}",
+            )
+        runtime_config.feature_config.max_iterations = raw_iterations
+        _save_setting("maxIterations", raw_iterations)
+
     # 切换激活模型（来自输入框模型下拉）
     provider_id = request.get("provider_id")
     model_id = request.get("model_id")
@@ -1711,13 +1729,12 @@ async def api_post_settings(request: dict):
     return await api_get_settings()
 
 
-def _save_permission_mode(mode: PermissionMode) -> None:
-    """权限模式持久化到 ~/.x-code/settings.json 的 permissionMode key。
+def _save_setting(key: str, value) -> None:
+    """单个用户级设置持久化到 ~/.x-code/settings.json（读-改-写）。
 
-    值用 resolve_permission_mode / config mode_map 认的规范名, 重启后能原样
-    读回; 不写 "allow"（同 POST 入口, 配置口径拒绝它）。读写都走
-    config.SETTINGS_FILE, 测试 monkeypatch 该路径即可隔离。
-    失败只降级为不持久化（本轮内存里仍生效）, 不打断设置请求。
+    文件里其他 key（providers / activeProvider / permissionMode / ...）
+    原样保留。读写都走 config.SETTINGS_FILE, 测试 monkeypatch 该路径即可
+    隔离。失败只降级为不持久化（本轮内存里仍生效）, 不打断设置请求。
     """
     try:
         data = json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
@@ -1725,13 +1742,22 @@ def _save_permission_mode(mode: PermissionMode) -> None:
             data = {}
     except (OSError, ValueError):
         data = {}
-    data["permissionMode"] = MODE_TO_NAME[mode]
+    data[key] = value
     try:
         SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
         SETTINGS_FILE.write_text(
             json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
     except OSError:
         pass
+
+
+def _save_permission_mode(mode: PermissionMode) -> None:
+    """权限模式持久化到 ~/.x-code/settings.json 的 permissionMode key。
+
+    值用 resolve_permission_mode / config mode_map 认的规范名, 重启后能原样
+    读回; 不写 "allow"（同 POST 入口, 配置口径拒绝它）。
+    """
+    _save_setting("permissionMode", MODE_TO_NAME[mode])
 
 
 # ============================================================================

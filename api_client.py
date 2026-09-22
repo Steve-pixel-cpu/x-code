@@ -9,6 +9,27 @@ import anthropic
 import openai
 from openai import OpenAI
 from pydantic import BaseModel
+
+
+def _openai_client(api_key: str, base_url: str | None, timeout: float,
+                   max_retries: int = 0) -> OpenAI:
+    """构造 openai 客户端的单点入口, 兼容 openai 3.x 的构造期凭据校验。
+
+    3.x 起 OpenAI(api_key="") 直接抛 Missing credentials（1.x 允许, 调用时
+    才校验）。而本项目的「未配置」态就是空 key（server._apply_provider_config
+    的回退分支、初始化页接管前的状态）, 必须能构造出客户端。
+    SDK 对此提供的开关是私有参数 _enforce_credentials=False（官方注释声明
+    未来可能移除）, 所以隔离在这里: 若未来版本删掉该参数, 只需改这一个
+    函数（例如换占位 key 方案）, 三处调用点不动。"""
+    try:
+        return OpenAI(api_key=api_key, base_url=base_url,
+                      timeout=timeout, max_retries=max_retries,
+                      _enforce_credentials=False)
+    except TypeError:
+        # 老版本（<3.x）没有该参数: 空 key 本就合法, 直接构造
+        return OpenAI(api_key=api_key, base_url=base_url,
+                      timeout=timeout, max_retries=max_retries)
+
 from abc import ABC, abstractmethod
 from typing import List, Literal, Dict, final, Optional, Callable
 
@@ -853,8 +874,7 @@ class OpenAIApiClient(ApiClient):
         self._base_url = base_url
         # 流式读超时/SDK 自带重试关闭, 语义与 ClaudeApiClient 一致:
         # 重试策略统一归 retry.py
-        self.raw_client = OpenAI(api_key=api_key, base_url=base_url,
-                                 timeout=300.0, max_retries=0)
+        self.raw_client = _openai_client(api_key, base_url, timeout=300.0)
         self.client = self.raw_client
 
     def configure(self,
@@ -872,8 +892,8 @@ class OpenAIApiClient(ApiClient):
         if new_key != self._api_key or new_url != self._base_url:
             self._api_key = new_key
             self._base_url = new_url
-            self.raw_client = OpenAI(api_key=new_key, base_url=new_url or None,
-                                     timeout=300.0, max_retries=0)
+            self.raw_client = _openai_client(new_key, new_url or None,
+                                             timeout=300.0)
             self.client = self.raw_client
 
     def reset_to(self, api_key: str, model: str, base_url: str | None = None,
@@ -884,8 +904,7 @@ class OpenAIApiClient(ApiClient):
         self.model = model
         if on_event is not None:
             self._on_event = on_event
-        self.raw_client = OpenAI(api_key=api_key, base_url=base_url,
-                                 timeout=300.0, max_retries=0)
+        self.raw_client = _openai_client(api_key, base_url, timeout=300.0)
         self.client = self.raw_client
 
     @property

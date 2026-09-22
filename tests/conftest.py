@@ -26,13 +26,18 @@ def _no_real_api():
     saved_model = server.api_client.model
     saved_provider_fn = multi_agent._api_config_provider
 
+    # 占位 key 不能用 "": openai>=3.x 的客户端构造期就校验凭据,
+    # 空 key 直接抛 Missing credentials（夹具 setup 即失败, 整套测试全灭）。
+    # 用非空占位串保持语义不变——真实调用在服务端 401, 照样秒退不打真网。
+    dead_key = "test-no-real-api-placeholder"
+
     def _dead_provider():
-        return ("", None, saved_model, "anthropic")
+        return (dead_key, None, saved_model, "anthropic")
 
     def _apply(key: str, url):
         server.api_client.reset_to(api_key=key, model=saved_model, base_url=url)
 
-    _apply("", None)
+    _apply(dead_key, None)
     multi_agent.set_api_config_provider(_dead_provider)
     yield
     _apply(saved_key, saved_url)

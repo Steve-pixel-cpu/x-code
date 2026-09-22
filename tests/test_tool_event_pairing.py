@@ -188,6 +188,27 @@ def allow_all(monkeypatch):
     monkeypatch.setattr(server.app_state, "_mode", ALLOW_MODE)
 
 
+@pytest.fixture(autouse=True)
+def anthropic_protocol(monkeypatch):
+    """钉住 anthropic 协议: 本文件的桩事件全是 anthropic SDK 线格式
+    （_tool_turn/_text_turn 的 .type/.content_block 形状）, 打桩点是
+    raw_client.messages.stream——只有 ClaudeApiClient 有这个入口。
+
+    此前直接打在全局 server.api_client 上, 而它跟随机器配置: 本机
+    active 供应商是 openai 协议时 raw_client 是 openai.OpenAI, 没有
+    .messages 属性 → 整个文件 setup 即 AttributeError。显式换成与全局
+    单例同接线的 ClaudeApiClient（镜像/限流退避/打断钩子原样平移）,
+    用例不再随机器 provider 漂移。"""
+    from api_client import ClaudeApiClient
+    monkeypatch.setattr(server, "api_client", ClaudeApiClient(
+        api_key="", model="test-model", tools=[], emit_output=False,
+        on_retry=server._mirror_rate_limit_retry,
+        should_stop_provider=server._should_stop_now,
+        on_event_provider=lambda: server._mirror_on_event(
+            server.dispatch.current_sink()),
+    ))
+
+
 def test_single_turn_serial_tool_pairing(client, isolated_store, monkeypatch):
     """单会话一轮: tool_use → tool_result 同 id 成对到达。"""
     _install(monkeypatch,

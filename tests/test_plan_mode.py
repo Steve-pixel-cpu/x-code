@@ -348,3 +348,117 @@ def test_start_turn_wires_upgrade_callback(client, isolated_store, monkeypatch):
         assert broadcasts and broadcasts[-1]["permission_mode"] == "workspace-write"
     finally:
         server._sessions.clear()
+
+
+# ------------------------------------------------------------
+# 双会话并发计划审批: 两个会话同时卡在 present_plan 上互不阻塞
+# （前端 bug 场景的服务端语义锚: B 弹计划不能吃掉 A 的审批请求）
+# 前端按会话归属渲染计划面板依赖这里的协议前提:
+# 每会话一个 WebPermissionPrompter, request_id 不串线, 互不阻塞。
+# ------------------------------------------------------------
+
+def _wait_worker_done(sid, timeout=15):
+    import threading
+    for t in threading.enumerate():
+        if t.name == f"turn-{sid}" and t.is_alive():
+            t.join(timeout=timeout)
+            return
+
+
+def test_two_sessions_plan_approval_do_not_block_each_other(
+        client, isolated_store, monkeypatch):
+    """A、B 两会话同入 plan 模式并发跑: 各自收到带自己 request_id 的
+    permission_request; 只批 B 时 A 仍挂起, 再批 A 后 A 独立收尾。
+    协议中立打桩（整体替换 server.api_client, 返回中立事件）,
+    不依赖本机 active provider 是 anthropic 还是 openai。"""
+    import json as _json
+    import server
+    from api_client import ApiClient, MessageStopEvent, TextDeltaEvent, ToolUseEvent
+    from models import Message
+    from tools import ToolRegistry
+
+    class _Scripted(ApiClient):
+        """按用户文本区分 A/B: 首次调用回 present_plan 工具块, 批准后
+        （历史里已有该工具块）再调回正文。协议字段填 anthropic/openai
+        都不读的占位, stream() 只认 Message 的 role/content。"""
+        protocol = "test"
+
+        def __init__(self):
+            self.thinking_level = "medium"
+            self.calls = []
+
+        def reset_to(self, *a, **kw):
+            pass   # 测试桩无连接状态; conftest teardown 会调用
+
+        def stream(self, system_prompt, messages, thinking_level=None, *,
+                   model=None, include_tools=True, emit_output=None,
+                   on_event=None):
+            self.calls.append(messages)
+            user_text = ""
+            asks_plan = False
+            for m in messages:
+                content = m.content if isinstance(m, Message) else m.get("content")
+                role = m.role if isinstance(m, Message) else m.get("role")
+                if role == "user":
+                    if isinstance(content, str):
+                        user_text += content
+                    else:
+                        for b in (content or []):
+                            user_text += getattr(b, "text", "") or (
+                                b.get("text", "") if isinstance(b, dict) else "")
+                if role == "assistant" and isinstance(content, list):
+                    for b in content:
+                        name = getattr(b, "name", None) or (
+                            b.get("name") if isinstance(b, dict) else None)
+                        asks_plan = asks_plan or name == "present_plan"
+            who = "A" if "A 计划任务" in user_text else "B"
+            if not asks_plan:
+                return [ToolUseEvent(id=f"plan-{who}", name="present_plan",
+                                     input=_json.dumps({"plan": f"# {who} 的计划"})),
+                        MessageStopEvent()]
+            return [TextDeltaEvent(text=f"{who} 开始实施"), MessageStopEvent()]
+
+    monkeypatch.setattr(server, "api_client", _Scripted())
+    inner = ToolRegistry()
+    inner.register("present_plan", lambda p, wd: "计划已批准")
+    monkeypatch.setattr(server, "registry", server.EmittingToolRegistry(inner))
+    monkeypatch.setattr(server.app_state, "_mode",
+                        server.NAME_TO_MODE["plan"])
+    monkeypatch.setattr(server, "maybe_auto_title", lambda ws: False)
+
+    def drain_until(ws, pred, limit=400):
+        for _ in range(limit):
+            m = _json.loads(ws.receive_text())
+            if pred(m):
+                return m
+        raise AssertionError("事件窗口内未等到目标事件")
+
+    with client.websocket_connect("/ws/pp-a") as ws_a, \
+            client.websocket_connect("/ws/pp-b") as ws_b:
+        ws_a.send_json({"type": "user", "text": "A 计划任务"})
+        ws_b.send_json({"type": "user", "text": "B 计划任务"})
+
+        req_a = drain_until(ws_a, lambda m: m["type"] == "permission_request")
+        req_b = drain_until(ws_b, lambda m: m["type"] == "permission_request")
+        assert req_a["tool_name"] == "present_plan"
+        assert req_b["tool_name"] == "present_plan"
+        # request_id 只在会话内唯一（perm-{seq} 每会话独立计数）:
+        # 两边同为 perm-1 是合法态——服务端按 WS 会话路由响应,
+        # 前端定位请求必须用 (会话, request_id) 二元组, 不能只看 id。
+        assert req_a["request_id"] == req_b["request_id"] == "perm-1"
+
+        # 只批 B: B 独立收尾
+        ws_b.send_json({"type": "permission_response",
+                        "request_id": req_b["request_id"], "approved": True})
+        done_b = drain_until(ws_b, lambda m: m["type"] == "turn_done")
+        assert not done_b.get("interrupted")
+
+        # A 仍挂起（per-session prompter; 未批前不会有终局事件）
+        # 再批 A: A 独立走完本轮
+        ws_a.send_json({"type": "permission_response",
+                        "request_id": req_a["request_id"], "approved": True})
+        done_a = drain_until(ws_a, lambda m: m["type"] == "turn_done")
+        assert not done_a.get("interrupted")
+
+        _wait_worker_done("pp-a")
+        _wait_worker_done("pp-b")
