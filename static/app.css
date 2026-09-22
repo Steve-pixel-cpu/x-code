@@ -1278,6 +1278,16 @@
   }
   .set-input:focus { outline: none; border-color: var(--accent-border); }
   .set-input.mono { font-family: var(--font-mono); font-size: calc(12px * var(--fs-ui)); }
+  /* select.set-input: 对齐输入框外观, 下拉箭头用内嵌 SVG（appearance 复位） */
+  select.set-input {
+    appearance: none; -webkit-appearance: none;
+    padding-right: 26px;
+    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'><path d='M1 1l4 4 4-4' fill='none' stroke='%23888' stroke-width='1.5' stroke-linecap='round'/></svg>");
+    background-repeat: no-repeat;
+    background-position: right 9px center;
+    cursor: pointer;
+  }
+  select.set-input option { background: var(--bg); color: var(--text); }
   .key-row { display: flex; gap: 6px; align-items: center; }
   .key-row .set-input { flex: 1; }
   .key-eye {

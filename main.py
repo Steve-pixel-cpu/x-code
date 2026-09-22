@@ -11,7 +11,13 @@ from typing import Optional
 
 from dotenv import load_dotenv
 
-from api_client import ApiClient, ClaudeApiClient, THINKING_LEVELS
+from api_client import (
+    ApiClient,
+    make_api_client,
+    normalize_protocol,
+    DEFAULT_PROTOCOL,
+    THINKING_LEVELS,
+)
 from config import RuntimeConfig, ConfigLoader, USER_DIR
 from hooks import HookRunner
 from models import Message, Session, TextContentBlock, ToolContentBlock
@@ -966,7 +972,14 @@ def start(session_store:SessionStore,session_id:str):
         .build()
     )
     runtime_config = config_loader.load()
-    api_client = ClaudeApiClient(
+    # CLI 侧协议选择: XCODE_PROTOCOL 环境变量（anthropic 默认; openai 兼容
+    # 端点可直接本地起 CLI 用）。非法值回退 anthropic, 不挡启动。
+    try:
+        cli_protocol = normalize_protocol(os.getenv("XCODE_PROTOCOL"))
+    except ValueError:
+        cli_protocol = DEFAULT_PROTOCOL
+    api_client = make_api_client(
+        cli_protocol,
         api_key=str(api_key),
         model=runtime_config.model() or DEFAULT_MODEL,
         tools=TOOLS,

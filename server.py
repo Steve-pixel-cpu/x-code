@@ -38,8 +38,26 @@ from fastapi import Body, FastAPI, HTTPException, Request, WebSocket, WebSocketD
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from api_client import ClaudeApiClient, THINKING_LEVELS, StreamInterrupted
 import anthropic
+
+from api_client import (
+    ClaudeApiClient,
+    OpenAIApiClient,
+    make_api_client,
+    normalize_protocol,
+    KNOWN_PROTOCOLS,
+    THINKING_LEVELS,
+    StreamInterrupted,
+    WireEvent,
+    WireTextDelta,
+    WireThinkingStart,
+    WireThinkingDelta,
+    WireThinkingEnd,
+    WireToolStart,
+    WireToolEnd,
+    WireUsage,
+    WireStop,
+)
 from config import USER_DIR, SETTINGS_FILE, ConfigLoader, RuntimeConfig, load_providers, save_providers
 from main import (
     TOOLS,
@@ -172,6 +190,9 @@ api_client = ClaudeApiClient(
     # 打断检查点: 重试退避/建连静默窗口内轮询, 点停止立即生效
     # （dispatch 在模块后段定义, 函数运行时才解析, 无先后问题）
     should_stop_provider=_should_stop_now,
+    # 浏览器镜像: 开流时按轮解析 contextvars 绑定的 sink（取代旧的
+    # _LiveClientProxy 客户端包装, 协议知识不再进 server）
+    on_event_provider=lambda: _mirror_on_event(dispatch.current_sink()),
 )
 
 app = FastAPI(title="x-code web")
@@ -268,124 +289,66 @@ class TurnDispatch:
         binding = _binding_var.get()
         return binding.session_id if binding else None
 
+    def current_sink(self) -> Optional[Callable[[dict], None]]:
+        """本轮绑定的前端事件 sink（浏览器镜像观察者挂接点）。"""
+        binding = _binding_var.get()
+        return binding.emit if binding else None
+
 
 dispatch = TurnDispatch()
 
 
-class _LiveStreamProxy:
-    """anthropic SSE 流代理: 事件原样透传给内核的同时镜像一份给浏览器。
+# ============================================================================
+# 浏览器镜像: 协议中立的线级事件（WireEvent）→ 前端事件
+#
+# 旧实现用 _LiveClientProxy/_LiveStreamProxy 包装 anthropic 客户端、逐个
+# 解析 SDK 原生事件再转发——协议线格式因此在 server 被解析了两次。现在
+# api_client.stream(on_event=...) 把线级事件按线上顺序回调出来, server 只
+# 做一次"wire → 前端事件"的翻译（_wire_to_frontend）, 对 OpenAI 等新协议
+# 零改动。用户打断不再在代理里掐（旧代理是唯一能从外部安全掐断流的
+# 位置）, 改由 api_client 的 should_stop 检查点在建连/重试窗口轮询 +
+# runtime 的历史一致点收束, 语义与 CLI 一致。
+# ============================================================================
 
-    - text_delta 逐段转发（真流式打字效果）
-    - tool_use 在 content_block_stop 时拼装完整事件转发（与内核同样的拼装规则）
-    - thinking 块只发起止信号（thinking_start / thinking_end + 耗时），
-      思考内容本身（thinking_delta）仍不转发: UI 展示"思考 · 持续了X秒"行
-    - 每取一个事件前检查 should_stop: 用户点停止后, 下一个事件到达即刻
-      抛 TurnInterrupted 断流, 不必等模型说完（内核同步阻塞, 这是唯一
-      能从外部安全掐断的位置）
-    """
-
-    def __init__(self, real, sink: Optional[Callable],
-                 should_stop: Optional[Callable[[], bool]] = None):
-        self._real = real
-        self._sink = sink
-        self._should_stop = should_stop
-        self._tools: dict[int, dict] = {}
-        self._thinking: dict[int, float] = {}
-
-    def __enter__(self):
-        # 管理器的 __enter__ 才返回可迭代的流对象，必须存下来给 __next__ 用；
-        # 直接在管理器上取下一个事件会报 'MessageStreamManager' has no __next__
-        self._stream = self._real.__enter__()
-        return self
-
-    def __exit__(self, *exc):
-        return self._real.__exit__(*exc)
-
-    def __iter__(self):
-        return self
-
-    def __next__(self):
-        if self._should_stop is not None and self._should_stop():
-            raise TurnInterrupted()
-        event = self._stream.__next__()
-        if self._sink is not None:
-            self._mirror(event)
-        return event
-
-    def _mirror(self, event) -> None:
-        etype = getattr(event, "type", None)
-        if etype == "content_block_start":
-            cb = event.content_block
-            if cb.type == "tool_use":
-                self._tools[event.index] = {"id": cb.id, "name": cb.name, "json": ""}
-                # 块开始即镜像: 大参数（write_file 整文件等）的工具 JSON
-                # 流式期可达几十秒, 等到 content_block_stop 才发 tool_use
-                # 的话, 这段时间前端没有任何活动指示, 像卡死。前端收到
-                # tool_use_started 就提前建"运行中"工具卡。
-                self._sink({
-                    "type": "tool_use_started",
-                    "id": cb.id,
-                    "name": cb.name,
-                })
-            elif cb.type == "thinking":
-                self._thinking[event.index] = time.monotonic()
-                self._sink({"type": "thinking_start"})
-        elif etype == "content_block_delta":
-            delta = event.delta
-            if delta.type == "text_delta":
-                self._sink({"type": "text_delta", "text": delta.text})
-            elif delta.type == "input_json_delta":
-                info = self._tools.get(event.index)
-                if info is not None:
-                    info["json"] += delta.partial_json
-        elif etype == "content_block_stop":
-            info = self._tools.pop(event.index, None)
-            if info is not None:
-                self._sink({
-                    "type": "tool_use",
-                    "id": info["id"],
-                    "name": info["name"],
-                    "input": info["json"] or "{}",
-                })
-            t0 = self._thinking.pop(event.index, None)
-            if t0 is not None:
-                self._sink({
-                    "type": "thinking_end",
-                    "duration_ms": int((time.monotonic() - t0) * 1000),
-                })
+def _wire_to_frontend(event: WireEvent, sink: Callable[[dict], None],
+                      state: dict) -> None:
+    """单个 wire 事件 → 前端事件。state 为每次调用独立的镜像状态:
+    thinking_t0 记录思考块起点（thinking_end 汇报耗时）。"""
+    etype = type(event)
+    if etype is WireTextDelta:
+        sink({"type": "text_delta", "text": event.text})
+    elif etype is WireToolStart:
+        # 块开始即镜像: 大参数（write_file 整文件等）的工具 JSON 流式期
+        # 可达几十秒, 等到块结束才发 tool_use 的话, 这段时间前端没有任何
+        # 活动指示, 像卡死。前端收到 tool_use_started 提前建"运行中"工具卡。
+        sink({"type": "tool_use_started", "id": event.id, "name": event.name})
+    elif etype is WireToolEnd:
+        sink({"type": "tool_use", "id": event.id, "name": event.name,
+              "input": event.input_json})
+    elif etype is WireThinkingStart:
+        state["thinking_t0"] = time.monotonic()
+        sink({"type": "thinking_start"})
+    elif etype is WireThinkingEnd:
+        t0 = state.pop("thinking_t0", None)
+        if t0 is not None:
+            sink({"type": "thinking_end",
+                  "duration_ms": int((time.monotonic() - t0) * 1000)})
 
 
-class _LiveMessagesProxy:
-    """messages 入口代理: 每次开流时取当前线程绑定的 emit 作为镜像去向。"""
+def _mirror_on_event(sink: Optional[Callable[[dict], None]]) -> Optional[WireObserver]:
+    """把本轮绑定的前端 sink 包装成线级事件观察者（api_client 每次开流时
+    调用 provider 取到本函数的返回值）。开流即广播一次 await_output: 工具
+    跑完到下一个 token 之间有一段 prefill 空窗, 界面全静会像已经结束——
+    前端据此显示等待转圈。sink 为 None（CLI/无绑定轮）返回 None = 不挂。"""
+    if sink is None:
+        return None
+    sink({"type": "await_output"})
+    state: dict = {}
 
-    def __init__(self, real_messages, dispatch_ref: TurnDispatch):
-        self._real = real_messages
-        self._dispatch = dispatch_ref
+    def _observe(event: WireEvent) -> None:
+        _wire_to_frontend(event, sink, state)
 
-    def stream(self, **kwargs):
-        sink = self._dispatch.current()
-        # 每次向模型发起调用就广播一次: 工具跑完到下一个 token 之间有一段
-        # prefill 空窗, 界面全静会像已经结束——前端据此显示等待转圈
-        if sink is not None:
-            sink({"type": "await_output"})
-        return _LiveStreamProxy(self._real.stream(**kwargs), sink,
-                                self._dispatch.current_should_stop())
-
-
-class _LiveClientProxy:
-    """包住 anthropic 客户端: messages 换成代理，其余属性原样透传。"""
-
-    def __init__(self, real):
-        self._real = real
-        self.messages = _LiveMessagesProxy(real.messages, dispatch)
-
-    def __getattr__(self, name):
-        return getattr(self._real, name)
-
-
-# 原生 messages 入口先留一份: AI 命名走它，不经过镜像代理（避免标题请求的事件串进对话流）
-_real_messages = api_client.client.messages
-api_client.client = _LiveClientProxy(api_client.client)
+    return _observe
 
 
 # ============================================================================
@@ -396,16 +359,26 @@ api_client.client = _LiveClientProxy(api_client.client)
 _BASE_URL_V1_TAIL = re.compile(r"/v1/?$", re.IGNORECASE)
 
 
-def _normalize_base_url(url) -> str:
-    """规范化供应商 base_url。
+def _normalize_base_url(url, protocol: str = "anthropic") -> str:
+    """规范化供应商 base_url（按协议分规则）。
 
-    x-code 走 anthropic SDK, 它在 base_url 后自动拼 /v1/messages; 用户照
-    OpenAI 习惯粘贴带 /v1 的地址会请求 /v1/v1/messages → 404。这里统一
-    剥掉结尾的字面 /v1 段与多余斜杠（智谱 /api/anthropic 这类真实路径
-    原样保留）。保存/测试/应用三处都过这一道, 行为一致。"""
+    anthropic: x-code 走 anthropic SDK, 它在 base_url 后自动拼 /v1/messages;
+    用户照 OpenAI 习惯粘贴带 /v1 的地址会请求 /v1/v1/messages → 404。这里
+    统一剥掉结尾的字面 /v1 段与多余斜杠（智谱 /api/anthropic 这类真实路径
+    原样保留）。保存/测试/应用三处都过这一道, 行为一致。
+
+    openai: openai SDK 实际请求 URL = base_url + "/chat/completions", 版本
+    段须由用户自带（官方约定 base_url 以 /v1 结尾）。因此 /v1 原样保留、
+    裸主机补缺省 /v1, 仅去尾斜杠; 自定义前缀路径（企业网关等）原样保留。
+    """
     text = str(url or "").strip()
     while text.endswith("/"):
         text = text[:-1]
+    if normalize_protocol(protocol) == "openai":
+        if not text:
+            return ""
+        rest = re.sub(r"^[a-zA-Z][a-zA-Z0-9+.-]*://", "", text)
+        return text if "/" in rest else text + "/v1"
     return _BASE_URL_V1_TAIL.sub("", text)
 
 
@@ -419,32 +392,58 @@ def _provider_ready(cfg: dict) -> bool:
                 and str(prov.get("base_url") or "").strip())
 
 
+def _protocol_of(prov: dict) -> str:
+    """供应商条目的协议标识（缺失/空 = anthropic, 向后兼容旧配置）。"""
+    try:
+        return normalize_protocol(prov.get("protocol"))
+    except ValueError:
+        return normalize_protocol(None)
+
+
 def _apply_provider_config(cfg: dict) -> None:
-    """把 active 指向的启用供应商应用到 api_client, 并重挂镜像代理与 _real_messages。
+    """把 active 指向的启用供应商应用到 api_client, 并重挂浏览器镜像观察者。
+
     active 缺失/指向不存在或被禁用的供应商时: 保持未配置空 key（初始化页接管）。
-    active 无 model: 只应用连接信息, 模型留待用户显式添加。"""
-    global _real_messages
+    active 无 model: 只应用连接信息, 模型留待用户显式添加。
+    协议与当前单例不同（如 anthropic → openai）时经工厂重建实例; 同协议
+    走 configure() 原地换连接信息, 保留 cache 降级等实例内运行态。"""
+    global api_client
     if _provider_ready(cfg):
         active = cfg.get("active") or {}
         prov = next((p for p in cfg.get("providers", [])
                      if p.get("id") == active.get("provider")), None)
-        api_client.configure(
-            base_url=_normalize_base_url(prov.get("base_url")) or None,
-            api_key=prov.get("api_key"),
-            model=active.get("model"),   # None/缺失 = 保持当前模型
-        )
+        protocol = _protocol_of(prov)
+        base_url = _normalize_base_url(prov.get("base_url"), protocol=protocol) or None
+        api_key = prov.get("api_key")
+        model = active.get("model")   # None/缺失 = 保持当前模型
+        if protocol != api_client.protocol:
+            # 跨协议切换: 线格式完全不同, 必须换实现（重试/打断/镜像钩子原样平移）
+            api_client = make_api_client(
+                protocol, api_key=api_key, model=model or "", base_url=base_url,
+                tools=TOOLS, emit_output=False,
+                thinking_level=runtime_config.thinking_level(),
+                on_retry=_mirror_rate_limit_retry,
+                should_stop_provider=_should_stop_now,
+                on_event_provider=lambda: _mirror_on_event(dispatch.current_sink()),
+            )
+        else:
+            api_client.configure(
+                base_url=base_url,
+                api_key=api_key,
+                model=model,
+            )
     else:
         api_client.reset_to(api_key="", model="", base_url=None)
-    api_client.client = _LiveClientProxy(api_client.raw_client)
-    _real_messages = api_client.raw_client.messages
     # subagent worker 跟随同一份供应商配置: 每次 spawn 时实时读 api_client
     # 的连接信息（apply 在运行期可反复发生, 工厂闭包引用而非快照）
     set_api_config_provider(_subagent_api_config)
 
 
-def _subagent_api_config() -> tuple[str, Optional[str], str]:
-    """multi_agent worker 工厂: 直接镜像 Leader 的 api_client 连接信息。"""
-    return api_client.api_key, api_client.base_url, api_client.model
+def _subagent_api_config() -> tuple[str, Optional[str], str, str]:
+    """multi_agent worker 工厂: 直接镜像 Leader 的 api_client 连接信息
+    （key/base_url/model/protocol）。"""
+    return (api_client.api_key, api_client.base_url, api_client.model,
+            api_client.protocol)
 
 
 _provider_cfg = load_providers()
@@ -778,15 +777,9 @@ def _ai_title(first_text: str) -> Optional[str]:
         "不超过 16 个字，概括主题，只输出标题本身，"
         "不要引号、句号或任何解释。\n\n用户消息：" + first_text[:500]
     )
-    msg = _real_messages.create(
-        model=api_client.model,
-        max_tokens=512,
-        messages=[{"role": "user", "content": prompt}],
-    )
-    out = "".join(
-        b.text for b in msg.content if getattr(b, "type", "") == "text"
-    )
-    title = " ".join(out.split()).strip("　\"'“”「」『』。.!！?？，,；;：:")
+    title_text = api_client.generate_text(
+        system=[], user=prompt, max_tokens=512)
+    title = " ".join(title_text.split()).strip("　\"'“”「」『』。.!！?？，,；;：:")
     return title[:30] or None
 
 
@@ -1610,8 +1603,18 @@ async def api_save_providers(request: dict):
             raise HTTPException(status_code=400, detail="供应商缺少 id 或名称")
         if not isinstance(p.get("models"), list):
             raise HTTPException(status_code=400, detail=f"供应商 {p.get('name')} 缺少模型列表")
+        # protocol: anthropic（缺省）| openai。非法值直接拒绝保存。
+        try:
+            p["protocol"] = normalize_protocol(p.get("protocol"))
+        except ValueError:
+            raise HTTPException(
+                status_code=400,
+                detail=f"供应商 {p.get('name')} 的 protocol 非法"
+                       f"（可选: {' / '.join(KNOWN_PROTOCOLS)}）",
+            )
         # 照 OpenAI 习惯粘贴的 https://xxx/v1 在此归一（SDK 会自动拼 /v1/messages）
-        p["base_url"] = _normalize_base_url(p.get("base_url"))
+        p["base_url"] = _normalize_base_url(p.get("base_url"),
+                                            protocol=p["protocol"])
         # 接口地址必填: 留空会让 SDK 回退到 Anthropic 官方地址, 智谱 key 必被 403
         if p.get("enabled") is not False and not p["base_url"]:
             raise HTTPException(
@@ -1632,12 +1635,27 @@ async def api_save_providers(request: dict):
 @app.post("/api/providers/test")
 async def api_test_provider(request: dict):
     """用给定配置发一次最小请求, 验证供应商连通性。"""
-    base_url = _normalize_base_url(request.get("base_url")) or None
+    try:
+        protocol = normalize_protocol(request.get("protocol"))
+    except ValueError:
+        raise HTTPException(
+            status_code=400,
+            detail=f"protocol 非法（可选: {' / '.join(KNOWN_PROTOCOLS)}）")
+    base_url = _normalize_base_url(request.get("base_url"), protocol=protocol) or None
     api_key = request.get("api_key") or ""
     model = request.get("model") or ""
     if not api_key or not model:
         raise HTTPException(status_code=400, detail="缺少 api_key 或 model")
     try:
+        if protocol == "openai":
+            from openai import OpenAI
+            client = OpenAI(api_key=api_key, base_url=base_url, timeout=30.0)
+            resp = client.chat.completions.create(
+                model=model, max_tokens=16,
+                messages=[{"role": "user", "content": "hi"}],
+            )
+            text = (resp.choices[0].message.content or "").strip() if resp.choices else ""
+            return {"ok": True, "detail": text[:50] or "(空回复)"}
         probe = anthropic.Anthropic(api_key=api_key, base_url=base_url, timeout=30.0)
         resp = probe.messages.create(
             model=model, max_tokens=16,

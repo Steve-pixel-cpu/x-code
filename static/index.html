@@ -246,6 +246,13 @@
           <input id="ob-key" type="password" placeholder="sk-..." spellcheck="false" autocomplete="off">
         </div>
         <div class="ob-field">
+          <label>接口协议</label>
+          <select id="ob-proto">
+            <option value="anthropic" selected>Anthropic（Claude 协议）</option>
+            <option value="openai">OpenAI（Chat Completions）</option>
+          </select>
+        </div>
+        <div class="ob-field">
           <label>接口地址 Base URL</label>
           <input id="ob-base" value="https://open.bigmodel.cn/api/anthropic" spellcheck="false">
         </div>

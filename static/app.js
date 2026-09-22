@@ -3375,7 +3375,7 @@ function buildProviderCard(p) {
   head.append(name, en, del);
   card.appendChild(head);
 
-  /* 连接配置: Base URL / API Key 并排两列 */
+  /* 连接配置: Base URL / API KEY / 接口协议 三列 */
   const grid = document.createElement("div");
   grid.className = "prov-grid";
   const urlField = document.createElement("div");
@@ -3384,9 +3384,35 @@ function buildProviderCard(p) {
   const url = document.createElement("input");
   url.className = "set-input mono";
   url.value = p.base_url || "";
-  url.placeholder = "https://...";
+  // 占位示例按协议切换: 两个端点形状不同, 配错是 403/404 的常见根源
+  const URL_HINTS = {
+    anthropic: "https://open.bigmodel.cn/api/anthropic",
+    openai: "https://open.bigmodel.cn/api/coding/paas/v4",
+  };
+  url.placeholder = URL_HINTS[p.protocol || "anthropic"] || "https://...";
   url.addEventListener("input", () => { p.base_url = url.value; });
   urlField.appendChild(url);
+  const protoField = document.createElement("div");
+  protoField.className = "prov-field";
+  protoField.innerHTML = "<label>接口协议</label>";
+  const proto = document.createElement("select");
+  proto.className = "set-input";
+  proto.title = "anthropic: Claude/Messages 协议端点; openai: OpenAI Chat Completions 协议端点";
+  for (const [val, label] of [
+    ["anthropic", "Anthropic（Claude 协议）"],
+    ["openai", "OpenAI（Chat Completions）"],
+  ]) {
+    const opt = document.createElement("option");
+    opt.value = val;
+    opt.textContent = label;
+    proto.appendChild(opt);
+  }
+  proto.value = p.protocol || "anthropic";
+  proto.addEventListener("change", () => {
+    p.protocol = proto.value;
+    url.placeholder = URL_HINTS[proto.value] || "https://...";
+  });
+  protoField.appendChild(proto);
   const keyField = document.createElement("div");
   keyField.className = "prov-field";
   keyField.innerHTML = "<label>API KEY</label>";
@@ -3404,7 +3430,7 @@ function buildProviderCard(p) {
   eye.onclick = () => { key.type = key.type === "password" ? "text" : "password"; };
   keyRow.append(key, eye);
   keyField.appendChild(keyRow);
-  grid.append(urlField, keyField);
+  grid.append(urlField, protoField, keyField);
   card.appendChild(grid);
 
   /* 模型列表: 列头 + 行 */
@@ -3467,6 +3493,7 @@ $("btn-add-provider").onclick = () => {
   const id = "prov-" + Date.now().toString(36);
   state.providerCfg.providers.push({
     id, name: "新供应商", base_url: "", api_key: "", enabled: true,
+    protocol: "anthropic",
     models: [{ id: "", name: "", tags: [] }],
   });
   renderProviderSettings();
@@ -3882,10 +3909,25 @@ function openOnboarding() {
   $("pane").dataset.view = "onboarding";
   setTimeout(() => $("ob-key").focus(), 50);
 }
+/* 初始化页: 协议切换 → Base URL 默认值联动（智谱 Coding Plan 三端点中
+ * x-code 用得到两个; /api/v1 是 OpenAI Response 协议, 供 Codex, 不适用）。
+ * 只改"用户还没手动输入过"的值, 避免覆盖用户粘贴的地址。 */
+const OB_BASE_DEFAULTS = {
+  anthropic: "https://open.bigmodel.cn/api/anthropic",
+  openai: "https://open.bigmodel.cn/api/coding/paas/v4",
+};
+let _ob_base_touched = false;
+$("ob-proto").addEventListener("change", () => {
+  const baseInput = $("ob-base");
+  if (!_ob_base_touched) baseInput.value = OB_BASE_DEFAULTS[$("ob-proto").value];
+});
+$("ob-base").addEventListener("input", () => { _ob_base_touched = true; });
+
 async function saveOnboarding() {
   const key = $("ob-key").value.trim();
   const base = $("ob-base").value.trim();
   const model = $("ob-model").value.trim();
+  const proto = $("ob-proto").value;
   const err = $("ob-err");
   err.textContent = "";
   if (!key) { err.textContent = "请填写 API Key"; return; }
@@ -3902,12 +3944,14 @@ async function saveOnboarding() {
       prov.api_key = key;
       prov.enabled = true;
       if (base) prov.base_url = base;
+      prov.protocol = proto;   // 协议变化时覆盖旧值（init 页是显式选择）
       prov.models = prov.models || [];
       if (!prov.models.some(m => m.id === model)) prov.models.push({ id: model, name: model, tags: [] });
     } else {
       providers.push({
         id: "default", name: "默认供应商",
         base_url: base, api_key: key, enabled: true,
+        protocol: proto,
         models: [{ id: model, name: model, tags: [] }],
       });
     }
