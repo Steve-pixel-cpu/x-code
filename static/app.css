@@ -974,12 +974,26 @@
   #msg-minimap[hidden] { display: none; }
   .mm-tick {
     position: absolute; left: 4px; transform: translateY(-50%);
-    width: 10px; height: 2px; padding: 0; border: none; border-radius: 1px;
-    background: var(--border-strong); opacity: .5; cursor: pointer;
-    transition: width .12s, left .12s, opacity .12s, background .12s;
+    width: calc(10px + 12px * var(--f, 0)); height: 2px;
+    padding: 0; border: none; border-radius: 1px;
+    background: var(--border-strong);
+    opacity: calc(.5 + .5 * var(--f, 0));
+    /* 不抢指针形态: 波纹交互本身就是反馈, 无需手型光标再提示一遍 */
+    cursor: default;
+    /* 喷泉波纹: 宽度随 --f 从 10px 连续拉长到 22px, 缓出曲线出丝滑感;
+       左缘固定、向右伸展(同参考样式) */
+    transition: width .45s cubic-bezier(.22, 1, .36, 1),
+                opacity .2s ease, background .2s ease;
   }
-  .mm-tick:hover, .mm-tick.active {
-    width: 14px; left: 0; opacity: 1; background: var(--text-2);
+  /* 常驻指示: 当前滚动位置对应的刻度只以颜色+不透明度区分, 不拉长——
+     静止时所有刻度等长, 长度变化只属于悬停波纹。
+     (不得用 --f:1 做常驻展开: 那会让 active 刻度在静止时也保持长刻度) */
+  .mm-tick.active { background: var(--text-2); opacity: 1; }
+  @supports (background: color-mix(in srgb, red 50%, blue)) {
+    .mm-tick {
+      /* 悬停波纹里颜色也随 --f 渐变: 邻刻度半亮, 比开关式变色丝滑 */
+      background: color-mix(in srgb, var(--text-2) calc(var(--f, 0) * 100%), var(--border-strong));
+    }
   }
   /* 预览卡: 固定定位(JS 按刻度位置写入 left/top, 出现在刻度右侧),
      贴合全局亚克力风格 */

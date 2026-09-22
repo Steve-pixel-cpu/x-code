@@ -370,6 +370,9 @@ function showCol(id) {
   document.querySelectorAll("#messages .msg-col").forEach(c => {
     c.classList.toggle("on", c.id === "msg-col-" + id);
   });
+  // 列显隐不影响 #messages 自身盒尺寸, ResizeObserver 不会触发;
+  // 必须显式重建, 否则 minimap 留着上一个会话的刻度
+  mmScheduleRebuild();
 }
 
 /* ============================================================
@@ -797,14 +800,14 @@ msgThumb.addEventListener("pointerdown", ev => {
 
 /* ============================================================
  * minimap: 用户消息快速定位
- * 右缘一列刻度, 每条用户消息一个; 按消息在全文中的位置等比分布。
+ * 右缘一列刻度, 每条用户消息一个; 固定间距排成一簇、整簇在轨道
+ * 垂直居中(消息多到放不下时才摊满整条轨道)。
  * 悬停刻度弹预览卡(摘要 + 相对时间), 点击平滑滚动定位;
  * 滚动时高亮视口中线以上最近的一条。数据源是 addUserBubble
  * 挂在行元素上的 _text/_ts, 无需额外后端结构。
  * ============================================================ */
 const mm = $("msg-minimap");
 const mmPop = $("mm-pop");
-const MM_TICK_MIN_GAP = 5;   // 刻度最小间距(px), 防止长会话挤成一团
 let mmTimer = null;
 
 function mmScheduleRebuild() {
@@ -816,7 +819,12 @@ function mmRebuild() {
   const el = $("messages");
   mmPop.hidden = true;
   mm.textContent = "";
-  const rows = [...el.querySelectorAll(".msg.user")];
+  // 只收集当前可见会话列的用户气泡: #messages 下常驻着每个会话一个的
+  // .msg-col（切会话仅显隐、不销毁）, 若全局 querySelectorAll 会把隐藏
+  // 会话的气泡一并收进来——display:none 行的 offsetTop 恒为 0, 刻度全部
+  // 堆到轨道顶部并连锁挤乱本会话刻度, 预览/跳转也会指到别的会话。
+  const col = el.querySelector(".msg-col.on");
+  const rows = col ? [...col.querySelectorAll(".msg.user")] : [];
   const scrollable = el.scrollHeight - el.clientHeight > 2;
   if (!rows.length || !scrollable) { mm.hidden = true; return; }
   mm.hidden = false;
@@ -826,23 +834,23 @@ function mmRebuild() {
   mm.style.height = trackH + "px";
   const H = mm.clientHeight;
   const frag = document.createDocumentFragment();
-  let lastPct = -Infinity;
-  for (const row of rows) {
-    // 位置按内容坐标等比映射; 再用最小间距兜底拥挤(刻度挤压时仍可点击)
-    let pct = row.offsetTop / Math.max(1, el.scrollHeight) * 100;
-    if (pct * H - lastPct < MM_TICK_MIN_GAP) {
-      pct = (lastPct + MM_TICK_MIN_GAP) / H;
-    }
-    lastPct = pct * H;
+  // 固定间距排成一簇、整簇垂直居中; 超过轨道容纳量时退化为等距摊满。
+  const step = 10;
+  const span = (rows.length - 1) * step;
+  const gap = rows.length > 1
+    ? (span < H ? step : H / (rows.length - 1))
+    : 0;
+  const top0 = rows.length > 1 ? (H - (rows.length - 1) * gap) / 2 : H / 2;
+  rows.forEach((row, i) => {
     const tick = document.createElement("button");
     tick.className = "mm-tick";
     tick.type = "button";
-    tick.style.top = pct + "%";
+    tick.style.top = (top0 + i * gap) + "px";
     tick._row = row;
     tick._text = mmSummary(row);
     tick._time = mmRelTime(row._ts);
     frag.appendChild(tick);
-  }
+  });
   mm.appendChild(frag);
   mmUpdateActive();
 }
@@ -879,25 +887,78 @@ function mmUpdateActive() {
   for (const tick of mm.children) tick.classList.toggle("active", tick === best);
 }
 
-/* 刻度交互: 悬停出预览卡(刻度右侧, 视口内钳位), 点击平滑定位 */
+/* 刻度交互: 悬停出预览卡(刻度右侧, 视口内钳位), 点击平滑定位;
+ * 喷泉波纹: 以指针所指刻度为中心, 向上下两侧递减拉长——
+ * 展开量随 |i - h| 每远 1 个刻度衰减 1/3, 3 档外归零;
+ * 复位用 removeProperty(不能写内联 0, 会盖掉 .active 的类规则 --f:1) */
 const mmText = mmPop.querySelector(".mm-text");
 const mmTime = mmPop.querySelector(".mm-time");
-mm.addEventListener("pointerover", e => {
-  const tick = e.target.closest(".mm-tick");
-  if (!tick) return;
-  mmText.textContent = tick._text || "";
-  mmTime.textContent = tick._time || "";
-  mmPop.hidden = false;
-  const r = tick.getBoundingClientRect();
-  const pr = mmPop.getBoundingClientRect();
-  let top = r.top + r.height / 2 - pr.height / 2;
-  top = Math.max(8, Math.min(window.innerHeight - pr.height - 8, top));
-  mmPop.style.top = top + "px";
-  mmPop.style.left = (r.right + 12) + "px";
+function mmFountain(hoverIdx) {
+  [...mm.children].forEach((t, i) => {
+    if (hoverIdx == null) {
+      t.style.removeProperty("--f");
+      return;
+    }
+    const f = Math.max(0, 1 - Math.abs(i - hoverIdx) / 3);
+    t.style.setProperty("--f", f.toFixed(3));
+  });
+}
+function mmTickFromEvent(e) {
+  const r = mm.getBoundingClientRect();
+  const y = e.clientY - r.top;
+  let best = -1, bestD = Infinity;
+  for (let i = 0; i < mm.children.length; i++) {
+    const d = Math.abs(parseFloat(mm.children[i].style.top) - y);
+    if (d < bestD) { bestD = d; best = i; }
+  }
+  return bestD <= 12 ? best : null;   // 稍微离轨也认, 出范围即收回
+}
+/* 预览卡延迟弹出: 停留 250ms 才显示, 划过不闪卡; 波纹始终实时跟随。
+ * 时序关键: "已显示这条"的早退必须在 clearTimeout 之前——卡可见只说明
+ * 显示着上一条的内容, 此时往往还有一条指向新刻度的定时器挂起; 若先
+ * clear 再早退会把它误杀, 卡片内容就永远停在上一条, 直到鼠标离开重进 */
+let mmPopTimer = null, mmPopIdx = null;
+function mmPopArm(idx) {
+  if (idx == null) {
+    clearTimeout(mmPopTimer);
+    mmPopIdx = null;
+    mmPop.hidden = true;
+    return;
+  }
+  if (idx === mmPopIdx && !mmPop.hidden) return;   // 已显示/已挂起这条: 不动定时器
+  clearTimeout(mmPopTimer);
+  mmPopIdx = idx;
+  mmPopTimer = setTimeout(() => {
+    const tick = mm.children[mmPopIdx];
+    if (!tick) return;
+    mmText.textContent = tick._text || "";
+    mmTime.textContent = tick._time || "";
+    mmPop.hidden = false;
+    const r = tick.getBoundingClientRect();
+    const pr = mmPop.getBoundingClientRect();
+    let top = r.top + r.height / 2 - pr.height / 2;
+    top = Math.max(8, Math.min(window.innerHeight - pr.height - 8, top));
+    mmPop.style.top = top + "px";
+    mmPop.style.left = (r.right + 12) + "px";
+  }, 250);
+}
+mm.addEventListener("pointermove", e => {
+  if (mm.hidden) return;
+  const idx = mmTickFromEvent(e);
+  mmFountain(idx);
+  mmPopArm(idx);
 });
-mm.addEventListener("pointerleave", () => { mmPop.hidden = true; });
+mm.addEventListener("pointerleave", () => {
+  mmFountain(null);
+  clearTimeout(mmPopTimer);
+  mmPopIdx = null;
+  mmPop.hidden = true;
+});
 mm.addEventListener("pointerdown", e => {
-  const tick = e.target.closest(".mm-tick");
+  // 点击走就近吸附判定(与 hover 同源): 刻度只有 2px 高, e.target 精确
+  // 命中率太低; 12px 吸附半径内都算点到, 也与当前波纹所指保持一致
+  const idx = mmTickFromEvent(e);
+  const tick = idx != null ? mm.children[idx] : null;
   if (!tick || !tick._row) return;
   const row = tick._row;
   $("messages").scrollTo({

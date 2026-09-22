@@ -518,6 +518,23 @@ wheels = [
 ]
 
 [[package]]
+name = "openai"
+version = "3.17.0"
+source = { registry = "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple/" }
+dependencies = [
+    { name = "anyio" },
+    { name = "httpx2" },
+    { name = "jiter" },
+    { name = "pydantic" },
+    { name = "sniffio" },
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/packages/f8/9d/a00f8bca3df57716771cca5b4c0ddb5c2e03e1dd2ddfbb1607371ffb8372/openai-3.17.0.tar.gz", hash = "sha256:28910914e6ffaf622f1bbf5dfe02e221cc2b929e492dd30d06b6826939dedf92", size = 1710984, upload-time = "2026-09-22T02:37:17.443Z" }
+wheels = [
+    { url = "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/packages/57/bc/5b80a0ca4069a6b5ba6c7d48ae7a4f8176b2c0bde0bebccdb867472ec6f6/openai-3.17.0-py3-none-any.whl", hash = "sha256:712bc2982a6da1af10f6948a1d2d9ff5ce3ee3604ded88002a53765a77cf5ae5", size = 2068574, upload-time = "2026-09-22T02:37:15.373Z" },
+]
+
+[[package]]
 name = "packaging"
 version = "26.3"
 source = { registry = "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple/" }
@@ -1085,6 +1102,7 @@ source = { virtual = "." }
 dependencies = [
     { name = "anthropic" },
     { name = "fastapi" },
+    { name = "openai" },
     { name = "pydantic" },
     { name = "python-dotenv" },
     { name = "trafilatura" },
@@ -1102,6 +1120,7 @@ dev = [
 requires-dist = [
     { name = "anthropic", specifier = ">=1.5.0" },
     { name = "fastapi", specifier = ">=0.115" },
+    { name = "openai", specifier = ">=1.60.0" },
     { name = "pydantic", specifier = ">=2.13.5" },
     { name = "python-dotenv", specifier = ">=1.2.3" },
     { name = "trafilatura", specifier = ">=2.0" },
