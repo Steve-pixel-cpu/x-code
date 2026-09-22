@@ -428,6 +428,16 @@
   .session-item.unread .s-unread { display: inline-block; }
   .session-item.unread .meta { display: none; }
   .session-item.running.unread .s-unread { display: none; }
+  /* 卡在计划审批: "待批计划"徽标（隐藏是常态, 显示时时间/未读让位） */
+  .session-item .s-plan {
+    display: none; flex: none; padding: 1px 7px;
+    border-radius: 999px; background: var(--warn-soft); color: var(--warn);
+    font-size: calc(10px * var(--fs-ui)); font-weight: 600; line-height: 15px;
+  }
+  .session-item.awaiting-plan .s-plan { display: inline-block; }
+  .session-item.awaiting-plan .meta { display: none; }
+  .session-item.awaiting-plan.unread .s-unread { display: none; }
+  .session-item.awaiting-plan .s-ico { color: var(--warn); }
   .inline-rename {
     flex: 1; min-width: 0; height: 24px;
     font-family: inherit; font-size: calc(12.5px * var(--fs-ui)); color: var(--text);
@@ -823,6 +833,36 @@
     font-size: calc(12.5px * var(--fs-ui)); color: var(--text-3);
     animation: msg-in .22s ease;
   }
+  /* 工具分组: 连续工具调用收进一处, 左竖轨示意"过程记录", 头部可折叠。
+   * 运行中保持展开（头部脉冲"运行中…"）, 轮次结束由 JS 收起为大分组。 */
+  .tool-group {
+    margin: 2px 0 10px 38px;
+    border-left: 2px solid var(--border-strong);
+    animation: msg-in .22s ease;
+  }
+  .tool-group .tg-head {
+    display: flex; align-items: center; gap: 7px;
+    width: 100%; padding: 4px 9px;
+    background: none; border: none; cursor: pointer;
+    font-size: calc(12.5px * var(--fs-ui)); color: var(--text-3);
+    text-align: left;
+  }
+  .tool-group .tg-head:hover { background: var(--hover); }
+  .tool-group .tg-caret { flex: none; width: 10px; color: var(--text-3); transition: transform .15s; }
+  .tool-group.collapsed .tg-caret { transform: rotate(-90deg); }
+  .tool-group .tg-title { flex: none; color: var(--text-2); }
+  .tool-group .tg-sum {
+    flex: none; font-family: var(--font-mono);
+    font-size: calc(11.5px * var(--fs-ui));
+    color: color-mix(in srgb, var(--ok) 75%, var(--text-3));
+  }
+  .tool-group .tg-sum.run { animation: pulse 1.2s infinite; color: var(--text-2); }
+  .tool-group .tg-sum.bad { color: var(--warn); }
+  .tool-group .tg-body .tool-row { margin: 2px 0 6px 9px; }
+  /* 折叠: 收起已结束的行与附属面板（diff/todo）, 运行中的行保持可见 */
+  .tool-group.collapsed .tg-body .tool-row:not([data-state="run"]),
+  .tool-group.collapsed .td-wrap,
+  .tool-group.collapsed .todo-list { display: none; }
   .tool-row .t-ico { flex: none; display: inline-flex; }
   .tool-row .tname2 { flex: none; color: var(--text-2); }
   .tool-row .tdesc {
@@ -830,9 +870,14 @@
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
     font-family: var(--font-mono); font-size: calc(11.5px * var(--fs-ui));
   }
+  .tool-row .t-dur {
+    flex: none; font-family: var(--font-mono);
+    font-size: calc(10.5px * var(--fs-ui)); color: var(--text-3); opacity: .8;
+  }
   .tool-row .tstate { flex: none; }
   .tstate::before { content: "· "; }
   .tstate.run { animation: pulse 1.2s infinite; }
+  .tstate.ok { color: color-mix(in srgb, var(--ok) 72%, var(--text-3)); }
   .tstate.err { color: var(--err); }
   .tstate.denied { color: var(--warn); }
   .tstate.stopped { color: var(--warn); }
@@ -847,6 +892,8 @@
     background: var(--code-bg);
     animation: msg-in .22s ease;
   }
+  /* 分组内: 面板对齐到组内行缩进, 而非独立行时的 38px 列缩进 */
+  .tool-group .td-wrap { margin: -4px 0 6px 9px; }
   .td-head {
     display: flex; align-items: center; gap: 8px;
     width: 100%; padding: 5px 10px;
@@ -881,6 +928,7 @@
     font-size: calc(12.5px * var(--fs-ui));
     animation: msg-in .22s ease;
   }
+  .tool-group .todo-list { margin: -4px 0 6px 9px; }
   .todo-prog {
     display: flex; align-items: center; gap: 8px; margin-bottom: 7px;
   }

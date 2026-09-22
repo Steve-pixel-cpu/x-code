@@ -1032,6 +1032,7 @@ const DOT_RED_SVG = '<svg width="9" height="9" viewBox="0 0 24 24"><circle cx="1
 function sessionStateIcon(s) {
   const run = state.runs[s.id];
   if (run && run.busy) return SPINNER_SVG;               // 运行中
+  if (run && isAwaitingPlan(run)) return ICON_MODE_PLAN; // 卡在计划审批
   if (run && run.unread > 0) return DOT_RED_SVG;         // 有未读
   return CHAT_SVG;                                        // 空闲
 }
@@ -1090,6 +1091,7 @@ function makeSessionItem(s) {
   item.dataset.id = s.id;
   item.innerHTML = '<span class="s-ico">' + sessionStateIcon(s) + '</span>'
     + '<span class="s-unread"></span>'
+    + '<span class="s-plan">待批计划</span>'
     + '<span class="title"></span><span class="meta"></span>'
     + '<button class="s-ren" data-tip="重命名">' + PENCIL_SMALL_SVG + '</button>'
     + '<button class="s-del" data-tip="删除会话">' + TRASH_SMALL_SVG + '</button>';
@@ -1097,6 +1099,10 @@ function makeSessionItem(s) {
   item.querySelector(".meta").textContent = relativeTime(s.id);
   const run = state.runs[s.id];
   if (run && run.busy) item.classList.add("running");
+  // 卡在计划审批: 元信息让位给"待批计划"徽标, 错过弹窗也能从侧栏看出
+  // 这个会话在等用户批准; 图标同步换成计划徽标（sessionStateIcon）
+  const awaitingPlan = !!(run && isAwaitingPlan(run));
+  if (awaitingPlan) item.classList.add("awaiting-plan");
   if (run && run.unread > 0) {
     item.classList.add("unread");
     item.querySelector(".s-unread").textContent = run.unread > 99 ? "99+" : run.unread;
@@ -1509,6 +1515,7 @@ async function loadSessionHistory(id) {
     if (!run.busy) {
       col.querySelectorAll('.tool-row[data-state="run"]').forEach(el => setToolState(el, "stopped"));
     }
+    collapseFinishedToolGroups(col);   // 历史回放: 已结束的大分组默认收起
     pinnedCol = null; pinnedRun = null;
     run.loaded = true;
   } catch (e) {
@@ -1542,6 +1549,7 @@ async function selectSession(id) {
   renderSessionList();
   refreshWorkdirTag();
   setBusyUi(run.busy);
+  syncPlanPanelForActiveSession();   // 切回的会话若有未决计划: 恢复面板弹窗
   // 三设置回显: 会话运行值 → 会话列表缓存（/api/sessions 每项都带持久值/
   // 全局默认）→ 全局默认值。必须无条件 setValue: 否则下拉框残留上一个
   // 会话的显示值, 与本会话实际用的值不一致（"跟随全局"的会话尤其如此）
@@ -1724,6 +1732,7 @@ function startDraft(draftDir = null) {
   showCol("__draft__");
   showEmptyState();
   setBusyUi(false);
+  syncPlanPanelForActiveSession();   // 草稿态没有未决计划: 收起面板
   syncThinkingIndicator();     // 草稿态没有 run: 收掉从原会话带来的"思考中"转圈
                                  // （切走瞬间原会话正在 prefill 空窗, 否则没人再碰这个 DOM,
                                  //   后台轮次的空窗事件都带 sid 守卫, 不会点亮这里）
@@ -1886,7 +1895,10 @@ function handleServerMessage(msg, sid) {
     else if (msg.type === "thinking_end") onThinkingEnd(msg, sid);
     else if (msg.type === "tool_use_started") onToolUseStarted(msg, sid);
     else if (msg.type === "tool_use") onToolUse(msg, sid);
-    else if (msg.type === "permission_request") renderSessionList();   // awaiting 在 onPermissionRequest 里统一处理
+    // 后台会话的计划/权限请求也要走统一入口: 登记 pendingPerms + 在它的
+    // 隐藏列里建审批卡。此前只刷会话列表, 切回后既无卡也无可点按钮,
+    // 两个会话都在等计划审批时, 后弹的那个会让先弹的"卡住"。
+    else if (msg.type === "permission_request") onPermissionRequest(msg, sid);
     else if (msg.type === "tool_result") onToolResult(msg, sid);
     else if (msg.type === "await_output") {
       run.awaiting = run.busy;
@@ -1913,9 +1925,10 @@ function handleServerMessage(msg, sid) {
           if (choices) choices.remove();
           card.appendChild(makePrMark("已拒绝", false));
         }
-        // 右侧计划面板若正显示这份计划: 按钮区一并定格, 不留死按钮
+        // 右侧计划面板若正显示这份计划（且属于本会话）: 按钮区一并定格, 不留死按钮
         if (run.pendingPerms[rid]?.tool_name === "present_plan"
-            && $("plan-actions").dataset.reqId === rid) {
+            && $("plan-actions").dataset.reqId === rid
+            && $("plan-actions").dataset.reqSession === sid) {
           const pa = $("plan-actions");
           pa.innerHTML = "";
           pa.appendChild(makePrMark("已中断", false));
@@ -1925,6 +1938,7 @@ function handleServerMessage(msg, sid) {
       run.pendingPerms = {};
       // 轮次收口: 悬空工具行标"已中断", 清掉流式指针
       sweepPendingToolCards(run);
+      collapseFinishedToolGroups(colOf(sid));   // 后台会话同样收起已结束的大分组
       clearRateLimitNote(run);   // 限流退避提示一并撤下
       run.curBubble = null;
       // 思考行/乐观胶囊兜底收口（客户端计时）, 与前台 endTurnUiReset 一致;
@@ -2109,8 +2123,85 @@ function dropOptimisticThinking(run) {
 }
 
 /* ---------- 工具调用 ---------- */
-function describeInput(raw, name) {
-  // 卡片标题一行摘要: JSON 先取 command/path 等关键字段，失败展示原文
+/* 工具分组: 连续的工具调用收进同一个可折叠容器（头部显示次数/状态摘要），
+ * 避免长任务十几行工具记录把正文顶出屏幕。轮次结束自动收起，运行中保持展开。
+ * 纯视觉层: 不参与卡片配对（liveToolCards/toolResultIndex 仍指向行元素本身）。 */
+const TOOL_GROUP_AUTO_COLLAPSE_AT = 5;   // 分组内行数达到该值, 结束后自动收起
+
+function fmtToolDur(ms) {
+  if (ms < 1000) return (ms / 1000).toFixed(1) + "s";
+  const s = Math.round(ms / 1000);
+  if (s < 60) return s + "s";
+  return Math.floor(s / 60) + "m" + String(s % 60).padStart(2, "0") + "s";
+}
+
+function updateToolGroupHeader(group) {
+  if (!group) return;
+  const rows = group.querySelectorAll(".tool-row");
+  const sum = group.querySelector(".tg-sum");
+  if (!rows.length) { group.remove(); return; }   // 最后一行被撤（plan_rejected）: 分组一并撤
+  if (!sum) return;
+  let run = 0, ok = 0, bad = 0;
+  rows.forEach(r => {
+    const st = r.dataset.state;
+    if (st === "run") run++;
+    else if (st === "ok") ok++;
+    else bad++;   // err / denied / stopped 归为需注意
+  });
+  group.classList.toggle("running", run > 0);
+  if (run > 0) {
+    sum.textContent = rows.length === 1 ? "运行中…" : "运行中 " + (rows.length - run + 1) + "/" + rows.length + "…";
+    sum.className = "tg-sum run";
+  } else {
+    let txt = "✓" + ok;
+    if (bad) txt += " · !" + bad;
+    sum.textContent = txt;
+    sum.className = "tg-sum" + (bad ? " bad" : "");
+  }
+}
+
+/* 新工具行的落点: 上一个元素是分组就续用, 否则开新分组。
+ * 顺手收起同列里上一个"已结束且行数达标"的旧分组（新活动开始了, 旧的让位）。 */
+function groupForNewToolRow(col) {
+  let g = col.lastElementChild;
+  if (!g || !g.classList.contains("tool-group")) {
+    g = document.createElement("div");
+    g.className = "tool-group";
+    const head = document.createElement("button");
+    head.type = "button";
+    head.className = "tg-head";
+    head.innerHTML = '<span class="tg-caret">▾</span><span class="tg-title">工具调用</span>' +
+                     '<span class="tg-sum"></span>';
+    head.onclick = () => g.classList.toggle("collapsed");
+    g.appendChild(head);
+    const body = document.createElement("div");
+    body.className = "tg-body";
+    g.appendChild(body);
+    col.appendChild(g);
+  }
+  const prior = col.querySelectorAll(".tool-group");
+  if (prior.length > 1) {
+    const prev = prior[prior.length - 2];
+    const running = prev.querySelector('.tool-row[data-state="run"]');
+    if (!running && prev.querySelectorAll(".tool-row").length >= TOOL_GROUP_AUTO_COLLAPSE_AT) {
+      prev.classList.add("collapsed");
+    }
+  }
+  return g;
+}
+
+/* 轮次收口/历史回放后调用: 结束且行数达标的分组收起（运行中的分组不动） */
+function collapseFinishedToolGroups(col) {
+  if (!col) return;
+  col.querySelectorAll(".tool-group").forEach(g => {
+    if (g.querySelector('.tool-row[data-state="run"]')) return;
+    if (g.querySelectorAll(".tool-row").length >= TOOL_GROUP_AUTO_COLLAPSE_AT) {
+      g.classList.add("collapsed");
+    }
+  });
+}
+
+function describeInput(raw, name) {  // 卡片标题一行摘要: JSON 先取 command/path 等关键字段，失败展示原文
   try {
     const data = JSON.parse(raw);
     if (data && typeof data === "object") {
@@ -2144,17 +2235,20 @@ function addToolCard({ id, name, input, result }, col) {
   row.className = "tool-row";
   row.innerHTML =
     '<span class="t-ico">' + meta.icon + '</span>' +
-    '<span class="tname2"></span><span class="tdesc"></span><span class="tstate"></span>';
+    '<span class="tname2"></span><span class="tdesc"></span><span class="t-dur"></span><span class="tstate"></span>';
   row.querySelector(".tname2").textContent = meta.label;
   row.querySelector(".tdesc").textContent = describeInput(input, name);
   row.dataset.tool = name;
   row.dataset.input = input || "";
+  row._t0 = Date.now();   // 结果到达时在 setToolState 里折算耗时小字
+  if (input) row.title = String(input).slice(0, 500);   // 悬停看较完整入参原文
+  // 落进工具分组（连续调用折叠为一组）, 不再逐条平铺在消息列
+  groupForNewToolRow(col || msgCol()).querySelector(".tg-body").appendChild(row);
   if (result) {
     completeToolCard(row, result);
   } else {
     setToolState(row, "run");
   }
-  (col || msgCol()).appendChild(row);
   scrollToBottom();
   return row;
 }
@@ -2211,6 +2305,14 @@ function setToolState(row, kind) {
   st.className = "tstate " + kind;
   st.textContent = { run: "运行中", ok: "已完成", err: "出错",
                      denied: "已拒绝", stopped: "已中断" }[kind] || kind;
+  // 耗时小字: 结果闭合那一刻起算。过短（<100ms，历史回放/同 tick 闭合）不显示,
+  // 避免整列 "0.0s" 噪音; 悬空收口的行没有 _t0 也不显示
+  const dur = row.querySelector(".t-dur");
+  if (dur && row._t0 && kind !== "run") {
+    const ms = Date.now() - row._t0;
+    if (ms >= 100) dur.textContent = fmtToolDur(ms);
+  }
+  updateToolGroupHeader(row.closest(".tool-group"));
 }
 
 function completeToolCard(row, { is_error, denied, result_meta }) {
@@ -2294,6 +2396,9 @@ function onToolUse(msg, sid) {
   const existing = msg.id ? run.liveToolCards[msg.id] : null;
   if (existing) {
     existing.querySelector(".tdesc").textContent = describeInput(msg.input, msg.name || existing.dataset.tool);
+    existing.dataset.input = msg.input || "";          // todo 卡等从入参渲染的地方依赖它
+    if (msg.input) existing.title = String(msg.input).slice(0, 500);
+    existing._t0 = Date.now();   // 占位卡早于参数到达: 耗时从参数齐全起算
     run.activeToolCard = existing;
     return;
   }
@@ -2312,6 +2417,7 @@ function onToolResult(msg, sid) {
       delete run.liveToolCards[msg.id];
       card.remove();
       if (run.activeToolCard === card) run.activeToolCard = null;
+      updateToolGroupHeader(card.closest(".tool-group"));   // 空了会整个撤掉分组
     }
     return;
   }
@@ -2436,14 +2542,19 @@ function onPermissionRequest(msg, sid) {
 /* ---------- 计划预览卡: present_plan 专用 ----------
  * markdown 渲染计划全文, 单选批准/拒绝; 批准后端自动升级模式并继续,
  * 拒绝则收起选择区、标记"已拒绝"，模型会修订后再次提交。 */
-function renderPlanCard(msg, sid2, run) {
-  // 右侧计划面板: 计划全文 + 审批按钮独立成栏; 聊天流只留一张轻量回执卡
-  let planText = "";
+/* present_plan 的 input → markdown 计划全文（解析失败回退原文） */
+function planTextOf(input) {
   try {
-    const data = JSON.parse(msg.input || "{}");
-    planText = typeof data.plan === "string" ? data.plan : String(msg.input || "");
-  } catch (e) { planText = String(msg.input || ""); }
+    const data = JSON.parse(input || "{}");
+    return typeof data.plan === "string" ? data.plan : String(input || "");
+  } catch (e) { return String(input || ""); }
+}
 
+/* 右侧计划面板呈现一份计划: 全文渲染 + 审批按钮 + 归属会话标记。
+ * 当前会话的新计划（renderPlanCard）与切回会话的恢复
+ * （syncPlanPanelForActiveSession）共用。面板全局只有一份, 归属
+ * 记在 #plan-actions 的 reqId/reqSession 上, 收口/批复据此认领。 */
+function showPlanInPanel(reqId, sid, planText) {
   const pane = $("pane");
   const body = $("plan-body");
   _planSource = planText;   // 复制按钮用: 始终复制 markdown 源文
@@ -2452,12 +2563,37 @@ function renderPlanCard(msg, sid2, run) {
   body.classList.remove("stale");   // 新计划到达: 清掉上一份的过期淡化
   const actions = $("plan-actions");
   actions.innerHTML = "";
-  actions.dataset.reqId = msg.request_id;
-  actions.appendChild(buildPermChoices(msg.request_id, sid2, "批准并实施", "拒绝"));
+  actions.dataset.reqId = reqId;
+  actions.dataset.reqSession = sid;   // 面板归属: 批复/收口只认这个会话
+  actions.appendChild(buildPermChoices(reqId, sid, "批准并实施", "拒绝"));
+  const s = state.sessions.find(x => x.id === sid);
+  $("plan-title").textContent = "实施计划" + (s ? " · " + displayTitle(s) : "");
   pane.classList.add("plan-open");
+}
+
+/* 切会话/回草稿态时同步右侧面板: 当前会话有未决 present_plan 就恢复显示
+ * （后台会话收到计划时不抢面板, 靠这里在切回时补弹——两个会话都在等
+ * 计划审批时, 先弹的那个不再被后弹的顶掉）; 没有则只收起面板, 不清正文
+ * （用户可能还在看上一份已定的计划全文）。 */
+function syncPlanPanelForActiveSession() {
+  const run = curRun();
+  const pend = run ? Object.values(run.pendingPerms)
+    .filter(p => p && p.tool_name === "present_plan") : [];
+  if (pend.length) {
+    const msg = pend[pend.length - 1];   // 最近提交的一份未决计划
+    showPlanInPanel(msg.request_id, state.sessionId, planTextOf(msg.input));
+  } else {
+    $("pane").classList.remove("plan-open");
+  }
+}
+
+function renderPlanCard(msg, sid2, run) {
+  const active = sid2 === state.sessionId;
+  // 右侧计划面板只属于当前会话: 新计划在此弹出; 后台会话不抢面板,
+  // 只建聊天流卡 + 登记 pendingPerms, 切回时 syncPlanPanelForActiveSession 补弹
+  if (active) showPlanInPanel(msg.request_id, sid2, planTextOf(msg.input));
 
   // 聊天流轻量卡: 面板被收起时也能就地批准/拒绝
-  const active = sid2 === state.sessionId;
   const card = document.createElement("div");
   card.className = "plan-card";
   card.dataset.reqId = msg.request_id;
@@ -2465,7 +2601,8 @@ function renderPlanCard(msg, sid2, run) {
   head.className = "plan-head";
   head.innerHTML = '<span class="pr-ico">' + ICON_MODE_PLAN + '</span>' +
     '<span class="plan-title">实施计划</span>' +
-    '<span class="pr-hint"><i class="pr-dot"></i>等待确认（已 在右侧面板打开）</span>';
+    '<span class="pr-hint"><i class="pr-dot"></i>等待确认' +
+    (active ? "（已在右侧面板打开）" : "") + '</span>';
   card.appendChild(head);
   card.appendChild(buildPermChoices(msg.request_id, sid2, "批准并实施", "拒绝"));
   colOf(sid2).appendChild(card);
@@ -2504,9 +2641,9 @@ function expirePlanCard(run, sid, label) {
       card.appendChild(makePrMark(label, false));
     });
   }
-  // 右侧面板: 显示的正是被过期的这份计划 → 按钮区定格, 正文淡化
+  // 右侧面板: 显示的正是被过期的这份计划（且属于本会话）→ 按钮区定格, 正文淡化
   const pa = $("plan-actions");
-  if (rids.includes(pa.dataset.reqId)) {
+  if (rids.includes(pa.dataset.reqId) && pa.dataset.reqSession === sid) {
     pa.innerHTML = "";
     pa.appendChild(makePrMark(label, false));
     $("plan-body").classList.add("stale");
@@ -2533,9 +2670,10 @@ function respondPermission(requestId, approved, sid) {
   colOf(sid).querySelectorAll(
     `.perm-row[data-req-id="${requestId}"], .plan-card[data-req-id="${requestId}"]`
   ).forEach(markCard);
-  // 右侧面板脚注同步定格
+  // 右侧面板脚注同步定格（面板正显示这份计划且属于本会话才动——
+  // 面板可能已被另一会话的计划占用）
   const pa = $("plan-actions");
-  if (pa.dataset.reqId === requestId) {
+  if (pa.dataset.reqId === requestId && pa.dataset.reqSession === sid) {
     pa.innerHTML = "";
     pa.appendChild(makePrMark(approved ? "已批准 · 开始实施" : "已拒绝", approved));
   }
@@ -2553,6 +2691,7 @@ function endTurnUiReset() {
     flushAssistantBubble(run);
     // 轮次结束还有工具行停在"运行中"（被打断/异常, 结果永远来不了）: 收口
     sweepPendingToolCards(run);
+    collapseFinishedToolGroups(colOf(state.sessionId));   // 大分组随轮次结束收起
     if (run.curThinking) onThinkingEnd({}, state.sessionId);   // 思考行兜底收口（客户端计时）
   }
   syncThinkingIndicator();
@@ -3503,6 +3642,10 @@ async function loadSettings() {
       thinkingLevel: s.thinking_level || null,
       modelKey: s.provider_id && s.model_id ? s.provider_id + "|" + s.model_id : null,
     };
+    if (s.max_iterations != null) {
+      state.serverMaxIter = s.max_iterations;
+      $("set-max-iter").value = String(s.max_iterations);
+    }
     if (s.workspace) $("ws-tag-text").textContent = s.workspace;
     state.serverWorkspace = s.workspace || null;
     state.configured = s.configured !== false;   // 旧服务端无此字段时视为已配置
@@ -3841,6 +3984,34 @@ $("btn-icon-reset").onclick = async () => {
   } catch (e) { toast("恢复失败: " + e.message); }
 };
 
+/* ---------- 设置 → 行为: 每轮最大迭代次数（新会话的默认值） ---------- */
+function maxIterValid(v) { return Number.isInteger(v) && v >= 1 && v <= 10000; }
+function currentMaxIter() {
+  const v = parseInt($("set-max-iter").value, 10);
+  return maxIterValid(v) ? v : null;
+}
+{
+  const inp = $("set-max-iter");
+  const submit = async () => {
+    const cur = state.serverMaxIter;
+    if (inp.value.trim() === "") {   // 清空 = 放弃编辑, 回显当前值
+      if (cur != null) inp.value = String(cur);
+      inp.classList.remove("invalid");
+      return;
+    }
+    const v = parseInt(inp.value, 10);
+    if (!maxIterValid(v)) { inp.classList.add("invalid"); return; }
+    inp.classList.remove("invalid");
+    await saveSettings({ max_iterations: v });
+    toast("已保存，对新会话生效");
+  };
+  inp.addEventListener("blur", submit);
+  inp.addEventListener("keydown", ev => {
+    ev.stopPropagation();   // 别让 Enter/Esc 冒泡成全局快捷键
+    if (ev.key === "Enter") ev.target.blur();
+  });
+}
+
 /* ---------- 设置 → 配置文件: 用系统默认编辑器打开 settings.json ---------- */
 $("btn-open-config").onclick = async () => {
   try {
@@ -3895,10 +4066,12 @@ async function saveSettings(patch) {
     // 草稿态下 REST 修改的全局默认, 同步进快照（切会话/下次进草稿的兜底值）
     if (s.thinking_level != null) state.globalDefaults.thinkingLevel = s.thinking_level;
     if (s.permission_mode) state.globalDefaults.permissionMode = s.permission_mode;
+    if (s.max_iterations != null) $("set-max-iter").value = String(s.max_iterations);
     if (s.provider_id && s.model_id) {
       state.globalDefaults.modelKey = s.provider_id + "|" + s.model_id;
       if (!state.sessionId) modelDd.setValue(state.globalDefaults.modelKey);
     }
+    return s;
   } catch (e) { toast("设置失败: " + e.message); }
 }
 
@@ -4124,6 +4297,8 @@ function openSettings() {
   $("bg-bright").value = String(bgBrightPref());
   $("bg-bright-val").textContent = String(bgBrightPref());
   syncAccentInput();
+  // 迭代次数: 未加载过(服务端值未知)时留空给 placeholder 兜底, 已知则回显
+  if (state.serverMaxIter != null) $("set-max-iter").value = String(state.serverMaxIter);
   loadProviders().then(renderProviderSettings);   // 拉取供应商配置并渲染
   $("sidebar").classList.add("settings-view");
   $("pane").dataset.view = "settings";
