@@ -344,7 +344,7 @@
       </div>
       <div class="sp-section-body" data-section="models" style="display:none">
         <div class="sp-section">模型</div>
-        <div class="sp-section-desc">管理 API 供应商与模型列表；保存后立即可在会话中切换</div>
+        <div class="sp-section-desc">管理 API 供应商与模型列表；改动停顿后自动保存，立即可在会话中切换</div>
         <div class="prov-layout">
           <aside class="prov-side">
             <div id="prov-list"></div>
@@ -353,7 +353,7 @@
           <div class="prov-main" id="prov-detail"></div>
         </div>
         <div class="prov-actions">
-          <button type="button" id="btn-save-providers" class="prov-primary">保存模型配置</button>
+          <span id="prov-save-status" class="prov-save-status" aria-live="polite"></span>
         </div>
       </div>
       <div class="sp-section-body" data-section="behavior" style="display:none">

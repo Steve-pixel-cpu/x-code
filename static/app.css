@@ -1480,22 +1480,13 @@
     font-family: inherit; transition: all .12s;
   }
   .m-add:hover { color: var(--accent); border-color: var(--accent-border); }
-  /* 底部动作: 主按钮靠右; 供应商网格已自带左右分栏 */
+  /* 底部动作区: 保存状态指示（自动保存）靠右 */
   .prov-actions { display: flex; gap: 10px; margin-top: 2px; }
-  .prov-actions button {
-    padding: 9px 26px; border-radius: var(--r-sm); font-size: calc(13px * var(--fs-ui));
-    font-weight: 600; cursor: pointer; transition: all .12s;
-    font-family: inherit;
+  .prov-save-status {
+    margin-left: auto; font-size: calc(12px * var(--fs-ui)); color: var(--text-3);
+    transition: color .15s;
   }
-  .prov-ghost { border: 1px solid var(--border-strong); background: none; color: var(--text-2); }
-  .prov-ghost:hover { background: var(--hover); color: var(--text); }
-  #btn-save-providers { margin-left: auto; }
-  .prov-primary {
-    border: none; color: #fff;
-    background: linear-gradient(135deg, var(--accent), var(--accent-deep));
-    box-shadow: 0 2px 10px var(--accent-soft);
-  }
-  .prov-primary:hover { filter: brightness(1.08); }
+  .prov-save-status.err { color: var(--err); }
   .set-row {
     display: flex; align-items: center; gap: 12px;
     padding: 12px 14px; border: 1px solid var(--border); border-radius: var(--r-md);
