@@ -18,6 +18,7 @@ bin-release/
 # information for Eclipse / Flash Builder.
 
 .idea/
+.zcode/
 __pycache__/
 .env
 prompt_dev
