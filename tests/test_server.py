@@ -523,6 +523,59 @@ def test_request_stop_清空排队区():
 
 
 # ------------------------------------------------------------
+# 合并接力: 待发送区的多条消息（含「立即」插队置顶的那条）合成
+# 一次新请求开跑, 不再逐条各开一轮（先答插队的、再补其余的）
+# ------------------------------------------------------------
+
+def test_start_pending_turn_合并全部待发送消息(monkeypatch):
+    s = _stub_session(pending=[
+        {"qid": "a", "text": "第一条", "attachments": []},
+        {"qid": "b", "text": "", "attachments": [{"kind": "image", "name": "p.png"}]},
+        {"qid": "c", "text": "第二条", "attachments": []},
+    ], emits=[1])
+    seen = {}
+    monkeypatch.setattr(server, "_start_turn",
+                        lambda ws, text, emit, attachments=None:
+                        seen.update(text=text, attachments=attachments))
+    broadcasts = []
+    s.broadcast = broadcasts.append
+
+    server._start_pending_turn(s)
+
+    # 合并成一次请求: 文本以空行连接（仅附件的消息不产生空段）, 附件顺序拼接
+    assert seen["text"] == "第一条\n\n第二条"
+    assert seen["attachments"] == [{"kind": "image", "name": "p.png"}]
+    assert s.pending == []
+    # turn_started 带 items: 前端逐条撤待发送卡/补气泡
+    assert broadcasts[0]["type"] == "turn_started"
+    assert [it["qid"] for it in broadcasts[0]["items"]] == ["a", "b", "c"]
+    assert broadcasts[0]["text"] == "第一条\n\n第二条"
+
+
+def test_start_pending_turn_仅附件消息单独接力(monkeypatch):
+    s = _stub_session(pending=[
+        {"qid": "a", "text": "",
+         "attachments": [{"kind": "file", "name": "n.md", "text": "x"}]},
+    ], emits=[1])
+    seen = {}
+    monkeypatch.setattr(server, "_start_turn",
+                        lambda ws, text, emit, attachments=None:
+                        seen.update(text=text, attachments=attachments))
+
+    server._start_pending_turn(s)
+
+    assert seen["text"] == ""
+    assert seen["attachments"] == [{"kind": "file", "name": "n.md", "text": "x"}]
+
+
+def test_start_pending_turn_无排队时静默返回(monkeypatch):
+    called = []
+    monkeypatch.setattr(server, "_start_turn", lambda *a, **k: called.append(1))
+    server._start_pending_turn(_stub_session(pending=[], emits=[1]))
+    assert called == []
+
+
+# ------------------------------------------------------------
 # 启动对账接线 — startup 事件经 get_orchestrator 调 reconcile_orphans
 # （曾经 get_orchestrator 只 import 未使用, 对账从未发生）
 # ------------------------------------------------------------

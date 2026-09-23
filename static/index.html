@@ -345,9 +345,14 @@
       <div class="sp-section-body" data-section="models" style="display:none">
         <div class="sp-section">模型</div>
         <div class="sp-section-desc">管理 API 供应商与模型列表；保存后立即可在会话中切换</div>
-        <div id="provider-cards"></div>
+        <div class="prov-layout">
+          <aside class="prov-side">
+            <div id="prov-list"></div>
+            <button type="button" id="btn-add-provider" class="prov-side-add">＋ 添加供应商</button>
+          </aside>
+          <div class="prov-main" id="prov-detail"></div>
+        </div>
         <div class="prov-actions">
-          <button type="button" id="btn-add-provider" class="prov-ghost">+ 添加供应商</button>
           <button type="button" id="btn-save-providers" class="prov-primary">保存模型配置</button>
         </div>
       </div>

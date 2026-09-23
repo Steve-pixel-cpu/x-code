@@ -10,7 +10,8 @@ from pathlib import Path
 
 from pydantic import BaseModel
 
-from api_client import AssistantEvent, TextDeltaEvent, ToolUseEvent, MessageStopEvent, ApiClient
+from api_client import (AssistantEvent, TextDeltaEvent, ToolUseEvent,
+                        MessageStopEvent, ApiClient, INTERRUPTED_STOP_REASON)
 from compact import (
     CompactionConfig,
     SUMMARIZER_SYSTEM_PROMPT,
@@ -323,6 +324,19 @@ def build_assistant_message(events: list[AssistantEvent]) -> tuple[Message, Opti
         content= blocks,
     )
     return message, usage
+
+
+def _token_usage_from(info) -> Optional[TokenUsage]:
+    """MessageStopEvent.usage → TokenUsage（None 透传）。打断零内容路径
+    与 build_assistant_message 共用同一转换, 两边记账口径一致。"""
+    if info is None:
+        return None
+    return TokenUsage(
+        input_tokens=info.input_tokens,
+        output_tokens=info.output_tokens,
+        cache_creation_input_tokens=info.cache_creation_input_tokens,
+        cache_read_input_tokens=info.cache_read_input_tokens,
+    )
 
 
 
@@ -726,6 +740,11 @@ class ConversationRuntime:
         - thinking 用 low 档: 摘要是整理不是推理, 控制耗时。
         任何失败（端点错误/打断/空返回/客户端不支持 side-call 参数）都
         向上抛, 由 _build_compact_summary 回退规则摘要。"""
+        # 打断检查点: 用户已叫停时不再发起摘要 side-call——摘要要花一次
+        # 完整的模型调用, 停止语义下多等它跑完违背直觉。TurnInterrupted
+        # 在这里与流后打断同语义, 由调用方（run_turn 工作线程）统一收束。
+        if self._cancel_check is not None and self._cancel_check():
+            raise TurnInterrupted()
         conv: List[Message] = []
         if prev_summary:
             conv.append(Message.user_text(
@@ -759,6 +778,8 @@ class ConversationRuntime:
                 archived = msgs[cached_cut:keep_from]
         try:
             return self._llm_summarize(archived, prev_summary)
+        except TurnInterrupted:
+            raise   # 用户打断: 不做规则摘要兜底, 直接收束本轮
         except Exception as e:
             print(f"[WARN] llm summarize failed, fallback to rule-based: {e}")
             return format_compact_summary(summarize_messages(msgs[:keep_from]))
@@ -970,6 +991,32 @@ class ConversationRuntime:
                 thinking_level=self._thinking_level,
                 model=self._model,
             )
+            # 流内打断: api_client 在流式消费循环里查 should_stop 命中后
+            # 补 stop_reason="interrupted" 的合成 stop 返回（不抛异常,
+            # 已流出内容保住）。这里照常入账/入历史, 再把消息里的 tool_use
+            # 就地终局（补 error result + 通知前端闭合工具卡）后抛
+            # TurnInterrupted——与"打断落在授权后执行前"的一致点同一出口。
+            # 打断标记须在 build_assistant_message 之前算好: 零内容打断时
+            # 该函数会因 blocks 为空直接抛"无消息内容!", 走不到下面的分支。
+            flow_interrupted = any(
+                isinstance(e, MessageStopEvent)
+                and e.stop_reason == INTERRUPTED_STOP_REASON
+                for e in events)
+            # 打断落在零内容阶段（思考/建连/工具参数流式前）: 流里只有合成
+            # stop, 没有任何 text/tool_use。没有消息可入史——构造空 content
+            # 的 assistant 消息既过不了 build_assistant_message 的校验
+            # （"无消息内容!"），塞进历史也会被 API 拒绝。记完账直接按
+            # TurnInterrupted 收束, 与部分内容打断同一出口（前端只显示
+            # "已停止", 不出错误气泡）。合成 stop 已带 usage, 用量不丢。
+            if flow_interrupted and not any(
+                    isinstance(e, (TextDeltaEvent, ToolUseEvent))
+                    for e in events):
+                stop_usage = next((e.usage for e in events
+                                   if isinstance(e, MessageStopEvent)), None)
+                if stop_usage is not None:
+                    self.usage().record(usage=_token_usage_from(stop_usage))
+                self._notify_iterate()   # 一致点: 用户消息已落定, 无需修补
+                raise TurnInterrupted()
             message, token_usage = build_assistant_message(events)
             truncated = any(
                 isinstance(e, MessageStopEvent) and e.stop_reason == "max_tokens"
@@ -978,6 +1025,26 @@ class ConversationRuntime:
             if token_usage:
                 self.usage().record(usage=token_usage)
             curr_session.messages.append(message)
+
+            if flow_interrupted:
+                for block in message.content:
+                    if isinstance(block, ToolContentBlock):
+                        interrupted_result = Message.tool_result(
+                            id=block.id,
+                            name=block.name,
+                            output="(用户中断了本轮对话)",
+                            is_error=True,
+                        )
+                        curr_session.messages.append(interrupted_result)
+                        tool_results.append(interrupted_result)
+                        if self._on_tool_finalized is not None:
+                            try:
+                                self._on_tool_finalized(block,
+                                                        interrupted_result)
+                            except Exception as e:
+                                print(f"[WARN] tool-finalized hook failed: {e}")
+                self._notify_iterate()   # 一致点: 中断结果已回填
+                raise TurnInterrupted()
 
             tool_use_blocks = []
             for block in message.content:

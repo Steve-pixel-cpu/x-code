@@ -1168,24 +1168,31 @@ def _drain_queued_turns() -> None:
 
 
 def _start_pending_turn(web_session: WebSession) -> None:
-    """事件循环线程: 取出该会话排队的下一条后续消息, 接力开跑新一轮。
+    """事件循环线程: 取出该会话待发送区的全部后续消息, 合并成一次新请求接力开跑。
 
     由上一轮工作线程在 finally 里经 call_soon_threadsafe 调度——
     此时槽位已释放, _start_turn 拿不到槽位会自行进入全局排队。
+    合并语义: 「立即」插队或自然回落时, 待发送区里攒下的多条消息不再
+    逐条各开一轮（先答插队的那条、再补其余的）, 而是合成一条 user 输入
+    （文本以空行连接、附件顺序拼接）, 一次响应同时覆盖全部消息。
     """
     if not web_session.pending:
         return
-    item = web_session.pending.pop(0)
+    items, web_session.pending = web_session.pending, []
     if not web_session.emits:
         return
-    text = str(item.get("text") or "")
-    attachments = item.get("attachments") or []
-    # 前端把"已排队"气泡转正（按 qid 配对撤卡片）, 并重新进入忙碌态
+    text = "\n\n".join(t for t in (str(it.get("text") or "").strip()
+                                   for it in items) if t)
+    attachments = [a for it in items for a in (it.get("attachments") or [])]
+    # 前端把"已排队"气泡转正（按 qid 配对去重, 多窗口同步补气泡）,
+    # 并重新进入忙碌态
     web_session.broadcast({
         "type": "turn_started",
-        "qid": item.get("qid"),
+        "qid": items[0].get("qid"),
         "text": text,
         "attachments": attachments,
+        "items": [{"qid": it.get("qid"), "text": it.get("text") or "",
+                   "attachments": it.get("attachments") or []} for it in items],
     })
     _start_turn(web_session, text, web_session.broadcast, attachments=attachments)
 
@@ -1193,9 +1200,14 @@ def _start_pending_turn(web_session: WebSession) -> None:
 def request_stop(web_session: WebSession) -> None:
     """stop / 断连: 朝安全侧叫停——解除权限等待，后续工具调用全部自动拒绝。
 
-    说明: 内核的流式调用是同步阻塞的, 打断由流式代理在下一个 SSE 事件
-    到达时抛 TurnInterrupted 实现——正文/思考流式期间通常毫秒级生效,
-    只有等首包或工具执行中的长命令仍要等它自然结束。
+    打断生效点（按当前轮所处阶段）:
+    - 重试退避/建连静默: retry 分片轮询 should_stop, 立即抛 StreamInterrupted;
+      建连 stalled 由 connect 超时（15s）兜底进重试轮询
+    - 正文/思考/工具参数流式: api_client 消费循环逐事件检查, 下一个事件即
+      break 并返回带 stop_reason="interrupted" 的部分结果（已流出内容保留）
+    - 工具执行: bash 等待循环轮询 contextvar, 触发即杀整棵进程树
+    - 权限等待: prompter.cancel 立即 DENY 解除
+    - 摘要 side-call: 进入前查一次, 已在跑的由流内打断收束
     同时清空排队区: 用户叫停的意图是整轮停下, 排队的后续消息一并撤回。
     """
     if not web_session.busy:
@@ -1214,9 +1226,9 @@ def request_stop(web_session: WebSession) -> None:
 def promote_pending(web_session: WebSession, qid: str) -> bool:
     """「立即」插队: 把待发送区里的这条提到最前并叫停当前轮。
 
-    回落后它作为下一棒立刻接力开跑（朝安全侧, 同 request_stop 但不清空
-    待发送区）。qid 不在待发送区时静默忽略（返回 False）——它可能已经
-    开跑, 此刻叫停只会误杀当前轮。
+    回落后待发送区的全部消息合并成一次新请求接力开跑（朝安全侧,
+    同 request_stop 但不清空待发送区）。qid 不在待发送区时静默忽略
+    （返回 False）——它可能已经开跑, 此刻叫停只会误杀当前轮。
     与手动停止一致: 被打断的任务就地收束不自动续跑, 是否继续由用户
     下一次消息决定。
     """
@@ -1932,7 +1944,7 @@ async def ws_endpoint(websocket: WebSocket, session_id: str):
                         # 与「立即」插队同款打断语义（cancel 使 decide 以 DENY
                         # 解除, 模型收到计划被拒后就地收束, 不会盲目修订）。
                         # 当前轮 turn_done 后 finally 经 _start_pending_turn
-                        # 接力, 这条消息作为下一棒立刻开跑。
+                        # 接力, 待发送区的全部消息合并成一次新请求开跑。
                         web_session.pending.insert(0, {
                             "qid": str(raw.get("qid") or uuid.uuid4()),
                             "text": text,
@@ -1974,8 +1986,8 @@ async def ws_endpoint(websocket: WebSocket, session_id: str):
 
             elif msg_type == "queue_promote":
                 # 「立即」: 把待发送区里的这条提到最前, 并叫停当前轮——
-                # 回落后它作为下一棒立刻接力开跑。被打断的当前任务就地
-                # 收束, 不自动续跑（与手动停止一致）。按 qid 配对
+                # 回落后待发送区的全部消息合并成一次新请求接力开跑。
+                # 被打断的当前任务就地收束, 不自动续跑（与手动停止一致）。按 qid 配对
                 qid = str(raw.get("qid") or "").strip()
                 promote_pending(web_session, qid)
 

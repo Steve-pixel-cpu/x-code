@@ -10,7 +10,8 @@
   它能存在，靠的是 ToolExecutor 是 Protocol（结构化鸭子类型，无需继承）。
 """
 
-from api_client import ApiClient, MessageStopEvent, TextDeltaEvent, ToolUseEvent
+from api_client import (ApiClient, MessageStopEvent, TextDeltaEvent, ToolUseEvent,
+                        UsageInfo)
 from models import Session, TextContentBlock, ToolContentBlock, ToolResultContentBlock
 from permissions import PermissionMode, PermissionPolicy
 from runtime import (
@@ -406,3 +407,91 @@ def test_打断落在长命令执行期_工具取消后在一致点收束():
     assert elapsed < 15                         # 旧实现: 永久卡死
     roles = [m.role for m in rt.session().messages]
     assert roles == ["user", "assistant", "tool"]   # 历史一致, 无悬空
+
+
+# ============================================================
+# 流内打断（stop_reason="interrupted"）—— 部分内容保留 + 一致点收束
+# ============================================================
+
+def _make_streaming_runtime(fake, stop: dict) -> ConversationRuntime:
+    """cancel_check 读共享开关的 runtime（流内打断路径用）。"""
+    rt = make_runtime(fake, executor=EchoExecutor())
+    rt.set_cancel_check(lambda: stop["on"])
+    return rt
+
+
+def test_流内打断_部分正文保留并抛TurnInterrupted():
+    """api_client 返回 stop_reason="interrupted" 的部分流: 已流出正文照常
+    进历史, runtime 抛 TurnInterrupted 收束——不等整段流自然结束。"""
+    import pytest
+
+    fake = ScriptedApiClient([[
+        TextDeltaEvent(text="部分正文"),
+        MessageStopEvent(stop_reason="interrupted"),
+    ]])
+    rt = _make_streaming_runtime(fake, stop={"on": False})
+
+    with pytest.raises(TurnInterrupted):
+        rt.run_turn("hello")
+
+    messages = rt.session().messages
+    # user + 部分 assistant（正文保留, 不丢弃）
+    assert [m.role for m in messages] == ["user", "assistant"]
+    assert messages[-1].content[0].text == "部分正文"
+
+
+def test_流内打断_零内容时直接收束不入史():
+    """打断落在零内容阶段（思考/建连窗口）: 流里只有 stop_reason="interrupted"
+    的合成 stop, 没有任何 text/tool_use。没有消息可入史（空 assistant 会被
+    API 拒绝）——按 TurnInterrupted 收束, 历史停在 user 消息, 不报"无消息内容"。
+    合成 stop 携带的 usage 照常入账。"""
+    import pytest
+
+    fake = ScriptedApiClient([[
+        MessageStopEvent(
+            stop_reason="interrupted",
+            usage=UsageInfo(input_tokens=100, output_tokens=5),
+        ),
+    ]])
+    rt = _make_streaming_runtime(fake, stop={"on": False})
+
+    with pytest.raises(TurnInterrupted):
+        rt.run_turn("hello")
+
+    # user 之后没有追加任何 assistant 消息——历史无空消息
+    assert [m.role for m in rt.session().messages] == ["user"]
+    # usage 已入账（合成 stop 带 usage 时不丢）
+    assert rt.usage().current_turn_usage().input_tokens == 100
+
+
+def test_流内打断_悬空工具调用补齐error结果并通知镜像():
+    """打断落在工具参数流式期: 消息里已拼出的 tool_use 就地终局——补
+    error tool_result（无悬空）+ on_tool_finalized 通知前端闭合工具卡。"""
+    import pytest
+
+    fake = ScriptedApiClient([[
+        TextDeltaEvent(text="正在写入"),
+        ToolUseEvent(id="t1", name="write_file",
+                     input='{"path": "a.txt", "content": "hi"}'),
+        MessageStopEvent(stop_reason="interrupted"),
+    ]])
+    stop = {"on": False}
+    fake = ScriptedApiClient([list(fake.script[0])])
+    finalized_seen: list = []
+    rt = make_runtime(fake, executor=EchoExecutor())
+    rt.set_cancel_check(lambda: stop["on"])
+    rt.set_on_tool_finalized(lambda block, msg: finalized_seen.append((block, msg)))
+
+    with pytest.raises(TurnInterrupted):
+        rt.run_turn("hello")
+
+    messages = rt.session().messages
+    # user + assistant(带 tool_use) + tool(error result)——历史一致
+    assert [m.role for m in messages] == ["user", "assistant", "tool"]
+    result_block = messages[-1].content[0]
+    assert result_block.is_error is True
+    assert result_block.id == "t1"
+    assert "中断" in result_block.output
+    assert len(finalized_seen) == 1
+    assert finalized_seen[0][0].id == "t1"
+    assert finalized_seen[0][1] is messages[-1]

@@ -6,12 +6,26 @@ import threading
 from json import JSONDecodeError
 
 import anthropic
+import httpx2 as httpx
 import openai
 from openai import OpenAI
 from pydantic import BaseModel
 
+# 流式读超时拆分: connect 上限压到 15s——stalled 建连快速失败落入重试
+# 循环的 should_stop 轮询点, 打断立即生效（此前 connect/read 共用 300s,
+# 等首包最坏干等 5 分钟且不可打断）。read 仍 300s: 两条流式事件之间的
+# 最大间隔, 防一条 stalled 连接把 run_turn 永久挂死。
+API_CONNECT_TIMEOUT_S = 15.0
+API_READ_TIMEOUT_S = 300.0
 
-def _openai_client(api_key: str, base_url: str | None, timeout: float,
+
+def _api_stream_timeout() -> httpx.Timeout:
+    return httpx.Timeout(connect=API_CONNECT_TIMEOUT_S,
+                         read=API_READ_TIMEOUT_S,
+                         write=30.0, pool=API_CONNECT_TIMEOUT_S)
+
+
+def _openai_client(api_key: str, base_url: str | None, timeout,
                    max_retries: int = 0) -> OpenAI:
     """构造 openai 客户端的单点入口, 兼容 openai 3.x 的构造期凭据校验。
 
@@ -326,6 +340,12 @@ class StreamInterrupted(Exception):
     语义与 server 端 SSE 代理的 TurnInterrupted 一致——朝安全侧收束本轮。"""
 
 
+# 流内打断的合成 stop_reason: stream() 消费循环里查 should_stop 命中后,
+# 补一个携带此标记的 MessageStopEvent 返回（不抛异常, 已流出内容保住）。
+# runtime 据此收束本轮。取值刻意与 Anthropic 原生 stop_reason 空间不相交。
+INTERRUPTED_STOP_REASON = "interrupted"
+
+
 class ApiClient(ABC):
     """模型客户端抽象: 协议线格式 → 中立事件（wire）/ 会话事件（Assistant）。
 
@@ -472,7 +492,8 @@ class ClaudeApiClient(ApiClient):
         # 连接会让 run_turn 永久挂死（CLI 卡死 / Web 端 busy 永远不解锁）
         # max_retries=0: SDK 自带重试关闭, 重试策略（退避/上限）统一归 retry.py
         self.raw_client = anthropic.Anthropic(api_key=api_key, base_url=base_url,
-                                              timeout=300.0, max_retries=0)
+                                              timeout=_api_stream_timeout(),
+                                              max_retries=0)
         self.client = self.raw_client
 
     def configure(self,
@@ -493,7 +514,7 @@ class ClaudeApiClient(ApiClient):
             self._base_url = new_url
             self.raw_client = anthropic.Anthropic(
                 api_key=new_key, base_url=new_url or None,
-                timeout=300.0, max_retries=0)
+                timeout=_api_stream_timeout(), max_retries=0)
             self.client = self.raw_client
 
     def reset_to(self, api_key: str, model: str, base_url: str | None = None,
@@ -505,7 +526,8 @@ class ClaudeApiClient(ApiClient):
         if on_event is not None:
             self._on_event = on_event
         self.raw_client = anthropic.Anthropic(api_key=api_key, base_url=base_url,
-                                              timeout=300.0, max_retries=0)
+                                              timeout=_api_stream_timeout(),
+                                              max_retries=0)
         self.client = self.raw_client
 
     @property
@@ -653,6 +675,7 @@ class ClaudeApiClient(ApiClient):
             except RetryAborted:
                 raise StreamInterrupted() from None
             blocks = {}
+            stopped = False
             for event in stream:
                 if event.type == 'content_block_start':
                     cb = event.content_block
@@ -734,6 +757,32 @@ class ClaudeApiClient(ApiClient):
                         usage=UsageInfo(**usage_acc) if usage_acc else None,
                         stop_reason=stop_reason,
                     ))
+                # 流内打断检查点（循环体末尾）: 先把手头事件完整处理进
+                # events, 再查 should_stop——正文/思考/大工具参数 JSON 流式
+                # 期间点停止, 收完当前网络块即生效, 不再等整段流自然结束
+                # （大参数 JSON 流式可达几十秒）。放在末尾而非入口: 入口检查
+                # 会白白丢掉已到达未处理的事件。break 而非抛异常: 保住已
+                # 流出内容进历史, 由收尾补合成 stop 让 runtime 在一致点
+                # 收束（与流后打断同一出口）。
+                if (self._should_stop_provider is not None
+                        and self._should_stop_provider()):
+                    stopped = True
+                    break
+            if stopped and not any(isinstance(e, MessageStopEvent)
+                                   for e in events):
+                # 打断收尾: 补合成 stop 事件（stop_reason="interrupted"）,
+                # runtime 据此在一致点收束本轮——补 error tool_result 后抛
+                # TurnInterrupted, 历史不留悬空 tool_use。usage 照常携带,
+                # 已流出部分的用量不丢。
+                echo.finish()
+                if wire is not None:
+                    if usage_acc:
+                        wire(WireUsage(**usage_acc))
+                    wire(WireStop(stop_reason=INTERRUPTED_STOP_REASON))
+                events.append(MessageStopEvent(
+                    usage=UsageInfo(**usage_acc) if usage_acc else None,
+                    stop_reason=INTERRUPTED_STOP_REASON,
+                ))
         finally:
             stack.close()
 
@@ -874,7 +923,8 @@ class OpenAIApiClient(ApiClient):
         self._base_url = base_url
         # 流式读超时/SDK 自带重试关闭, 语义与 ClaudeApiClient 一致:
         # 重试策略统一归 retry.py
-        self.raw_client = _openai_client(api_key, base_url, timeout=300.0)
+        self.raw_client = _openai_client(api_key, base_url,
+                                         timeout=_api_stream_timeout())
         self.client = self.raw_client
 
     def configure(self,
@@ -893,7 +943,7 @@ class OpenAIApiClient(ApiClient):
             self._api_key = new_key
             self._base_url = new_url
             self.raw_client = _openai_client(new_key, new_url or None,
-                                             timeout=300.0)
+                                             timeout=_api_stream_timeout())
             self.client = self.raw_client
 
     def reset_to(self, api_key: str, model: str, base_url: str | None = None,
@@ -986,6 +1036,7 @@ class OpenAIApiClient(ApiClient):
 
         # 工具块拼装中: index → {id, name, args, announced}
         pending_tools: dict[int, dict] = {}
+        stopped = False
 
         def _emit_wire(ev: WireEvent) -> None:
             if wire is not None:
@@ -1013,6 +1064,13 @@ class OpenAIApiClient(ApiClient):
         stop_reason: Optional[str] = None
         try:
             for chunk in stream:
+                # 流内打断检查点: 与 Anthropic 版同语义——下一个 chunk 即生效,
+                # break 后在循环外补合成 stop（stop_reason="interrupted"）,
+                # 已流出内容保留, runtime 在一致点收束。
+                if (self._should_stop_provider is not None
+                        and self._should_stop_provider()):
+                    stopped = True
+                    break
                 if getattr(chunk, "usage", None) is not None:
                     u = chunk.usage
                     if u.prompt_tokens is not None:
@@ -1082,6 +1140,11 @@ class OpenAIApiClient(ApiClient):
         finally:
             echo.finish()
 
+        if stopped and stop_reason is None:
+            # 打断收尾: 标记 interrupted 供 runtime 识别收束; stop_reason 非
+            # None 说明真实 finish_reason 已到达（打断落在收尾 chunk 之后）,
+            # 按正常完成处理。
+            stop_reason = INTERRUPTED_STOP_REASON
         if usage_acc:
             _emit_wire(WireUsage(**usage_acc))
         _emit_wire(WireStop(stop_reason=stop_reason))

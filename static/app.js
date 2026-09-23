@@ -158,7 +158,6 @@ function restoreCurrentInput() {
   setAttachDraft(atts || []);
   autoGrow($("input"));
   updateSendBtn();
-  renderQueueCards();   // 待发送卡片跟着会话走
 }
 
 /* ============================================================
@@ -331,6 +330,7 @@ function renderAttachPreview() {
   if (!box) return;
   box.innerHTML = "";
   const draft = attachDraftOf();
+  const imgAtts = draft.filter(a => a.kind === "image");   // 传整组给灯箱, 支持左右切换
   draft.forEach((att, idx) => {
     const item = document.createElement("div");
     item.className = "att-item";
@@ -338,7 +338,9 @@ function renderAttachPreview() {
       const img = document.createElement("img");
       img.className = "att-thumb";
       img.alt = att.name || "";
+      img.title = "点击查看大图";
       img.src = "data:" + (att.media_type || "image/png") + ";base64," + att.data;
+      img.onclick = () => openLightbox(imgAtts, imgAtts.indexOf(att));
       item.appendChild(img);
     } else {
       item.classList.add("att-file");
@@ -1955,11 +1957,7 @@ function handleServerMessage(msg, sid) {
     } else if (msg.type === "turn_started") {
       run.busy = true;               // 排队的后续消息接力开跑
       run.lastThinkRow = null;
-      // 按 qid 撤下对应待发送卡片（旧消息无 qid 时回退按文本匹配）
-      const qi = run.queue.findIndex(it =>
-        it.qid ? it.qid === msg.qid : it.text === msg.text);
-      if (qi >= 0) run.queue.splice(qi, 1);
-      addUserBubble(msg.text, msg.attachments, colOf(sid), msg.ts);
+      settleRelayedMessages(msg, sid);
       beginOptimisticThinking(run, sid, colOf(sid));
     }
     return;
@@ -2241,7 +2239,7 @@ function addToolCard({ id, name, input, result }, col) {
   row.dataset.tool = name;
   row.dataset.input = input || "";
   row._t0 = Date.now();   // 结果到达时在 setToolState 里折算耗时小字
-  if (input) row.title = String(input).slice(0, 500);   // 悬停看较完整入参原文
+  // 不设 title: 悬停不再弹入参 JSON, 行内摘要足够
   // 落进工具分组（连续调用折叠为一组）, 不再逐条平铺在消息列
   groupForNewToolRow(col || msgCol()).querySelector(".tg-body").appendChild(row);
   if (result) {
@@ -2397,7 +2395,6 @@ function onToolUse(msg, sid) {
   if (existing) {
     existing.querySelector(".tdesc").textContent = describeInput(msg.input, msg.name || existing.dataset.tool);
     existing.dataset.input = msg.input || "";          // todo 卡等从入参渲染的地方依赖它
-    if (msg.input) existing.title = String(msg.input).slice(0, 500);
     existing._t0 = Date.now();   // 占位卡早于参数到达: 耗时从参数齐全起算
     run.activeToolCard = existing;
     return;
@@ -2530,7 +2527,6 @@ function onPermissionRequest(msg, sid) {
   const cmd = document.createElement("div");
   cmd.className = "pr-cmd";
   cmd.textContent = body;
-  cmd.title = body;   // 悬停看全文
   row.appendChild(cmd);
 
   row.appendChild(buildPermChoices(msg.request_id, sid2, "允许", "拒绝"));
@@ -2716,20 +2712,31 @@ function onAwaitOutput(msg, sid) {
 }
 
 /* ---------- 接力: 轮到待发送的后续消息了 ---------- */
+/* 接力消息转正: 按 qid 逐条撤下对应待发送卡片（服务端把待发送区的多条
+ * 消息合并成一轮接力, items 里逐条对应; 旧消息无 qid 时回退按文本匹配）,
+ * 并补 user 气泡——计划接力路径发送时已乐观加上（挂 _qid）, 按 qid 查重
+ * 跳过防双气泡; 普通排队/其他窗口/历史回放没有 _qid, 在此补上 */
+function settleRelayedMessages(msg, sid) {
+  const run = runOf(sid);
+  const col = colOf(sid);
+  const items = Array.isArray(msg.items) && msg.items.length
+    ? msg.items
+    : [{ qid: msg.qid, text: msg.text, attachments: msg.attachments }];
+  items.forEach(it => {
+    const qi = run.queue.findIndex(q =>
+      it.qid ? q.qid === it.qid : q.text === it.text);
+    if (qi >= 0) run.queue.splice(qi, 1);
+    const dup = it.qid && col.querySelector(`.msg.user[_qid="${it.qid}"]`);
+    if (!dup) addUserBubble(it.text, it.attachments, col, msg.ts);
+  });
+}
+
 function onTurnStarted(msg, sid) {
   const run = runOf(sid);
   run.busy = true;
   run.awaiting = false;      // 新一轮: 上一轮的空窗状态作废, 等 await_output 重新点亮
   run.lastThinkRow = null;   // 新一轮开始: 打断标记只属于当前轮的思考行
-  // 待发送卡片此刻转正: 按 qid 从队列撤下, 消息正式出现在消息流
-  const qi = run.queue.findIndex(it =>
-    it.qid ? it.qid === msg.qid : it.text === msg.text);
-  if (qi >= 0) run.queue.splice(qi, 1);
-  // 计划接力路径的气泡是乐观加的（挂 _qid）: 按 qid 查重跳过, 防双气泡。
-  // 历史回放/普通接力没有 _qid, 不受影响。
-  const col = colOf(sid);
-  const dup = msg.qid && col.querySelector(`.msg.user[_qid="${msg.qid}"]`);
-  if (!dup) addUserBubble(msg.text, msg.attachments, col, msg.ts);
+  settleRelayedMessages(msg, sid);
   beginOptimisticThinking(run, sid, colOf(sid));   // 排队消息接力开跑: 立刻给反馈
   if (sid === state.sessionId) {
     renderQueueCards();
@@ -2962,16 +2969,17 @@ function addUserBubble(text, attachments, col, ts, qid) {
   const files = atts.filter(a => a.kind === "file");
   if (imgs.length) {
     const grid = document.createElement("div");
-    grid.className = "u-imgs";
-    for (const im of imgs) {
+    grid.className = "u-imgs" + (imgs.length === 1 ? " solo" : "");   // 单图放大展示
+    imgs.forEach((im, i) => {
       const thumb = document.createElement("img");
       thumb.className = "u-img";
       thumb.alt = im.name || "";
+      thumb.title = "点击查看大图";
       thumb.loading = "lazy";
       thumb.src = "data:" + (im.media_type || "image/png") + ";base64," + (im.data || "");
-      thumb.onclick = () => openLightbox(im);
+      thumb.onclick = () => openLightbox(imgs, i);   // 传整组: 灯箱内可 ←/→ 切换
       grid.appendChild(thumb);
-    }
+    });
     b.appendChild(grid);
   }
   for (const f of files) b.appendChild(fileChipEl(f.name));
@@ -2982,28 +2990,162 @@ function addUserBubble(text, attachments, col, ts, qid) {
   return b;
 }
 
-/* ---------- 图片灯箱: 点击气泡缩略图看原图, 点击任意处/Esc 关闭 ---------- */
+/* ---------- 图片灯箱: 缩放 / 拖动 / 多图切换, 点遮罩关闭, Esc 退出 ---------- */
 let _lightbox = null;
-function openLightbox(att) {
+function openLightbox(list, index) {
+  // 兼容旧签名 openLightbox(att): 单对象 → 包成数组
+  const single = !Array.isArray(list) ? list : null;
+  const imgs = single ? [single] : (list || []);
+  if (!imgs.length) return;
+  let idx = Math.max(0, Math.min(single ? 0 : (index || 0), imgs.length - 1));
   if (_lightbox) _lightbox.remove();
+
   const ov = document.createElement("div");
   ov.id = "img-lightbox";
   const img = document.createElement("img");
-  img.alt = att.name || "";
-  img.src = "data:" + (att.media_type || "image/png") + ";base64," + (att.data || "");
-  ov.appendChild(img);
-  if (att.name) {
-    const cap = document.createElement("div");
-    cap.className = "lb-cap";
-    cap.textContent = att.name;
-    ov.appendChild(cap);
-  }
-  const close = () => { document.removeEventListener("keydown", onEsc); ov.remove(); _lightbox = null; };
-  const onEsc = e => { if (e.key === "Escape") close(); };
-  ov.onclick = close;
+  img.alt = "";
+  img.draggable = false;
+  const cap = document.createElement("div");
+  cap.className = "lb-cap";
+  ov.append(img, cap);
+
+  // 视图状态: scale 为相对适配尺寸的倍率; tx/ty 平移像素。切图即重置。
+  let scale = 1, tx = 0, ty = 0;
+  const zoomLabel = document.createElement("span");
+  zoomLabel.className = "lb-zoom";
+  const apply = () => {
+    img.style.transform = "translate(" + tx + "px," + ty + "px) scale(" + scale + ")";
+    zoomLabel.textContent = Math.round(scale * 100) + "%";
+  };
+  const clampScale = v => Math.max(0.2, Math.min(v, 8));
+  // 平移范围: 图像中心最多拖出「自身半径 + 半个视口」, 保证总能拖回来
+  const clampPan = () => {
+    const r = img.getBoundingClientRect();
+    const mx = r.width / 2 + innerWidth / 2;
+    const my = r.height / 2 + innerHeight / 2;
+    tx = Math.max(-mx, Math.min(mx, tx));
+    ty = Math.max(-my, Math.min(my, ty));
+  };
+  const reset = () => { scale = 1; tx = 0; ty = 0; apply(); };
+  // 以视口点 (cx,cy)(相对图片中心) 为锚点缩放, 鼠标下的像素保持不动
+  const zoomTo = (ns, cx, cy) => {
+    const os = scale;
+    scale = clampScale(ns);
+    if (cx !== undefined && scale !== os) {
+      tx = (tx - cx) * (scale / os) + cx;
+      ty = (ty - cy) * (scale / os) + cy;
+    }
+    clampPan(); apply();
+  };
+
+  const SVG = {
+    minus: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M5 12h14"/></svg>',
+    plus: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>',
+    reset: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 3-6.7"/><path d="M3 4v5h5"/></svg>',
+    prev: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"/></svg>',
+    next: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg>'
+  };
+
+  const mkBtn = (svg, tip, fn, cls) => {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "lb-btn" + (cls ? " " + cls : "");
+    btn.innerHTML = svg;
+    btn.dataset.tip = tip;
+    btn.onclick = e => { e.stopPropagation(); fn(); };
+    return btn;
+  };
+
+  // 顶部工具条: − / 百分比 / ＋ / 重置
+  const toolbar = document.createElement("div");
+  toolbar.className = "lb-tools";
+  toolbar.append(
+    mkBtn(SVG.minus, "缩小 (−)", () => zoomTo(scale / 1.25)),
+    zoomLabel,
+    mkBtn(SVG.plus, "放大 (+)", () => zoomTo(scale * 1.25)),
+    mkBtn(SVG.reset, "重置 (双击图片)", reset)
+  );
+
+  // 多图切换钮: 单图隐藏
+  const multi = imgs.length > 1;
+  const nav = d => { idx = (idx + d + imgs.length) % imgs.length; show(); };
+  const prevBtn = mkBtn(SVG.prev, "上一张 (←)", () => nav(-1), "lb-nav prev");
+  const nextBtn = mkBtn(SVG.next, "下一张 (→)", () => nav(1), "lb-nav next");
+  if (!multi) { prevBtn.style.display = "none"; nextBtn.style.display = "none"; }
+
+  const show = () => {
+    const att = imgs[idx];
+    reset();
+    img.src = "data:" + (att.media_type || "image/png") + ";base64," + (att.data || "");
+    img.alt = att.name || "";
+    cap.textContent = (multi ? (idx + 1) + "/" + imgs.length + " · " : "") + (att.name || "");
+  };
+
+  // 滚轮缩放(锚点=鼠标); Ctrl+滚轮留给浏览器缩放
+  ov.addEventListener("wheel", e => {
+    if (e.ctrlKey) return;
+    e.preventDefault();
+    const r = img.getBoundingClientRect();
+    zoomTo(
+      scale * (e.deltaY < 0 ? 1.15 : 1 / 1.15),
+      e.clientX - (r.left + r.width / 2),
+      e.clientY - (r.top + r.height / 2)
+    );
+  }, { passive: false });
+
+  // 拖动平移; 未移动的纯点击(遮罩/图片/标题)关闭, 按钮除外
+  let drag = null;
+  ov.addEventListener("pointerdown", e => {
+    if (e.button !== 0 || e.target.closest(".lb-btn")) return;
+    drag = { id: e.pointerId, x: e.clientX, y: e.clientY, tx, ty, moved: false };
+    try { ov.setPointerCapture(e.pointerId); } catch (_) {}
+  });
+  ov.addEventListener("pointermove", e => {
+    if (!drag || e.pointerId !== drag.id) return;
+    const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
+    if (!drag.moved && Math.hypot(dx, dy) < 3) return;
+    drag.moved = true;
+    tx = drag.tx + dx; ty = drag.ty + dy;
+    clampPan(); apply();
+  });
+  const endDrag = e => {
+    if (!drag || e.pointerId !== drag.id) return;
+    const moved = drag.moved;
+    drag = null;
+    if (!moved && !e.target.closest(".lb-btn")) close();
+  };
+  ov.addEventListener("pointerup", endDrag);
+  ov.addEventListener("pointercancel", () => { drag = null; });
+
+  // 双击图片: 1x ↔ 2x(以双击点为中心)
+  img.addEventListener("dblclick", e => {
+    const r = img.getBoundingClientRect();
+    if (scale !== 1) reset();
+    else zoomTo(2, e.clientX - (r.left + r.width / 2), e.clientY - (r.top + r.height / 2));
+  });
+
+  const onEsc = e => {
+    if (e.key === "Escape") close();
+    else if (e.key === "ArrowLeft" && multi) nav(-1);
+    else if (e.key === "ArrowRight" && multi) nav(1);
+    else if (e.key === "+" || e.key === "=") zoomTo(scale * 1.25);
+    else if (e.key === "-") zoomTo(scale / 1.25);
+    else if (e.key === "0") reset();
+  };
+  const onResize = () => { clampPan(); apply(); };
+  const close = () => {
+    document.removeEventListener("keydown", onEsc);
+    window.removeEventListener("resize", onResize);
+    ov.remove();
+    _lightbox = null;
+  };
+
   document.addEventListener("keydown", onEsc);
+  window.addEventListener("resize", onResize);
+  ov.append(toolbar, prevBtn, nextBtn);
   document.body.appendChild(ov);
   _lightbox = ov;
+  show();
 }
 
 /* ---------- 待发送卡片: ↑立即(插队) / 编辑(放回输入框) / 删除 ---------- */
@@ -3040,7 +3182,7 @@ function renderQueueCards() {
     promote.type = "button";
     promote.className = "q-promote";
     promote.innerHTML = Q_PROMOTE_SVG + "<span>立即</span>";
-    promote.dataset.tip = "打断当前回复, 这条立即发送";
+    promote.dataset.tip = "打断当前回复, 待发送的全部消息合并立即发送";
     promote.onclick = () => {
       card.classList.add("promoting");   // 已登记插队, 等当前回复收尾
       sendWs({ type: "queue_promote", qid: item.qid });
@@ -3699,13 +3841,63 @@ async function loadProviders() {
     state.providerCfg = await fetch("/api/providers").then(r => r.json());
   } catch (e) { console.error("加载供应商配置失败", e); }
 }
-function renderProviderSettings() {
-  const wrap = $("provider-cards");
+/* 左栏当前选中的供应商（仅前端内存, 切换只是换右侧表单, 不丢未保存修改） */
+let provSelectedId = null;
+function provById(id) {
+  return (state.providerCfg?.providers || []).find(p => p.id === id);
+}
+/* 左栏列表项: 名称 + 启用状态圆点（绿=启用, 灰=停用） */
+function buildProvItem(p) {
+  const item = document.createElement("button");
+  item.type = "button";
+  item.className = "prov-item" + (p.id === provSelectedId ? " on" : "");
+  item.dataset.id = p.id;
+  const name = document.createElement("span");
+  name.className = "prov-item-name";
+  name.textContent = p.name || "未命名供应商";
+  const dot = document.createElement("i");
+  dot.className = "dot" + (p.enabled !== false ? " on" : "");
+  item.append(name, dot);
+  item.onclick = () => {
+    if (provSelectedId === p.id) return;
+    provSelectedId = p.id;
+    document.querySelectorAll("#prov-list .prov-item")
+      .forEach(x => x.classList.toggle("on", x === item));
+    renderProvDetail();
+  };
+  return item;
+}
+/* 右侧详情: 无选中时给空态提示 */
+function renderProvDetail() {
+  const wrap = $("prov-detail");
   if (!wrap) return;
   wrap.innerHTML = "";
-  for (const p of (state.providerCfg?.providers || [])) {
-    wrap.appendChild(buildProviderCard(p));
+  const p = provById(provSelectedId);
+  if (!p) {
+    const empty = document.createElement("div");
+    empty.className = "prov-empty";
+    empty.textContent = "左侧选择供应商，或点击「＋ 添加供应商」";
+    wrap.appendChild(empty);
+    return;
   }
+  wrap.appendChild(buildProviderCard(p));
+}
+function renderProviderSettings() {
+  const list = $("prov-list");
+  if (!list) return;
+  const ps = state.providerCfg?.providers || [];
+  // 选中项校验: 空或已被删除时回退到第一个供应商
+  if (!ps.some(p => p.id === provSelectedId)) provSelectedId = ps[0]?.id ?? null;
+  list.innerHTML = "";
+  for (const p of ps) list.appendChild(buildProvItem(p));
+  renderProvDetail();
+}
+/* 左栏单项就地同步（名称/圆点）, 不重绘整栏以免打断输入焦点 */
+function syncProvItem(p) {
+  const item = document.querySelector(`#prov-list .prov-item[data-id="${CSS.escape(p.id)}"]`);
+  if (!item) return;
+  item.querySelector(".prov-item-name").textContent = p.name || "未命名供应商";
+  item.querySelector(".dot").classList.toggle("on", p.enabled !== false);
 }
 function buildProviderCard(p) {
   const card = document.createElement("div");
@@ -3718,13 +3910,13 @@ function buildProviderCard(p) {
   name.className = "prov-name";
   name.value = p.name || "";
   name.placeholder = "供应商名称";
-  name.addEventListener("input", () => { p.name = name.value; });
+  name.addEventListener("input", () => { p.name = name.value; syncProvItem(p); });
   const en = document.createElement("label");
   en.className = "prov-switch";
   const enBox = document.createElement("input");
   enBox.type = "checkbox";
   enBox.checked = p.enabled !== false;
-  enBox.addEventListener("change", () => { p.enabled = enBox.checked; });
+  enBox.addEventListener("change", () => { p.enabled = enBox.checked; syncProvItem(p); });
   const track = document.createElement("i");
   track.className = "track";
   en.append(enBox, track, document.createTextNode("已启用"));
@@ -3740,6 +3932,7 @@ function buildProviderCard(p) {
     if (state.providerCfg.active && state.providerCfg.active.provider === p.id) {
       state.providerCfg.active = {};
     }
+    if (provSelectedId === p.id) provSelectedId = null;   // 回退逻辑在 renderProviderSettings 里
     renderProviderSettings();
   };
   head.append(name, en, del);
@@ -3861,12 +4054,16 @@ function buildProviderCard(p) {
 
 $("btn-add-provider").onclick = () => {
   const id = "prov-" + Date.now().toString(36);
-  state.providerCfg.providers.push({
+  const p = {
     id, name: "新供应商", base_url: "", api_key: "", enabled: true,
     protocol: "anthropic",
     models: [{ id: "", name: "", tags: [] }],
-  });
+  };
+  state.providerCfg.providers.push(p);
+  provSelectedId = id;   // 新增即选中
   renderProviderSettings();
+  const name = $("prov-detail").querySelector(".prov-name");
+  if (name) { name.focus(); name.select(); }
 };
 
 /* ---------- 设置 → 外观: 背景图片（亚克力磨砂的"壁纸"） ----------

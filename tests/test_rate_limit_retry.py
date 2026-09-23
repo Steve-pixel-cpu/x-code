@@ -159,3 +159,126 @@ def test_stream_raises_stream_interrupted_when_should_stop():
                              should_stop_provider=lambda: True)
     with pytest.raises(StreamInterrupted):
         client.stream(system_prompt=["s"], messages=[])
+
+
+# ============================================================
+# 流内打断: 消费循环逐事件检查 should_stop
+# ============================================================
+
+class _FakeStream:
+    """可迭代的假 SSE 流（同时是上下文管理器, 供 stack.enter_context）:
+    逐个吐事件, 记录被消费到哪。dict 事件递归转属性访问（模拟 SDK 对象）。"""
+
+    def __init__(self, events):
+        def wrap(v):
+            if isinstance(v, dict):
+                return type("E", (), {k: wrap(x) for k, x in v.items()})()
+            if isinstance(v, list):
+                return [wrap(x) for x in v]
+            return v
+        self._events = [wrap(e) for e in events]
+        self._iter = iter(self._events)
+        self.consumed = 0
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        self.consumed += 1
+        return next(self._iter)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+class _FakeMessages:
+    """替身 client.messages: stream() 返回预设假流, 记录调用次数。"""
+
+    def __init__(self, stream):
+        self._stream = stream
+        self.calls = 0
+
+    def stream(self, **kwargs):
+        self.calls += 1
+        return self._stream
+
+
+def test_stream_breaks_midway_and_synthesizes_interrupted_stop(monkeypatch):
+    """流式输出中翻转 should_stop: 消费循环在检查点 break, 返回已流出
+    部分 + 合成 stop_reason="interrupted", 后续事件不再消费, 也不抛
+    异常（已流出内容保留进历史）。"""
+    from api_client import INTERRUPTED_STOP_REASON, MessageStopEvent, TextDeltaEvent
+
+    text1 = {"type": "content_block_start", "index": 0,
+             "content_block": {"type": "text", "text": ""}}
+    delta1 = {"type": "content_block_delta", "index": 0,
+              "delta": {"type": "text_delta", "text": "部分正文"}}
+    delta2 = {"type": "content_block_delta", "index": 0,
+              "delta": {"type": "text_delta", "text": "之后的内容"}}
+    # 真实流还会有 message_stop; 假流故意放进去, 验证 break 后不被消费
+    stop = {"type": "message_stop"}
+
+    flag = {"on": False}
+
+    class _FlipAfterFirstDelta(_FakeStream):
+        """吐出第一个 delta 后翻转打断开关: 模拟"正文流到一半点停止"。"""
+
+        def __next__(self):
+            item = super().__next__()
+            if getattr(item, "type", "") == "content_block_delta":
+                flag["on"] = True
+            return item
+
+    fake_stream = _FlipAfterFirstDelta([text1, delta1, delta2, stop])
+    client = ClaudeApiClient(api_key="k", model="m", emit_output=False)
+    client._should_stop_provider = lambda: flag["on"]
+    client.client = type("C", (), {"messages": _FakeMessages(fake_stream)})()
+
+    events = client.stream(system_prompt=["s"], messages=[])
+
+    # 检查序: text1 入口（未打断, 消费）→ delta1 入口（未打断, 消费,
+    # 消费后开关翻转）→ delta2 入口（命中）→ break。
+    # delta2 与 stop 不再消费; 已流出 delta1 保住。
+    assert fake_stream.consumed == 2          # text1 + delta1
+    assert any(isinstance(e, TextDeltaEvent) and e.text == "部分正文"
+               for e in events)
+    assert not any(isinstance(e, TextDeltaEvent) and e.text == "之后的内容"
+                   for e in events)
+    stops = [e for e in events if isinstance(e, MessageStopEvent)]
+    assert len(stops) == 1
+    assert stops[0].stop_reason == INTERRUPTED_STOP_REASON
+
+
+def test_stream_normal_stop_not_duplicated_when_interrupted_after_stop():
+    """打断落在 message_stop 之后（收尾阶段）: 正常 stop 已入列,
+    不补第二条合成 stop（Anthropic 路径按已有 MessageStopEvent 判重）。"""
+    from api_client import MessageStopEvent
+
+    flag = {"on": False}
+
+    class _FlipAtEndStream(_FakeStream):
+        """流耗尽时翻转开关: 模拟"打断信号落在收尾阶段"。"""
+
+        def __next__(self):
+            try:
+                return super().__next__()
+            except StopIteration:
+                flag["on"] = True
+                raise
+
+    fake_stream = _FlipAtEndStream([
+        {"type": "message_start", "message": {"usage": None}},
+        {"type": "message_stop"},
+    ])
+    client = ClaudeApiClient(api_key="k", model="m", emit_output=False)
+    client._should_stop_provider = lambda: flag["on"]
+    client.client = type("C", (), {"messages": _FakeMessages(fake_stream)})()
+
+    events = client.stream(system_prompt=["s"], messages=[])
+
+    stops = [e for e in events if isinstance(e, MessageStopEvent)]
+    assert len(stops) == 1
+    assert stops[0].stop_reason is None       # 正常 stop, 未被覆盖成 interrupted
