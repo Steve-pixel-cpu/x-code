@@ -58,16 +58,19 @@ from api_client import (
     WireUsage,
     WireStop,
 )
-from config import USER_DIR, SETTINGS_FILE, ConfigLoader, RuntimeConfig, load_providers, save_providers
+from config import (USER_DIR, SETTINGS_FILE, ConfigLoader, McpServerConfig,
+                    RuntimeConfig, load_providers, save_providers)
 from main import (
     AUTO_TITLE_LEN,
     TOOLS,
+    _attach_mcp_tools,
     build_registry,
     build_runtime,
     repair_interrupted_turn,
     resolve_permission_mode,
     setup_console,
 )
+from mcp_client import MCP_TOOL_PREFIX, get_mcp_manager
 from models import (
     Message,
     Session,
@@ -555,7 +558,7 @@ class EmittingToolRegistry(ToolRegistry):
         return result
 
 
-registry = EmittingToolRegistry(build_registry())
+registry = EmittingToolRegistry(build_registry(runtime_config.mcp_servers()))
 
 
 # ============================================================================
@@ -1835,6 +1838,120 @@ async def api_ping():
     """探测端点: 桌面壳用它确认"这是 x-code 后端"。
     8000 端口可能被 C-Lodop 打印服务等程序抢占, 不能只看 200 就当作就绪。"""
     return {"app": "x-code"}
+
+
+# --- MCP 管理: 状态查看 + 热重载 + 服务器 CRUD（设置页"MCP 服务器"分区） ---
+
+@app.get("/api/mcp/status")
+async def api_mcp_status():
+    """各 MCP 服务器连接状态与工具清单（排查配置问题用）。"""
+    return {"servers": get_mcp_manager().status()}
+
+
+def _mcp_servers_setting() -> dict:
+    """读 settings.json 的 mcpServers 原始字典。缺失/坏类型都归 {}。"""
+    try:
+        data = json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    raw = data.get("mcpServers") if isinstance(data, dict) else None
+    return raw if isinstance(raw, dict) else {}
+
+
+@app.get("/api/mcp/servers")
+async def api_get_mcp_servers():
+    """配置视图（mcpServers 原样）+ 运行视图（连接状态）合一下发。"""
+    return {"mcpServers": _mcp_servers_setting(),
+            "status": get_mcp_manager().status()}
+
+
+def _validate_mcp_entry(name: str, spec: dict) -> None:
+    """保存前校验一台服务器描述; 口径与 config._parse_mcp_servers 一致,
+    让"能保存的配置"重启后必能被加载。"""
+    transport = spec.get("type", "stdio")
+    if transport not in ("stdio", "http", "sse"):
+        raise HTTPException(status_code=400,
+                            detail=f"{name}: type 只支持 stdio / http / sse")
+    timeout = spec.get("timeout", 60)
+    if not isinstance(timeout, int) or isinstance(timeout, bool) or timeout <= 0:
+        raise HTTPException(status_code=400,
+                            detail=f"{name}: timeout 必须是正整数秒")
+    for key in ("args",):
+        v = spec.get(key, [])
+        if not isinstance(v, list) or not all(isinstance(a, str) for a in v):
+            raise HTTPException(status_code=400, detail=f"{name}: args 必须是字符串数组")
+    for key in ("env", "headers"):
+        v = spec.get(key, {})
+        if not isinstance(v, dict) or not all(
+                isinstance(k, str) and isinstance(x, str) for k, x in v.items()):
+            raise HTTPException(status_code=400,
+                                detail=f"{name}: {key} 必须是字符串→字符串对象")
+    if transport == "stdio":
+        if not str(spec.get("command") or "").strip():
+            raise HTTPException(status_code=400, detail=f"{name}: stdio 需要 command")
+    elif not str(spec.get("url") or "").strip():
+        raise HTTPException(status_code=400, detail=f"{name}: {transport} 需要 url")
+
+
+@app.post("/api/mcp/servers")
+async def api_save_mcp_servers(request: dict):
+    """整体保存 mcpServers 并热应用（连接新服务器、断开删除的）。
+
+    请求体 {"mcpServers": {name: spec}}; 校验失败 400 且不动现有配置。
+    名字清洗规则与工具名前缀一致, 避免存进去了却连不出合法工具名。"""
+    raw = request.get("mcpServers")
+    if not isinstance(raw, dict):
+        raise HTTPException(status_code=400, detail="mcpServers 必须是对象")
+    cleaned: dict = {}
+    for name, spec in raw.items():
+        if not isinstance(name, str) or not name.strip():
+            raise HTTPException(status_code=400, detail="服务器名不能为空")
+        if not isinstance(spec, dict):
+            raise HTTPException(status_code=400, detail=f"{name}: 描述必须是对象")
+        entry = {k: v for k, v in spec.items() if v not in ("", None, [], {})}
+        # type 推断先于校验: {"url":...} 应识别为 http 而非按缺 command 的 stdio 拒掉
+        if "type" not in entry:
+            entry["type"] = "stdio" if entry.get("command") else "http"
+        _validate_mcp_entry(name.strip(), entry)
+        cleaned[name.strip()] = entry
+
+    _save_setting("mcpServers", cleaned)
+
+    # 热应用: 走既有 reload 内核（重读配置会带回刚写入的 mcpServers,
+    # 并合并项目级配置——设置页改的是用户级这一层）
+    global runtime_config
+    try:
+        fresh = ConfigLoader(cwd=Path.cwd(), config_home=USER_DIR).load()
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"保存后加载失败: {e}")
+    runtime_config = fresh
+    # 换绑必须落在外层壳委托的 _inner 上: execute 走 _inner, 挂到外层
+    # dict 的 handler 永远不会被调到, 而 _inner 里的旧 handler 闭包引用
+    # 已被 connect_all 关掉的旧连接 —— 调用即 "MCP server is not connected"
+    _attach_mcp_tools(registry._inner, fresh.mcp_servers())
+    return {"ok": True, "servers": get_mcp_manager().status(),
+            "mcp_tool_count": sum(
+                1 for t in TOOLS if t.get("name", "").startswith(MCP_TOOL_PREFIX))}
+
+
+@app.post("/api/mcp/reload")
+async def api_mcp_reload():
+    """重读配置并热重载 MCP: 重连 → 换绑 registry → 同步 TOOLS。
+
+    复用同一 registry 对象（Web 端 runtime 持有引用, 换绑而非重建）,
+    已有会话下一轮工具调用即走新配置。配置解析失败返回 400, 不动现有连接。"""
+    global runtime_config
+    try:
+        fresh = ConfigLoader(cwd=Path.cwd(), config_home=USER_DIR).load()
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"配置加载失败: {e}")
+    runtime_config = fresh
+    servers: list[McpServerConfig] = fresh.mcp_servers()
+    # 同 save 端点: 必须换绑 _inner(理由见上)
+    _attach_mcp_tools(registry._inner, servers)
+    return {"ok": True, "servers": get_mcp_manager().status(),
+            "mcp_tool_count": sum(
+                1 for t in TOOLS if t.get("name", "").startswith(MCP_TOOL_PREFIX))}
 
 
 @app.get("/api/settings")

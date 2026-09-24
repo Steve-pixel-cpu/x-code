@@ -9,6 +9,7 @@
 ## 功能特性
 
 - **Agent 工具循环**：模型自主决定调用工具 → 执行 → 回传结果，循环往复直到完成；支持 SSE 流式输出、thinking 块、单轮/循环层 token 与迭代预算
+- **MCP 客户端**：配置文件里声明 MCP 服务器（stdio 子进程 / streamable HTTP / SSE），启动时自动连接，外部工具以 `mcp__<服务器>__<工具>` 注入工具循环，与内置工具同管线（权限审批、hooks、输出截断）；Web 端支持 `/api/mcp/reload` 热重载
 - **内置工具集**：`bash` / `powershell`（Windows 下走 Git Bash，UTF-8 无乱码）、`read_file` / `write_file`、`grep` / `glob`（纯 Python 实现，免 shell）、后台任务 `task_output` / `task_stop`、任务清单 `todo`、计划卡 `present_plan`、浏览器实测 `browser_navigate` / `browser_snapshot` / `browser_click` / `browser_type` / `browser_console` 等（Playwright 无头 Chromium，可实际操作 Web 系统做功能测试）
 - **三级权限体系**：`plan`（只读）→ `workspace-write`（工作目录内可写）→ `danger-full-access`（全放行）；每个工具登记权限档位，越权时 CLI 弹 y/N 面板、Web 端弹审批卡，plan 模式下可一键升级
 - **多 Agent 编排**：Leader 通过 `agent_tool` / `agent_status` / `agent_reap` / `agent_list` 派生 subagent 并行干活，白名单 + 规格过滤防递归失控，孤儿 agent 启动对账
@@ -45,6 +46,7 @@
 |---|---|
 | `main.py` | CLI 入口：REPL、斜杠命令、工具 spec、装配（CLI 与 Web 共用） |
 | `server.py` | FastAPI 后端：WebSocket 推流、权限审批桥、会话/设置 REST API |
+| `mcp_client.py` | MCP 客户端：外部服务器连接管理、工具注入（同步桥接异步 SDK） |
 | `runtime.py` | Agent 主循环：事件流、并行工具执行、打断、循环预算 |
 | `api_client.py` | Anthropic API 流式客户端、思考档位、退避重试 |
 | `tools.py` | 工具实现与注册表（后台任务、取消检查点） |
@@ -130,9 +132,40 @@ uv run python server.py --port 8020
   "hooks": {
     "PreToolUse": ["python check.py"],
     "PostToolUse": []
+  },
+  "mcpServers": {
+    "fetch": { "command": "uvx", "args": ["mcp-server-fetch"] },
+    "docs":  { "type": "http", "url": "http://localhost:3000/mcp",
+               "headers": { "Authorization": "Bearer ${DOCS_TOKEN}" } }
   }
 }
 ```
+
+### MCP 服务器
+
+在任意一级配置里声明 `mcpServers`（格式与 Claude Code 兼容，三级之间
+字段级深度合并，项目级可覆盖用户级同名服务器的字段）：
+
+| 字段 | 适用传输 | 说明 |
+|---|---|---|
+| `type` | 全部 | `stdio`（默认）/ `http`（streamable HTTP）/ `sse` |
+| `command` / `args` / `env` / `cwd` | stdio | 子进程命令、参数、额外环境变量、工作目录 |
+| `url` / `headers` | http / sse | 端点地址与请求头 |
+| `timeout` | 全部 | 单次工具调用超时秒数（默认 60） |
+
+字符串值里的 `${VAR}` 会展开为环境变量（适合注入 API key）。
+
+- 连接在启动时并行进行，失败的服务器降级为警告，不阻塞启动
+- **桌面端「设置 → MCP 服务器」可视化编辑**：添加/改名/删除、传输类型切换、
+  连接状态徽标与失败原因就地显示，改动停顿后自动保存并热生效（无需重启）；
+  手改配置文件后点「重连全部」同样即时生效
+- 工具以 `mcp__<服务器名>__<工具名>` 注入，CLI 与 Web 端同时生效
+- 权限上按"能力未知的外部工具"保守处理：plan 模式直接拒绝，
+  其余模式每次调用走审批；Pre/PostToolUse hooks 与输出截断照常生效
+- Web 端运维接口：`GET /api/mcp/status` 看连接状态，
+  `POST /api/mcp/reload` 重读配置热重载（改完配置无需重启）
+- 依赖：`mcp` Python SDK（`uv sync` 自动安装）；stdio 服务器需要
+  对应运行时（如 `uvx` / `npx`）
 
 环境变量覆盖：`CLAUDE_MODEL`、`CLAUDE_TIMEOUT`、`CLAUDE_MAX_ITERATIONS`、
 `CLAUDE_TOKEN_BUDGET`、`CLAUDE_TURN_TOKEN_BUDGET`、`CLAUDE_THINKING_LEVEL`。

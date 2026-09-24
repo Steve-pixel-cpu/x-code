@@ -39,6 +39,8 @@ from tools import (ToolRegistry, bash_tool, edit_file_tool, glob_tool,
                    git_bash_unavailable_reason)
 from agent_tools import AGENT_TOOL_SPECS, get_orchestrator, register_agent_tools
 from browser_tools import BROWSER_TOOL_SPECS, register_browser_tools
+from mcp_client import (MCP_TOOL_PREFIX, get_mcp_manager, mcp_tool_name,
+                        _safe_segment)
 
 DEFAULT_MODEL = "glm-5.3-flash"
 bash_spec = {
@@ -930,9 +932,14 @@ TOOL_REQUIREMENTS = {
 }
 
 
-def build_registry() -> ToolRegistry:
+def build_registry(mcp_servers: Optional[list] = None) -> ToolRegistry:
     """CLI 与 Web 共用的工具注册表: 内置工具 + 后台任务两件套 + 多 agent
-    三件套一次注册到位。"""
+    三件套 + browser + MCP 外部工具一次注册到位。
+
+    mcp_servers 非空时: 连接配置里的 MCP 服务器, 注册其工具(handler 走
+    mcp__ 前缀), 并把规格同步进 TOOLS(api_client 与 multi_agent 持有同一
+    列表对象, 原地修改即全链路生效)。连接失败降级为 failed 状态(查
+    get_mcp_manager().status()), registry 永远可用, 不挡启动。"""
     registry = ToolRegistry().register(name="bash", handler=bash_tool).register(
         name="powershell", handler=powershell_tool).register(
         name="read_file", handler=read_tool).register(
@@ -947,7 +954,54 @@ def build_registry() -> ToolRegistry:
         name="web_search", handler=web_search_tool).register(
         name="web_fetch", handler=web_fetch_tool)
     registry = register_agent_tools(registry)
-    return register_browser_tools(registry)
+    registry = register_browser_tools(registry)
+
+    if mcp_servers:
+        _attach_mcp_tools(registry, mcp_servers)
+    return registry
+
+
+def _attach_mcp_tools(registry: ToolRegistry, mcp_servers: list) -> None:
+    """连接 MCP 服务器并把工具挂进 registry + TOOLS。
+
+    注册前先清掉 mcp__ 前缀旧条目(热重载换绑不换 registry 对象——Web 端
+    runtime 持有同一 registry 引用)。连接状态查 get_mcp_manager().status()。
+
+    ⚠ 调用方注意: Web 端的 registry 是 EmittingToolRegistry(壳), execute
+    委托 _inner。**必须传真正执行执行的 registry**(server.py 传
+    registry._inner)——挂到壳上 handler 永远不会被调到, 而 _inner 里残留
+    的旧 handler 闭包引用已被 close 的旧连接, 调用即 "is not connected"。"""
+    manager = get_mcp_manager()
+    statuses = manager.connect_all(mcp_servers)
+
+    # 换绑: 旧 mcp 工具先注销, 已连接的重新挂 handler
+    for st in statuses:
+        for t in list(registry._handlers):
+            if t.startswith(MCP_TOOL_PREFIX):
+                registry.unregister(t)
+    for conn in manager.connected():
+        server_seg = _safe_segment(conn.server.name)
+        for t in conn.list_tools():
+            handler = manager.handler_for(
+                mcp_tool_name(conn.server.name, t["name"]))
+            if handler is not None:
+                registry.register(
+                    name=mcp_tool_name(conn.server.name, t["name"]),
+                    handler=handler)
+    manager.sync_tools_list(TOOLS)
+
+
+def mcp_status_lines() -> list[str]:
+    """MCP 连接状态的启动摘要行（CLI 打印用; Web 端走 /api/mcp/status）。"""
+    lines = []
+    for st in get_mcp_manager().status():
+        if st["status"] == "connected":
+            lines.append(c_dim(f"  ✓ MCP {st['name']} ({st['transport']}): "
+                               f"{len(st['tools'])} tools"))
+        else:
+            lines.append(c_yellow(f"  ✗ MCP {st['name']} ({st['transport']}): "
+                                  f"{st['error']}"))
+    return lines
 
 
 def start(session_store:SessionStore,session_id:str):
@@ -963,16 +1017,19 @@ def start(session_store:SessionStore,session_id:str):
     if n:
         print(c_dim(f"启动对账: {n} 个上次遗留的 running agent 已标记为 failed"))
 
-    registry = build_registry()
-
-    session_load = session_store.load_session(session_id)
-    session_msgs = session_load[0]
-    last_uuid = session_load[1]
-
+    # 配置先于工具装配: mcpServers 决定 build_registry 连哪些服务器
     config_loader = ConfigLoader(
         cwd=Path.cwd(),
         config_home=USER_DIR,   # x-code 自己的用户配置目录
     )
+    runtime_config = config_loader.load()
+    registry = build_registry(mcp_servers=runtime_config.mcp_servers())
+    for line in mcp_status_lines():
+        print(line)
+
+    session_load = session_store.load_session(session_id)
+    session_msgs = session_load[0]
+    last_uuid = session_load[1]
     # 项目上下文（cwd/日期/CLAUDE.md）注入系统提示——没有它模型看到
     # "Working directory: unknown", 只能靠 pwd && ls 乱摸探路
     system_prompt = (
@@ -982,7 +1039,6 @@ def start(session_store:SessionStore,session_id:str):
             Path.cwd(), datetime.now().strftime("%Y-%m-%d")))
         .build()
     )
-    runtime_config = config_loader.load()
     # CLI 侧协议选择: XCODE_PROTOCOL 环境变量（anthropic 默认; openai 兼容
     # 端点可直接本地起 CLI 用）。非法值回退 anthropic, 不挡启动。
     try:

@@ -18,6 +18,22 @@ def _disable_token_gate(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _no_user_mcp_in_tools():
+    """测试进程内全局 TOOLS 不携带用户真实 MCP 工具。
+
+    server 在 import 时按用户真实 ~/.x-code/settings.json 装配; 若用户
+    配了 MCP 服务器, mcp__* spec 会混进共享的 main.TOOLS —— 依赖
+    "TOOLS 末尾四位是 agent 四件套"之类结构断言的用例就会假失败
+    (本地复现不了、只在配了 MCP 的机器上翻车)。会话内清一次即可:
+    server 的模块级装配已完成, 这里只动列表内容, 不碰连接。"""
+    from main import TOOLS
+    saved = list(TOOLS)
+    TOOLS[:] = [t for t in TOOLS if not t["name"].startswith("mcp__")]
+    yield
+    TOOLS[:] = saved
+
+
+@pytest.fixture(autouse=True)
 def _no_real_api():
     """连接信息置空: 真实调用会在首次请求时立即认证失败（不可重试）,
     泄漏线程秒退, 不再拖住测试进程或烧真实额度。"""

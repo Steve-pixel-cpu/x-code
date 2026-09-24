@@ -1487,6 +1487,24 @@
     transition: color .15s;
   }
   .prov-save-status.err { color: var(--err); }
+  /* MCP: 连接状态徽标（表单头部）与失败原因行 */
+  .mcp-badge {
+    margin-left: auto; flex: none;
+    font-size: calc(12px * var(--fs-ui)); padding: 3px 9px; border-radius: 20px;
+    background: var(--surface-3, rgba(128,128,128,.14)); color: var(--text-3);
+    white-space: nowrap;
+  }
+  .mcp-badge.ok { background: var(--ok-soft); color: var(--ok); }
+  .mcp-badge.bad { background: rgba(220, 82, 82, .14); color: var(--err); }
+  .mcp-error-line {
+    margin-top: 10px; font-size: calc(12px * var(--fs-ui)); line-height: 1.5;
+    color: var(--err); word-break: break-all;
+    background: rgba(220, 82, 82, .08);
+    border: 1px solid rgba(220, 82, 82, .22);
+    border-radius: var(--r-md); padding: 8px 10px;
+  }
+  .prov-item .dot.bad { background: var(--err); opacity: 1; }
+  .prov-card .set-input.invalid { border-color: var(--err); }
   .set-row {
     display: flex; align-items: center; gap: 12px;
     padding: 12px 14px; border: 1px solid var(--border); border-radius: var(--r-md);

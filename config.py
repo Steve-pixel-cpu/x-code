@@ -38,6 +38,114 @@ DEFAULT_CONTEXT_WINDOW = 1_000_000
 COMPACT_THRESHOLD_RATIO = 0.75
 
 
+# ============================================================================
+# MCP 服务器配置: 三级配置里的 "mcpServers" key（与 Claude Code 格式兼容）
+#
+#   "mcpServers": {
+#     "fetch": { "command": "uvx", "args": ["mcp-server-fetch"] },
+#     "docs":  { "type": "http", "url": "http://localhost:3000/mcp",
+#                "headers": { "Authorization": "Bearer ${DOCS_TOKEN}" } }
+#   }
+#
+# 深度合并由 deep_merge 天然支持: 用户级声明、项目级覆盖同名项。
+# ============================================================================
+class McpServerConfig(BaseModel):
+    """一台 MCP 服务器的连接描述。type 缺省 = stdio（本地子进程）。"""
+    name: str                                   # 配置里的 key, 用作工具名前缀
+    transport: Literal["stdio", "http", "sse"] = "stdio"
+    command: Optional[str] = None               # stdio: 可执行文件
+    args: list[str] = Field(default_factory=list)
+    env: dict[str, str] = Field(default_factory=dict)   # stdio: 额外环境变量
+    cwd: Optional[str] = None                   # stdio: 子进程工作目录
+    url: Optional[str] = None                   # http/sse: 端点地址
+    headers: dict[str, str] = Field(default_factory=dict)  # http/sse: 请求头
+    timeout: int = 60                           # 单次工具调用超时（秒）
+
+
+def expand_env_vars(value: Any) -> Any:
+    """递归展开字符串里的 ${VAR} / $VAR。未定义的变量替换为空串——
+    和 shell 行为一致, 配置里引用可选变量时不用写条件判断。"""
+    if isinstance(value, str):
+        return os.path.expandvars(value)
+    if isinstance(value, list):
+        return [expand_env_vars(v) for v in value]
+    if isinstance(value, dict):
+        return {k: expand_env_vars(v) for k, v in value.items()}
+    return value
+
+
+def _parse_mcp_servers(merged: dict) -> list[McpServerConfig]:
+    """merged["mcpServers"] → McpServerConfig 列表。结构非法抛 ConfigError;
+    单台服务器描述缺字段同样报错——MCP 配错应该响亮失败而不是静默丢弃。"""
+    raw = merged.get("mcpServers")
+    if raw is None:
+        return []
+    if not isinstance(raw, dict):
+        raise ConfigError("mcpServers: expected JSON object keyed by server name",
+                          kind="parse")
+
+    servers: list[McpServerConfig] = []
+    for name, spec in raw.items():
+        if not isinstance(name, str) or not name.strip():
+            raise ConfigError("mcpServers: server name must be a non-empty string",
+                              kind="parse")
+        if not isinstance(spec, dict):
+            raise ConfigError(f"mcpServers.{name}: expected a JSON object",
+                              kind="parse")
+
+        spec = expand_env_vars(spec)
+        raw_type = spec.get("type", "stdio")
+        if raw_type in ("stdio", "http", "sse"):
+            transport = raw_type
+        else:
+            raise ConfigError(
+                f"mcpServers.{name}.type: unsupported transport '{raw_type}' "
+                "(stdio/http/sse)", kind="parse")
+
+        timeout = spec.get("timeout", 60)
+        if not isinstance(timeout, int) or timeout <= 0:
+            raise ConfigError(
+                f"mcpServers.{name}.timeout: expected positive integer, got {timeout!r}",
+                kind="parse")
+
+        if transport == "stdio":
+            command = spec.get("command")
+            if not isinstance(command, str) or not command.strip():
+                raise ConfigError(
+                    f"mcpServers.{name}: stdio server requires 'command'", kind="parse")
+            args = spec.get("args", [])
+            env = spec.get("env", {})
+            cwd = spec.get("cwd")
+            if not isinstance(args, list) or not all(isinstance(a, str) for a in args):
+                raise ConfigError(f"mcpServers.{name}.args: must be an array of strings",
+                                  kind="parse")
+            if not isinstance(env, dict) or not all(
+                    isinstance(k, str) and isinstance(v, str) for k, v in env.items()):
+                raise ConfigError(
+                    f"mcpServers.{name}.env: must be an object of string→string",
+                    kind="parse")
+            if cwd is not None and not isinstance(cwd, str):
+                raise ConfigError(f"mcpServers.{name}.cwd: must be a string", kind="parse")
+            servers.append(McpServerConfig(
+                name=name.strip(), transport="stdio",
+                command=command, args=args, env=env, cwd=cwd, timeout=timeout))
+        else:
+            url = spec.get("url")
+            if not isinstance(url, str) or not url.strip():
+                raise ConfigError(
+                    f"mcpServers.{name}: {transport} server requires 'url'", kind="parse")
+            headers = spec.get("headers", {})
+            if not isinstance(headers, dict) or not all(
+                    isinstance(k, str) and isinstance(v, str) for k, v in headers.items()):
+                raise ConfigError(
+                    f"mcpServers.{name}.headers: must be an object of string→string",
+                    kind="parse")
+            servers.append(McpServerConfig(
+                name=name.strip(), transport=transport, url=url,
+                headers=headers, timeout=timeout))
+    return servers
+
+
 def deep_merge(target: dict, source: dict) -> dict:
     result = dict(target)
 
@@ -74,6 +182,8 @@ class RuntimeFeatureConfig(BaseModel):
     # 单轮输出预算（含思考）。与 runtime.DEFAULT_TURN_OUTPUT_BUDGET 对齐:
     # 思考型模型一次大思考烧 8k~16k, 预算太紧会把轮次掐死在动手之前。
     turn_token_budget: int = 262_144
+    # MCP 服务器列表（配置 mcpServers key）。空列表 = 未配置, 零开销。
+    mcp_servers: list[McpServerConfig] = Field(default_factory=list)
 
 class RuntimeConfig(BaseModel):
     merged: dict = Field(default_factory=dict)
@@ -116,6 +226,9 @@ class RuntimeConfig(BaseModel):
 
     def turn_token_budget(self) -> int:
         return self.feature_config.turn_token_budget
+
+    def mcp_servers(self) -> list["McpServerConfig"]:
+        return self.feature_config.mcp_servers
 
     @staticmethod
     def empty() -> "RuntimeConfig":
@@ -208,6 +321,7 @@ class ConfigLoader:
             token_budget=token_budget,
             thinking_level=raw_level.strip().lower(),
             turn_token_budget=merged.get("turnTokenBudget", 262_144),
+            mcp_servers=_parse_mcp_servers(merged),
         )
 
     @staticmethod

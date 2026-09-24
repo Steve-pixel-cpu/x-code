@@ -2151,8 +2151,13 @@ function updateToolGroupHeader(group) {
   });
   group.classList.toggle("running", run > 0);
   if (run > 0) {
-    sum.textContent = rows.length === 1 ? "运行中…" : "运行中 " + (rows.length - run + 1) + "/" + rows.length + "…";
+    const done = rows.length - run;
+    sum.textContent = rows.length === 1 ? "运行中…" : "运行中 " + done + "/" + rows.length + "…";
     sum.className = "tg-sum run";
+    // 运行中自动收起: 行数达标后只留头部摘要 + 当前运行行, 历史行点头部回看
+    if (rows.length >= TOOL_GROUP_AUTO_COLLAPSE_AT && !group._userOpen) {
+      group.classList.add("collapsed");
+    }
   } else {
     let txt = "✓" + ok;
     if (bad) txt += " · !" + bad;
@@ -2173,7 +2178,10 @@ function groupForNewToolRow(col) {
     head.className = "tg-head";
     head.innerHTML = '<span class="tg-caret">▾</span><span class="tg-title">工具调用</span>' +
                      '<span class="tg-sum"></span>';
-    head.onclick = () => g.classList.toggle("collapsed");
+    head.onclick = () => {
+      g.classList.toggle("collapsed");
+      if (!g.classList.contains("collapsed")) g._userOpen = true;   // 手动展开: 运行中不自动收回
+    };
     g.appendChild(head);
     const body = document.createElement("div");
     body.className = "tg-body";
@@ -2195,6 +2203,7 @@ function groupForNewToolRow(col) {
 function collapseFinishedToolGroups(col) {
   if (!col) return;
   col.querySelectorAll(".tool-group").forEach(g => {
+    g._userOpen = false;   // 轮次收口: 重置手动展开标记, 新一轮恢复自动收起
     if (g.querySelector('.tool-row[data-state="run"]')) return;
     if (g.querySelectorAll(".tool-row").length >= TOOL_GROUP_AUTO_COLLAPSE_AT) {
       g.classList.add("collapsed");
@@ -4534,7 +4543,377 @@ function applyBgBrightness() {
 }
 applyBgBrightness();
 
-/* ---------- 设置页视图切换: 侧栏换设置导航, 主区换设置内容 ---------- */
+/* ---------- 设置 → MCP 服务器: 左列表 + 右表单, 防抖自动保存并热生效 ----------
+ * 数据模型直接用 settings.json 的 mcpServers 原始结构（name → spec）,
+ * 保存 POST /api/mcp/servers: 服务端校验 → 落盘 → 热应用（连接新服务器、
+ * 断开删除的）。连接状态来自同一响应, 显示在每个列表项与表单头部。 */
+let mcpCfg = { mcpServers: {} };   // 工作副本（编辑只动内存, 停顿后落盘）
+let mcpStatuses = [];              // 最近一次服务端返回的连接状态
+let mcpSelected = null;            // 左栏选中的服务器名
+let mcpSaveTimer = null;
+let mcpDirty = false;
+const MCP_SAVE_DELAY = 800;
+/* 显示名 → JSON key: 首次创建时用。key 决定工具名前缀 mcp__<key>__*, 只在
+ * 建名时约束; 后续改名 = 删除旧服务器 + 新建, 不偷偷改 key（会断开重连） */
+function mcpKeyFor(name) {
+  const k = (name || "").trim().replace(/[^A-Za-z0-9_-]/g, "-")
+    .replace(/^-+|-+$/g, "") || "server";
+  // 撞名兜底: 追加序号保证 key 唯一
+  let key = k, i = 2;
+  while (mcpCfg.mcpServers[key] != null) key = `${k}-${i++}`;
+  return key;
+}
+function mcpStatusOf(name) {
+  return mcpStatuses.find(s => s.name === name);
+}
+function mcpStatus(text, isErr = false) {
+  const el = $("mcp-save-status");
+  if (!el) return;
+  el.textContent = text || "";
+  el.classList.toggle("err", isErr);
+}
+function scheduleMcpSave() {
+  mcpDirty = true;
+  mcpStatus("未保存…");
+  clearTimeout(mcpSaveTimer);
+  mcpSaveTimer = setTimeout(persistMcpServers, MCP_SAVE_DELAY);
+}
+async function persistMcpServers() {
+  clearTimeout(mcpSaveTimer);
+  mcpSaveTimer = null;
+  if (!mcpDirty) return;
+  // 无效中间态不落盘（口径与 /api/mcp/servers 校验一致）, 红字提示待补全
+  for (const [name, spec] of Object.entries(mcpCfg.mcpServers)) {
+    const t = spec.type || "stdio";
+    if (t === "stdio" && !(spec.command || "").trim()) {
+      mcpStatus(`「${name}」缺少 command, 暂未保存`, true);
+      return;
+    }
+    if (t !== "stdio" && !(spec.url || "").trim()) {
+      mcpStatus(`「${name}」缺少 URL, 暂未保存`, true);
+      return;
+    }
+  }
+  mcpStatus("保存并连接中…");
+  try {
+    const r = await fetch("/api/mcp/servers", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(mcpCfg),
+    });
+    if (!r.ok) {
+      const err = await r.json().catch(() => ({}));
+      mcpStatus("保存失败: " + (err.detail || r.status), true);
+      toast("MCP 保存失败: " + (err.detail || r.status));
+      return;
+    }
+    const saved = await r.json();
+    mcpDirty = false;
+    mcpCfg = { mcpServers: saved.mcpServers || mcpCfg.mcpServers };
+    mcpStatus(saved.servers.every(s => s.status !== "connected")
+      ? "已保存（无已连接服务器）" : "已保存");
+    renderMcpSettings();
+  } catch (e) {
+    mcpStatus("保存失败: " + e.message, true);
+    toast("保存失败: " + e.message);
+  }
+}
+async function loadMcpServers() {
+  try {
+    const d = await fetch("/api/mcp/servers").then(r => r.json());
+    mcpCfg = { mcpServers: d.mcpServers || {} };
+    mcpStatuses = d.status || [];
+    mcpDirty = false;
+  } catch (e) { console.error("加载 MCP 配置失败", e); }
+}
+/* 左栏列表项: 名称 + 连接状态点（绿=已连接, 红=失败, 灰=未连） */
+function buildMcpItem(name) {
+  const item = document.createElement("button");
+  item.type = "button";
+  item.className = "prov-item" + (name === mcpSelected ? " on" : "");
+  item.dataset.id = name;
+  const label = document.createElement("span");
+  label.className = "prov-item-name";
+  label.textContent = name;
+  const dot = document.createElement("i");
+  const st = mcpStatusOf(name)?.status;
+  dot.className = "dot" + (st === "connected" ? " on" : st === "failed" ? " bad" : "");
+  if (st === "failed") {
+    const err = mcpStatusOf(name)?.error || "";
+    dot.title = err;
+    label.title = `${name} — ${err}`;
+  } else {
+    dot.title = st === "connected" ? "已连接" : "未连接";
+  }
+  item.append(label, dot);
+  item.onclick = () => {
+    if (mcpSelected === name) return;
+    mcpSelected = name;
+    document.querySelectorAll("#mcp-list .prov-item")
+      .forEach(x => x.classList.toggle("on", x === item));
+    renderMcpDetail();
+  };
+  return item;
+}
+/* 单行字段: label + input（存取都走 spec 对象, 变更即标脏） */
+function renderMcpDetail() {
+  const wrap = $("mcp-detail");
+  if (!wrap) return;
+  wrap.innerHTML = "";
+  const spec = mcpCfg.mcpServers[mcpSelected];
+  if (!spec) {
+    const empty = document.createElement("div");
+    empty.className = "prov-empty";
+    empty.textContent = "左侧选择服务器，或点击「＋ 添加服务器」";
+    wrap.appendChild(empty);
+    return;
+  }
+  const transport = spec.type || "stdio";
+  const st = mcpStatusOf(mcpSelected);
+  const card = document.createElement("div");
+  card.className = "prov-card";
+
+  /* 头部: 显示名（=key, 即工具前缀）/ 传输类型 / 连接状态 / 删除 */
+  const head = document.createElement("div");
+  head.className = "prov-head";
+  const name = document.createElement("input");
+  name.className = "prov-name";
+  name.value = mcpSelected;
+  name.title = "服务器名即工具前缀 mcp__<名>__*；改名等于删除后重建";
+  /* 改名 = 换 key。用 input 事件实时提交（而非 change）: change 只在失焦
+   * 时触发, 用户改完名直接去点其他字段时, 后续编辑会写进旧 key（实测踩过:
+   * 磁盘上是 new-server, UI 显示 time, 参数改了却不落盘）。实时换 key 后
+   * renderMcpDetail 重建表单, 焦点会丢——所以仅在 key 真正变化时重建,
+   * 且重建后把焦点还给名字框并移光标到末尾, 打字不中断。 */
+  let lastName = name.value;
+  name.addEventListener("input", () => {
+    const nn = name.value.trim();
+    if (nn === lastName) return;
+    if (!nn) return;   // 清空过程中不动 key, 留给 blur 兜底恢复
+    if (mcpCfg.mcpServers[nn] != null) {   // 撞名: 回退到上一个合法名
+      name.value = lastName;
+      toast("同名服务器已存在");
+      return;
+    }
+    const next = {};
+    for (const [k, v] of Object.entries(mcpCfg.mcpServers)) {
+      next[k === lastName ? nn : k] = v;
+    }
+    mcpCfg.mcpServers = next;
+    const oldKey = lastName;
+    lastName = nn;
+    mcpSelected = nn;
+    renderMcpSettings();
+    const nameAgain = $("mcp-detail").querySelector(".prov-name");
+    if (nameAgain) {
+      nameAgain.focus();
+      const L = nameAgain.value.length;
+      nameAgain.setSelectionRange(L, L);
+    }
+    scheduleMcpSave();
+  });
+  name.addEventListener("blur", () => {
+    // 兜底: 失焦时名字为空/非法 → 恢复成上一个合法名
+    if (!name.value.trim() && lastName) {
+      name.value = lastName;
+      return;
+    }
+    if (name.value.trim() !== lastName) {
+      name.value = lastName;
+      mcpStatus(`名称未变化（${lastName}）`, false);
+    }
+  });
+  const badge = document.createElement("span");
+  badge.className = "mcp-badge" + (st?.status === "connected" ? " ok"
+    : st?.status === "failed" ? " bad" : "");
+  badge.textContent = st?.status === "connected"
+    ? `已连接 · ${st.tools.length} 工具`
+    : st?.status === "failed" ? "连接失败" : "未连接";
+  badge.title = st?.error || badge.textContent;
+  const del = document.createElement("button");
+  del.type = "button";
+  del.className = "prov-del";
+  del.innerHTML = TRASH_SMALL_SVG;
+  del.dataset.tip = "删除服务器";
+  del.onclick = async () => {
+    if (!await confirmDialog(`删除 MCP 服务器「${mcpSelected}」？其工具将立即从会话中移除。`,
+        { title: "删除服务器", okText: "删除", danger: true })) return;
+    delete mcpCfg.mcpServers[mcpSelected];
+    mcpSelected = null;
+    renderMcpSettings();
+    scheduleMcpSave();
+  };
+  head.append(name, badge, del);
+  card.appendChild(head);
+
+  /* 传输类型: stdio 本地子进程 / http streamable / sse */
+  const grid = document.createElement("div");
+  grid.className = "prov-grid";
+  const typeField = document.createElement("div");
+  typeField.className = "prov-field";
+  typeField.innerHTML = "<label>传输类型</label>";
+  const typeSel = document.createElement("select");
+  typeSel.className = "set-input";
+  for (const [val, label] of [
+    ["stdio", "stdio（本地子进程）"],
+    ["http", "HTTP（Streamable）"],
+    ["sse", "SSE（已废弃，兼容旧服务器）"],
+  ]) {
+    const o = document.createElement("option");
+    o.value = val; o.textContent = label;
+    typeSel.appendChild(o);
+  }
+  typeSel.value = transport;
+  typeSel.addEventListener("change", () => {
+    spec.type = typeSel.value;
+    renderMcpDetail();   // 字段集随类型切换（command/url 二选一）
+    scheduleMcpSave();
+  });
+  typeField.appendChild(typeSel);
+  grid.appendChild(typeField);
+
+  const timeoutField = document.createElement("div");
+  timeoutField.className = "prov-field";
+  timeoutField.innerHTML = "<label>调用超时（秒）</label>";
+  const timeout = document.createElement("input");
+  timeout.type = "number"; timeout.min = "1"; timeout.className = "set-input";
+  timeout.value = spec.timeout ?? 60;
+  timeout.addEventListener("input", () => {
+    const v = parseInt(timeout.value, 10);
+    if (Number.isInteger(v) && v > 0) spec.timeout = v;
+    scheduleMcpSave();
+  });
+  timeoutField.appendChild(timeout);
+  grid.appendChild(timeoutField);
+  card.appendChild(grid);
+
+  if (transport === "stdio") {
+    const cmdF = document.createElement("div");
+    cmdF.className = "prov-field";
+    cmdF.innerHTML = "<label>COMMAND</label>";
+    const cmd = document.createElement("input");
+    cmd.className = "set-input mono";
+    cmd.placeholder = "npx / uvx / python";
+    cmd.value = spec.command || "";
+    cmd.addEventListener("input", () => { spec.command = cmd.value; scheduleMcpSave(); });
+    cmdF.appendChild(cmd);
+    card.appendChild(cmdF);
+
+    const argsF = document.createElement("div");
+    argsF.className = "prov-field";
+    argsF.innerHTML = '<label>参数（JSON 数组）</label>';
+    const args = document.createElement("input");
+    args.className = "set-input mono";
+    args.placeholder = '["-y", "@modelcontextprotocol/server-everything"]';
+    args.value = JSON.stringify(spec.args ?? []);
+    args.addEventListener("input", () => {
+      try {
+        const v = JSON.parse(args.value || "[]");
+        if (Array.isArray(v)) { spec.args = v; args.classList.remove("invalid"); scheduleMcpSave(); }
+        else args.classList.add("invalid");
+      } catch { args.classList.add("invalid"); }
+    });
+    argsF.appendChild(args);
+    card.appendChild(argsF);
+
+    const envF = document.createElement("div");
+    envF.className = "prov-field";
+    envF.innerHTML = "<label>环境变量（JSON 对象）</label>";
+    const env = document.createElement("input");
+    env.className = "set-input mono";
+    env.placeholder = '{"API_KEY": "${MY_KEY}"}';
+    env.value = JSON.stringify(spec.env ?? {});
+    env.addEventListener("input", () => {
+      try {
+        const v = JSON.parse(env.value || "{}");
+        if (v && typeof v === "object" && !Array.isArray(v)) {
+          spec.env = v; env.classList.remove("invalid"); scheduleMcpSave();
+        } else env.classList.add("invalid");
+      } catch { env.classList.add("invalid"); }
+    });
+    envF.appendChild(env);
+    card.appendChild(envF);
+  } else {
+    const urlF = document.createElement("div");
+    urlF.className = "prov-field";
+    urlF.innerHTML = "<label>URL</label>";
+    const url = document.createElement("input");
+    url.className = "set-input mono";
+    url.placeholder = "http://localhost:3000/mcp";
+    url.value = spec.url || "";
+    url.addEventListener("input", () => { spec.url = url.value; scheduleMcpSave(); });
+    urlF.appendChild(url);
+    card.appendChild(urlF);
+
+    const hdF = document.createElement("div");
+    hdF.className = "prov-field";
+    hdF.innerHTML = "<label>请求头（JSON 对象）</label>";
+    const hd = document.createElement("input");
+    hd.className = "set-input mono";
+    hd.placeholder = '{"Authorization": "Bearer ${TOKEN}"}';
+    hd.value = JSON.stringify(spec.headers ?? {});
+    hd.addEventListener("input", () => {
+      try {
+        const v = JSON.parse(hd.value || "{}");
+        if (v && typeof v === "object" && !Array.isArray(v)) {
+          spec.headers = v; hd.classList.remove("invalid"); scheduleMcpSave();
+        } else hd.classList.add("invalid");
+      } catch { hd.classList.add("invalid"); }
+    });
+    hdF.appendChild(hd);
+    card.appendChild(hdF);
+  }
+
+  /* 连接失败原因就地显示（列表圆点 title 里也有, 这里给完整信息） */
+  if (st?.status === "failed" && st.error) {
+    const errLine = document.createElement("div");
+    errLine.className = "mcp-error-line";
+    errLine.textContent = st.error;
+    card.appendChild(errLine);
+  }
+  wrap.appendChild(card);
+}
+function renderMcpSettings() {
+  const list = $("mcp-list");
+  if (!list) return;
+  const names = Object.keys(mcpCfg.mcpServers);
+  if (mcpSelected == null || !names.includes(mcpSelected)) mcpSelected = names[0] ?? null;
+  list.innerHTML = "";
+  for (const n of names) list.appendChild(buildMcpItem(n));
+  renderMcpDetail();
+}
+$("btn-add-mcp").onclick = () => {
+  const key = mcpKeyFor("new-server");
+  mcpCfg.mcpServers[key] = { type: "stdio", command: "" };
+  mcpSelected = key;
+  renderMcpSettings();
+  const name = $("mcp-detail").querySelector(".prov-name");
+  if (name) { name.focus(); name.select(); }
+  scheduleMcpSave();   // 新增即保存; 缺 command 时红字提示, 填好自动补存
+};
+$("btn-mcp-reload").onclick = async () => {
+  // 有未保存编辑先强制落盘再重连——静默丢弃会让用户以为改好了,
+  // 重连却跑在旧配置上（实测踩过: 改完参数点重连, 改动全丢）
+  if (mcpDirty) await persistMcpServers();
+  if (mcpSaveTimer) {   // 落盘被校验拦下(红字提示)时不再继续, 保留现场
+    toast("先解决未保存的配置, 再重连");
+    return;
+  }
+  mcpStatus("重连中…");
+  try {
+    const r = await fetch("/api/mcp/reload", { method: "POST" });
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.detail || r.status);
+    mcpStatuses = d.servers || [];
+    mcpStatus(d.servers.every(s => s.status !== "connected")
+      ? "已重连（无已连接服务器）" : "已重连");
+    renderMcpSettings();
+  } catch (e) {
+    mcpStatus("重连失败: " + e.message, true);
+    toast("重连失败: " + e.message);
+  }
+};
+
 function openSettings() {
   themeDd.setValue(themePref());   // 每次打开回显当前值
   $("fs-ui-input").value = String(fsUiPref());
@@ -4545,6 +4924,7 @@ function openSettings() {
   // 迭代次数: 未加载过(服务端值未知)时留空给 placeholder 兜底, 已知则回显
   if (state.serverMaxIter != null) $("set-max-iter").value = String(state.serverMaxIter);
   loadProviders().then(renderProviderSettings);   // 拉取供应商配置并渲染
+  loadMcpServers().then(renderMcpSettings);       // 拉取 MCP 配置与连接状态并渲染
   $("sidebar").classList.add("settings-view");
   $("pane").dataset.view = "settings";
 }

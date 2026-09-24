@@ -56,6 +56,11 @@ class ToolRegistry():
         self._handlers[name] = handler
         return self
 
+    def unregister(self, name: str) -> Self:
+        """注销工具。不存在时静默(热重载先清后挂, 幂等更省心)。"""
+        self._handlers.pop(name, None)
+        return self
+
     def execute(self, name: str, tool_input_json: str,
                 workdir: Optional[str] = None) -> str:
         if name not in self._handlers:

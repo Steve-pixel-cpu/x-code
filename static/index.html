@@ -14,8 +14,7 @@
 <script src="/static/vendor/highlight.min.js"></script>
 <link rel="stylesheet" href="/static/vendor/katex.min.css">
 <script src="/static/vendor/katex.min.js"></script>
-<link rel="stylesheet" href="/static/app.css?v=20260922h">
-<link rel="stylesheet" href="/static/pet.css?v=20260924b">
+<link rel="stylesheet" href="/static/app.css?v=20260922h"><link rel="stylesheet" href="/static/pet.css?v=20260924b">
 </head>
 <body>
 
@@ -138,6 +137,10 @@
     <button class="menu-item nav-item" data-section="behavior">
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h4l3-8 4 16 3-8h4"/></svg>
       行为
+    </button>
+    <button class="menu-item nav-item" data-section="mcp">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="6" rx="2"/><rect x="2" y="15" width="20" height="6" rx="2"/><path d="M6 9v3a1 1 0 001 1h10a1 1 0 001-1V9M6 18h.01M18 18h.01"/></svg>
+      MCP 服务器
     </button>
     <button class="menu-item nav-item" data-section="config">
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><path d="M14 2v6h6M9 13h6M9 17h6"/></svg>
@@ -394,6 +397,21 @@
           <input id="set-max-iter" class="hex-input num-input" spellcheck="false" inputmode="numeric" placeholder="128" maxlength="5">
         </div>
       </div>
+      <div class="sp-section-body" data-section="mcp" style="display:none">
+        <div class="sp-section">MCP 服务器</div>
+        <div class="sp-section-desc">配置 MCP（Model Context Protocol）服务器，外部工具以 mcp__服务器__工具 的形式接入对话；改动停顿后自动保存并热生效，无需重启</div>
+        <div class="prov-layout">
+          <aside class="prov-side">
+            <div id="mcp-list"></div>
+            <button type="button" id="btn-add-mcp" class="prov-side-add">＋ 添加服务器</button>
+          </aside>
+          <div class="prov-main" id="mcp-detail"></div>
+        </div>
+        <div class="prov-actions">
+          <span id="mcp-save-status" class="prov-save-status" aria-live="polite"></span>
+          <button type="button" class="icon-act" id="btn-mcp-reload">重连全部</button>
+        </div>
+      </div>
       <div class="sp-section-body" data-section="config" style="display:none">
         <div class="sp-section">配置文件</div>
         <div class="sp-section-desc">所有用户级设置都存在这一个文件里（含模型供应商）；手动修改后需重启服务生效</div>
@@ -456,7 +474,7 @@
   </div>
 </div>
 
-<script src="/static/app.js?v=20260922h" defer></script>
+<script src="/static/app.js?v=20260924a" defer></script>
 <script src="/static/music.js?v=20260921c" defer></script>
 <script src="/static/pet.js?v=20260924b" defer></script>
 </body>
