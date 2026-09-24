@@ -440,7 +440,7 @@ fn pet_url(token: &str) -> String {
 }
 
 /// 开关桌宠悬浮窗: 没开着则创建——透明 + 无边框 + 置顶 + 不进任务栏,
-/// 尺寸只够放下 192x208 的精灵图、气泡与状态行; 已开着则关闭
+/// 尺寸只够放下 192x208 的精灵图与其上方的状态行/两行气泡; 已开着则关闭
 /// (再点一次桌宠按钮 = 收起)。
 /// 必须 async: 同步命令在主线程执行, 而 WebviewWindowBuilder::build()
 /// 内部要向主线程派发创建——同步形态自己等自己, 实测整个应用卡死
@@ -464,7 +464,7 @@ async fn open_pet_window(app: AppHandle, token: String) -> Result<(), String> {
     .skip_taskbar(true)
     .resizable(false)
     .shadow(false)
-    .inner_size(236.0, 264.0)
+    .inner_size(236.0, 300.0)   // 6 顶距 + 状态行 19 + gap 4 + 两行气泡 49 + 尾巴 6 + 精灵 208 + 6 底距 ≈ 298
     // 右下角附近出生, 用户可拖到任意位置
     .position(1200.0, 600.0)
     .visible(true)

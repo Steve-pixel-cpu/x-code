@@ -8,6 +8,8 @@
    ============================================================ */
 
 /* ---------- 悬浮窗(pet.html) ---------- */
+/* 布局: 文字栈(状态行+气泡)从底部往上堆、紧贴精灵上方——窗口顶部只留
+   透明余量, 气泡显隐时人物位置不动, 尾巴始终指向头顶 */
 #pet-float {
   position: fixed;
   inset: 0;
@@ -18,6 +20,20 @@
   padding-bottom: 6px;
   user-select: none;
   -webkit-user-select: none;
+}
+
+/* 文字栈: 状态行在上、气泡在其下贴近头顶; 不接收任何鼠标事件。
+   margin-bottom 负值 = 整栈下沉 18px, 叠进精灵图顶部的透明空档
+   (单格 208 高, 角色头顶留了约 30px 透明边), 否则气泡和帽子之间
+   隔着整段透明区, 视觉上悬空。
+   状态行与气泡互斥显示(见 pet.js), 交替时高度变化由浏览器平滑过渡 */
+#pet-text {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  margin-bottom: -18px;
+  pointer-events: none;
 }
 
 #pet-sprite {
@@ -58,7 +74,6 @@
 }
 
 #pet-status {
-  margin-top: 2px;
   font-size: 11px;
   line-height: 1;
   color: var(--text);
@@ -71,14 +86,13 @@
   pointer-events: none;   /* 状态行不挡拖动 */
 }
 
+/* 气泡: 常规流内元素(文字栈第二行, 由 #pet-text 负 margin 下沉),
+   不再绝对定位; 小尾巴指向下方人物头顶 */
 #pet-bubble {
-  position: absolute;
-  bottom: 232px;                     /* 精灵图(208) + 状态行上方 */
-  left: 50%;
-  transform: translateX(-50%);
   max-width: 200px;
   font-size: 12px;
   line-height: 1.45;
+  text-align: center;
   color: var(--text);
   background: var(--pop-bg);
   border-radius: var(--r-md);
@@ -104,12 +118,12 @@
 #pet-bubble[hidden] { display: none; }
 
 @keyframes pet-bubble-in {
-  from { opacity: 0; transform: translateX(-50%) translateY(4px); }
-  to   { opacity: 1; transform: translateX(-50%) translateY(0); }
+  from { opacity: 0; transform: translateY(4px); }
+  to   { opacity: 1; transform: translateY(0); }
 }
 
 /* ---------- 主界面: 设置→桌宠 的宠物列表 ---------- */
-.pet-set-col { display: block; }
+.pet-set-col { flex-wrap: wrap; }
 #pet-dir {
   font-family: var(--font-mono);
   font-size: 11px;
@@ -121,7 +135,7 @@
   display: flex;
   flex-direction: column;
   gap: 8px;
-  margin-top: 12px;
+  flex-basis: 100%;
 }
 
 .pet-item {

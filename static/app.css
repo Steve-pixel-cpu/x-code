@@ -1527,6 +1527,8 @@
     cursor: pointer; font-family: inherit; transition: all .12s;
   }
   .icon-act:hover { background: var(--hover); color: var(--text); }
+  .icon-act:disabled { opacity: .5; cursor: default; }
+  .icon-act:disabled:hover { background: none; color: var(--text-2); }
 
   /* 强调颜色: 16 进制输入框 */
   .hex-input {

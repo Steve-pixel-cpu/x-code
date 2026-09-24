@@ -56,10 +56,12 @@ if errorlevel 1 exit /b 1
 
 echo.
 echo ====== [2/2] Freezing Python backend (static/ bundled, uvicorn hidden imports) ======
-REM --collect-all playwright: 浏览器工具的 driver(node.exe+脚本, ~100MB)是包内
-REM 数据文件, PyInstaller 静态分析看不到, 必须显式收集, 否则冻结后 browser_* 工具
-REM 报 "Executable doesn't exist" / driver 缺失。桌面端浏览器用本机 Edge/Chrome
-REM 渠道兜底(见 browser_tools._launch), 无需 playwright install。
+REM --collect-all playwright: the browser tool's driver (node.exe + scripts,
+REM ~100MB) is data shipped inside the package; PyInstaller's static analysis
+REM cannot see it, so it must be collected explicitly, or the frozen browser_*
+REM tools fail with "Executable doesn't exist" / missing driver. The desktop
+REM app falls back to a local Edge/Chrome channel (see browser_tools._launch),
+REM so no "playwright install" is needed.
 if not exist build\server mkdir build\server
 .venv\Scripts\python.exe -m PyInstaller --noconfirm --clean --onefile ^
   --name x-code-server ^
@@ -94,8 +96,10 @@ if not exist src-tauri\server mkdir src-tauri\server
 copy /y build\server\x-code-server.exe src-tauri\server\
 if errorlevel 1 exit /b 1
 
-REM 桌宠资产随包: pets\ -> src-tauri\pets\(tauri.conf resources 再装到 安装目录\pets\)
-REM robocopy 返回码 >=8 才是失败, 1 表示有文件被复制——不能当错误退出
+REM Ship desktop-pet assets with the package: pets\ -> src-tauri\pets\
+REM (tauri.conf resources then installs them to <install dir>\pets\).
+REM robocopy exit codes >= 8 mean failure; 1 just means "files copied" --
+REM it must NOT be treated as an error exit.
 robocopy pets src-tauri\pets /E /NFL /NDL /NJH /NJS >nul
 if errorlevel 8 exit /b 1
 

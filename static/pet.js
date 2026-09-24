@@ -120,13 +120,16 @@
     function setBase(name) {
       pet.base = name;
       setStatus(name);
-      if (!pet.overlay && sprite) sprite.play(name);
+      // 拖动中不动 sprite: 跑动姿势由 dragPose 按 drag.dir 维持, 中途的
+      // WS 事件若在此换动作, 下个 move 才被纠正, 观感即"转向慢半拍"
+      if (!pet.overlay && sprite && !drag) sprite.play(name);
     }
 
     function overlayOnce(name) {
       pet.overlay = name;
       setStatus(name);
-      if (sprite) {
+      // 同上: 拖动期间一次性动作不播(拖动姿态优先), 只记标记
+      if (sprite && !drag) {
         sprite.play(name, {
           fallback: pet.base,
         });
@@ -140,14 +143,30 @@
       }, (ROWS_SPEC[name].ms.reduce((a, b) => a + b, 0)) + 60);
     }
 
+    // 互斥显示: 状态行与气泡共用一个位置, 气泡可见时状态行让位
+    // (气泡文字本身已表达状态, 两个框叠着既挤又重复)
+    function syncTextVisibility() {
+      statusEl.style.visibility = bubbleEl.hidden ? "visible" : "hidden";
+    }
+
     function bubble(text, ms = 2400) {
       if (!text) return;
       const t = String(text);
       bubbleEl.textContent = t.length > BUBBLE_MAX ? t.slice(0, BUBBLE_MAX - 1) + "…" : t;
       bubbleEl.classList.remove("bubble-dim");
       bubbleEl.hidden = false;
+      syncTextVisibility();
       clearTimeout(pet.bubbleTimer);
-      if (ms > 0) pet.bubbleTimer = setTimeout(() => (bubbleEl.hidden = true), ms);
+      if (ms > 0) pet.bubbleTimer = setTimeout(() => {
+        bubbleEl.hidden = true;
+        syncTextVisibility();
+      }, ms);
+    }
+
+    function hideBubble() {
+      clearTimeout(pet.bubbleTimer);
+      bubbleEl.hidden = true;
+      syncTextVisibility();
     }
 
     function fail(text) {
@@ -236,8 +255,13 @@
     // ---- 交互: 按住拖动(宠物随鼠标跑动) / 点击打招呼 ----
     const bridge = () => window.xcodeDesktopPet;
     const floatEl = $("pet-float");
-    let drag = null;      // {sx,sy,wx,wy,dir,moved,dustT,hadBubble}
+    // drag.acc: 反向行程累计器(饱和区间 ±DIR_REV_PX)。每个 move 事件的
+    // 增量与当前朝向相反时累计、同向时清零, 越过阈值立刻掉头——转向跟随
+    // 鼠标的"最近运动方向", 而不是相对起点的累计位移(旧法: 先右拖 100px
+    // 再往回, dx 仍为正, 人物迟迟不掉头, 观感即"转向延迟")。
+    let drag = null;      // {sx,sy,wx,wy,lastX,acc,dir,moved,dustT,hadBubble}
     let wasDrag = false;  // 松手后短暂置真, 让 click 区分"拖完"与"点击"
+    const DIR_REV_PX = 4; // 反向掉头阈值(每侧): 约 8px 反向行程即转向
 
     // 拖动扬尘: 脚边冒几粒灰, 600ms 内飘散
     function puff(n) {
@@ -268,26 +292,49 @@
       drag = {
         sx: e.screenX, sy: e.screenY,
         wx: window.screenX, wy: window.screenY,
-        dir: 1, moved: false, dustT: 0,
+        lastX: e.screenX,
+        acc: 0, dir: 1,
+        moved: false, dustT: 0,
         hadBubble: !bubbleEl.hidden,
       };
       try { spriteEl.setPointerCapture(e.pointerId); } catch { }
       e.preventDefault();
     });
+    // 窗口挪动按帧合并: pointermove 频率可高于刷新率, 逐事件 IPC 会在
+    // 队列里排队造成"窗追不上手"的滞后; rAF 保证每帧只发最新坐标。
+    let pendingPos = null, moveRaf = 0;
+    const flushMove = () => {
+      moveRaf = 0;
+      if (!pendingPos || !drag) return;
+      bridge().movePet(pendingPos[0], pendingPos[1]).catch(() => { });
+      pendingPos = null;
+    };
     window.addEventListener("pointermove", (e) => {
       if (!drag) return;
       const dx = e.screenX - drag.sx, dy = e.screenY - drag.sy;
       if (!drag.moved) {
         if (Math.hypot(dx, dy) < 5) return;   // 抖动阈值: 按住不动不算拖
         drag.moved = true;
+        drag.lastX = e.screenX;               // 阈值内的位移不计入转向判定
         bubbleEl.hidden = true;               // 拖动时气泡让路
       }
-      bridge().movePet(drag.wx + dx, drag.wy + dy).catch(() => { });
-      // 方向跟随累计位移(比逐事件速度稳, 不受抖动影响)
-      const dir = dx >= 0 ? 1 : -1;
-      if (dir !== drag.dir) {
-        drag.dir = dir;
-        dragTilt(6 * dir);                    // 身体朝运动方向倾
+      pendingPos = [drag.wx + dx, drag.wy + dy];
+      if (!moveRaf) moveRaf = requestAnimationFrame(flushMove);
+      // 转向: 跟随最近的运动方向(增量 + 饱和反向累计器), 与起点无关
+      const step = e.screenX - drag.lastX;
+      drag.lastX = e.screenX;
+      if (step) {
+        const dirNow = step >= 0 ? 1 : -1;
+        if (dirNow === drag.dir) {
+          drag.acc = 0;                       // 顺朝向的运动, 清掉反向累计
+        } else {
+          drag.acc = Math.min(drag.acc + Math.abs(step), DIR_REV_PX);
+          if (drag.acc >= DIR_REV_PX) {       // 反向行程足够 → 立刻掉头
+            drag.dir = dirNow;
+            drag.acc = 0;
+            dragTilt(6 * drag.dir);           // 身体朝运动方向倾
+          }
+        }
       }
       dragPose();
       const now = performance.now();
@@ -300,6 +347,11 @@
       if (!drag) return;
       const d = drag;
       drag = null;
+      if (moveRaf) { cancelAnimationFrame(moveRaf); moveRaf = 0; }
+      if (pendingPos) {   // 收尾前把最后一帧位置落盘, 避免停在半路
+        bridge().movePet(pendingPos[0], pendingPos[1]).catch(() => { });
+        pendingPos = null;
+      }
       dragTilt("");
       if (!d.moved) return;
       wasDrag = true;
@@ -309,7 +361,10 @@
       spriteEl.classList.remove("pet-land");
       void spriteEl.offsetWidth;
       spriteEl.classList.add("pet-land");
-      if (d.hadBubble && bubbleEl.textContent) bubbleEl.hidden = false;
+      if (d.hadBubble && bubbleEl.textContent) {
+        bubbleEl.hidden = false;
+        syncTextVisibility();
+      }
       if (sprite) sprite.play(pet.base);
       setStatus(pet.base);
     }
@@ -394,15 +449,31 @@
         } catch (e) { toast("打开失败: " + e.message); }
       });
     }
+    // 刷新: 重扫宠物目录并重绘列表(带 cache-bust, 刚替换的精灵图也能立即生效)
+    const rescanBtn = $("btn-pet-rescan");
+    if (rescanBtn) {
+      rescanBtn.addEventListener("click", async () => {
+        rescanBtn.disabled = true;
+        try {
+          await renderPicker(true);
+          toast("宠物列表已刷新");
+        } finally {
+          rescanBtn.disabled = false;
+        }
+      });
+    }
 
     renderPicker();
   }
 
-  async function renderPicker() {
+  async function renderPicker(bust) {
     const wrap = $("pet-picker");
     if (!wrap) return;
+    // bust: 刷新按钮传真值——列表 URL 与缩略图都加时间戳, 绕过 HTTP 缓存,
+    // 否则刚替换的 spritesheet 会显示旧图
+    const bustArg = bust ? `?_=${Date.now()}` : "";
     let data = null;
-    try { data = await (await fetch("/api/pets")).json(); } catch { }
+    try { data = await (await fetch(`/api/pets${bustArg}`)).json(); } catch { }
     const pets = (data && data.pets) || [];
     const dirEl = $("pet-dir");
     if (dirEl) dirEl.textContent = data && data.petsDir
@@ -431,7 +502,7 @@
         p.description || `${p.rows} 行标准动作图集`;
       row.querySelector(".pet-item-badge").textContent = p.source === "codex" ? "Codex" : "本地";
       const mini = row.querySelector(".pet-sprite-mini");
-      mini.style.backgroundImage = `url("/api/pets/${encodeURIComponent(p.id)}/sheet")`;
+      mini.style.backgroundImage = `url("/api/pets/${encodeURIComponent(p.id)}/sheet${bustArg}")`;
       mini.style.backgroundSize = `${SHEET_W}px ${p.rows * CELL_H}px`;
       mini.style.backgroundPosition = "0 0";   // idle 首帧做封面
       row.addEventListener("click", () => {
