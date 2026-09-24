@@ -21,8 +21,13 @@ from tools import ToolRegistry, bash_tool, read_tool, write_tool, powershell_too
 TOOL_WHITELIST: dict[str, set[str]] = {
     "explore": {"read_file"},
     "plan": {"read_file"},
-    "verification": {"bash", "read_file"},
-    "general": {"bash", "read_file", "write_file", "web_search", "web_fetch"},
+    "verification": {"bash", "read_file",
+                     "browser_navigate", "browser_snapshot",
+                     "browser_console"},
+    "general": {"bash", "read_file", "write_file", "web_search", "web_fetch",
+                "browser_navigate", "browser_snapshot", "browser_click",
+                "browser_type", "browser_press", "browser_select",
+                "browser_screenshot", "browser_console", "browser_close"},
     "explore_web": {"web_search", "web_fetch"},
 }
 
@@ -76,6 +81,19 @@ SUBAGENT_TOOL_HANDLERS: dict[str, Callable] = {
     "read_file": read_tool,
     "write_file": write_tool,
 }
+
+# 浏览器工具 handler: 懒加载（browser_tools 导入不触发 playwright 依赖),
+# 白名单里出现的名字在 worker 组装 registry 时才解析。
+def _browser_handler(name: str) -> Callable:
+    from browser_tools import BROWSER_TOOL_SPECS  # noqa: F401  (依赖自检)
+    import browser_tools as bt
+    return getattr(bt, f"{name}_tool")
+
+
+for _name in ("browser_navigate", "browser_snapshot", "browser_click",
+              "browser_type", "browser_press", "browser_select",
+              "browser_screenshot", "browser_console", "browser_close"):
+    SUBAGENT_TOOL_HANDLERS[_name] = _browser_handler(_name)
 
 
 class SilentToolExecutor:

@@ -38,6 +38,7 @@ from tools import (ToolRegistry, bash_tool, edit_file_tool, glob_tool,
                    web_fetch_tool, web_search_tool,
                    git_bash_unavailable_reason)
 from agent_tools import AGENT_TOOL_SPECS, get_orchestrator, register_agent_tools
+from browser_tools import BROWSER_TOOL_SPECS, register_browser_tools
 
 DEFAULT_MODEL = "glm-5.3-flash"
 bash_spec = {
@@ -399,7 +400,8 @@ from tools import (todo_spec as _todo_spec,     # noqa: E402  (spec 与实现同
 TOOLS = [bash_spec, powershell_spec, read_file_spec, write_file_spec,
          edit_file_spec, grep_spec, glob_spec, task_output_spec, task_stop_spec,
          present_plan_spec, _todo_spec,
-         web_search_spec, web_fetch_spec] + AGENT_TOOL_SPECS
+         web_search_spec, web_fetch_spec] + BROWSER_TOOL_SPECS \
+        + AGENT_TOOL_SPECS
 
 
 # --- 终端视觉规范: 调色板 + 版式 ---
@@ -911,6 +913,14 @@ TOOL_REQUIREMENTS = {
     "todo": READ_ONLY_MODE,             # 会话任务清单（只写 ~/.x-code/todos/ 元数据）
     "web_search": READ_ONLY_MODE,       # 免 key 网页搜索, 纯只读
     "web_fetch": READ_ONLY_MODE,        # 抓 URL 提取正文, 不落盘
+    "browser_navigate": READ_ONLY_MODE,  # 打开页面（不写本地, 副作用在被测站）
+    "browser_snapshot": READ_ONLY_MODE,  # 读页面结构/文本
+    "browser_console": READ_ONLY_MODE,   # 读 console/JS 报错
+    "browser_click": WORKSPACE_WRITE_MODE,     # 改被测系统状态（登录/下单）
+    "browser_type": WORKSPACE_WRITE_MODE,      # 填表单
+    "browser_press": WORKSPACE_WRITE_MODE,     # 键盘操作可触发表单提交
+    "browser_select": WORKSPACE_WRITE_MODE,    # 改下拉选中值
+    "browser_screenshot": WORKSPACE_WRITE_MODE,  # 截图 PNG 落盘用户目录
     "write_file": WORKSPACE_WRITE_MODE, # 落盘文件（本地写）
     "edit_file": WORKSPACE_WRITE_MODE,  # 局部编辑文件（本地写）
     "agent_tool": WORKSPACE_WRITE_MODE, # 派生 subagent（写 agents 状态目录）
@@ -936,7 +946,8 @@ def build_registry() -> ToolRegistry:
         name="glob", handler=glob_tool).register(
         name="web_search", handler=web_search_tool).register(
         name="web_fetch", handler=web_fetch_tool)
-    return register_agent_tools(registry)
+    registry = register_agent_tools(registry)
+    return register_browser_tools(registry)
 
 
 def start(session_store:SessionStore,session_id:str):
