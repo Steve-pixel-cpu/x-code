@@ -3910,13 +3910,13 @@ function buildProviderCard(p) {
   name.className = "prov-name";
   name.value = p.name || "";
   name.placeholder = "供应商名称";
-  name.addEventListener("input", () => { p.name = name.value; syncProvItem(p); });
+  name.addEventListener("input", () => { p.name = name.value; syncProvItem(p); scheduleProvSave(); });
   const en = document.createElement("label");
   en.className = "prov-switch";
   const enBox = document.createElement("input");
   enBox.type = "checkbox";
   enBox.checked = p.enabled !== false;
-  enBox.addEventListener("change", () => { p.enabled = enBox.checked; syncProvItem(p); });
+  enBox.addEventListener("change", () => { p.enabled = enBox.checked; syncProvItem(p); scheduleProvSave(); });
   const track = document.createElement("i");
   track.className = "track";
   en.append(enBox, track, document.createTextNode("已启用"));
@@ -3934,6 +3934,7 @@ function buildProviderCard(p) {
     }
     if (provSelectedId === p.id) provSelectedId = null;   // 回退逻辑在 renderProviderSettings 里
     renderProviderSettings();
+    scheduleProvSave();   // 删除也自动保存
   };
   head.append(name, en, del);
   card.appendChild(head);
@@ -3953,7 +3954,7 @@ function buildProviderCard(p) {
     openai: "https://open.bigmodel.cn/api/coding/paas/v4",
   };
   url.placeholder = URL_HINTS[p.protocol || "anthropic"] || "https://...";
-  url.addEventListener("input", () => { p.base_url = url.value; });
+  url.addEventListener("input", () => { p.base_url = url.value; scheduleProvSave(); });
   urlField.appendChild(url);
   const protoField = document.createElement("div");
   protoField.className = "prov-field";
@@ -3974,6 +3975,7 @@ function buildProviderCard(p) {
   proto.addEventListener("change", () => {
     p.protocol = proto.value;
     url.placeholder = URL_HINTS[proto.value] || "https://...";
+    scheduleProvSave();
   });
   protoField.appendChild(proto);
   const keyField = document.createElement("div");
@@ -3985,7 +3987,7 @@ function buildProviderCard(p) {
   key.type = "password";
   key.className = "set-input mono";
   key.value = p.api_key || "";
-  key.addEventListener("input", () => { p.api_key = key.value; });
+  key.addEventListener("input", () => { p.api_key = key.value; scheduleProvSave(); });
   const eye = document.createElement("button");
   eye.type = "button";
   eye.className = "key-eye";
@@ -4011,18 +4013,19 @@ function buildProviderCard(p) {
     nm.className = "set-input m-name";
     nm.value = m.name || "";
     nm.placeholder = "显示名";
-    nm.addEventListener("input", () => { m.name = nm.value; });
+    nm.addEventListener("input", () => { m.name = nm.value; scheduleProvSave(); });
     const id = document.createElement("input");
     id.className = "set-input m-id mono";
     id.value = m.id || "";
     id.placeholder = "模型 ID（API 名）";
-    id.addEventListener("input", () => { m.id = id.value; });
+    id.addEventListener("input", () => { m.id = id.value; scheduleProvSave(); });
     const tg = document.createElement("input");
     tg.className = "set-input m-tags";
     tg.value = (m.tags || []).join(",");
     tg.placeholder = "标签（逗号分隔，如 视觉,1M）";
     tg.addEventListener("input", () => {
       m.tags = tg.value.split(/[,，]/).map(x => x.trim()).filter(Boolean);
+      scheduleProvSave();
     });
     const delB = document.createElement("button");
     delB.type = "button";
@@ -4032,6 +4035,7 @@ function buildProviderCard(p) {
     delB.onclick = () => {
       p.models = p.models.filter(x => x !== m);
       row.remove();
+      scheduleProvSave();
     };
     row.append(nm, id, tg, delB);
     return row;
@@ -4046,6 +4050,7 @@ function buildProviderCard(p) {
     const m = { id: "", name: "", tags: [] };
     p.models.push(m);
     rows.appendChild(buildModelRow(m));
+    scheduleProvSave();   // 新行落盘; 模型 id 允许为空, 服务端只校验列表存在
   };
   mField.appendChild(addM);
   card.appendChild(mField);
@@ -4064,6 +4069,7 @@ $("btn-add-provider").onclick = () => {
   renderProviderSettings();
   const name = $("prov-detail").querySelector(".prov-name");
   if (name) { name.focus(); name.select(); }
+  scheduleProvSave();   // 新增即自动保存; 缺 Base URL 时红字提示, 填好自动补存
 };
 
 /* ---------- 设置 → 外观: 背景图片（亚克力磨砂的"壁纸"） ----------
@@ -4217,15 +4223,38 @@ $("btn-open-config").onclick = async () => {
     toast("已打开配置文件");
   } catch (e) { toast("打开失败: " + e.message); }
 };
-$("btn-save-providers").onclick = saveProviders;
-async function saveProviders() {
-  // 接口地址必填: 留空会回退到错误的服务端点, 是 403 类问题的根源
-  for (const p of (state.providerCfg?.providers || [])) {
+/* ---------- 自动保存: 脏标记 + 800ms 防抖, 合并连续输入为一次请求 ----------
+ * 编辑只改内存 state.providerCfg; 防抖窗口内反复触发只重置计时器, 停顿后才
+ * 真正 POST。启用的供应商缺 Base URL 属无效中间态: 置脏但不发请求, 红字提示,
+ * 待填好停顿后自动补存 —— 打字/粘贴中途绝不打扰后端。 */
+let provSaveTimer = null;
+let provDirty = false;
+const PROV_SAVE_DELAY = 800;
+function provStatus(text, isErr = false) {
+  const el = $("prov-save-status");
+  if (!el) return;
+  el.textContent = text || "";
+  el.classList.toggle("err", isErr);
+}
+function scheduleProvSave() {
+  provDirty = true;
+  provStatus("未保存…");
+  clearTimeout(provSaveTimer);
+  provSaveTimer = setTimeout(persistProviders, PROV_SAVE_DELAY);
+}
+async function persistProviders() {
+  clearTimeout(provSaveTimer);
+  provSaveTimer = null;
+  if (!provDirty || !state.providerCfg) return;
+  // 接口地址必填: 留空会回退到错误的服务端点, 是 403 类问题的根源。
+  // 无效中间态不落盘, 等用户填好后的下一次防抖自动保存。
+  for (const p of (state.providerCfg.providers || [])) {
     if (p.enabled !== false && !(p.base_url || "").trim()) {
-      toast(`供应商「${p.name}」缺少接口地址 Base URL`);
+      provStatus(`「${p.name || "未命名供应商"}」缺少 Base URL, 暂未保存`, true);
       return;
     }
   }
+  provStatus("保存中…");
   try {
     const r = await fetch("/api/providers", {
       method: "POST",
@@ -4234,14 +4263,30 @@ async function saveProviders() {
     });
     if (!r.ok) {
       const err = await r.json().catch(() => ({}));
+      provStatus("保存失败: " + (err.detail || r.status), true);
       toast("保存失败: " + (err.detail || r.status));
       return;
     }
-    state.providerCfg = await r.json();
-    renderProviderSettings();
-    await loadSettings();      // 刷新 composer 模型下拉与当前选中
-    toast("模型配置已保存");
-  } catch (e) { toast("保存失败: " + e.message); }
+    const saved = await r.json();
+    provDirty = false;
+    /* 不重绘表单（重建 DOM 会丢输入焦点）: 只把服务端归一化后的
+     * base_url / protocol 按 id 原位写回现有对象, 保持引用不变,
+     * 输入框闭包依旧生效; 名称等非归一化字段以本地为准, 避免覆盖正在输入的内容 */
+    for (const sp of (saved.providers || [])) {
+      const lp = (state.providerCfg.providers || []).find(x => x.id === sp.id);
+      if (!lp) continue;
+      lp.base_url = sp.base_url;
+      lp.protocol = sp.protocol;
+    }
+    provStatus("已保存");
+    // 刷新 composer 模型下拉; 仅当当前选中项已不存在时才走全量 loadSettings 兜底
+    const cur = modelDd.getValue();
+    modelDd.setItems(modelItems(), cur);
+    if (cur && !modelItems().some(i => i.value === cur)) await loadSettings();
+  } catch (e) {
+    provStatus("保存失败: " + e.message, true);
+    toast("保存失败: " + e.message);
+  }
 }
 
 async function saveSettings(patch) {
