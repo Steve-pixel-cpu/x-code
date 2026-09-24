@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "main-capability",
-  "windows": ["main"],
+  "windows": ["main", "pet"],
   "remote": {
     "urls": ["http://127.0.0.1", "http://127.0.0.1:*", "http://localhost", "http://localhost:*"]
   },
@@ -12,6 +12,11 @@
     "allow-toggle-maximize-main",
     "allow-close-main",
     "allow-start-drag-main",
+    "allow-open-pet-window",
+    "allow-close-pet",
+    "allow-start-drag-pet",
+    "allow-set-pet-click-through",
+    "allow-move-pet-window",
     "clipboard-manager:allow-read-text"
   ]
 }

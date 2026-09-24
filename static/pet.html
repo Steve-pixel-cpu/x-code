@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+<meta charset="UTF-8">
+<title>x-code 桌宠</title>
+<!-- 令牌从 ?token= 种成 cookie, WS/API 鉴权与 index 同一套(Tauri pet 窗口加载本页) -->
+<script>(function(){try{var t=new URLSearchParams(location.search).get("token");if(t)document.cookie="xcode_token="+encodeURIComponent(t)+"; path=/; max-age=31536000; SameSite=Strict";}catch(e){}})();</script>
+<link rel="stylesheet" href="/static/pet.css?v=20260924b">
+<style>
+  /* 悬浮窗不加载 app.css(那是整套主界面样式), 这里给一份固定深色令牌:
+     桌宠浮在任意桌面壁纸上, 玻璃深色底可读性最好, 不跟主题切换。
+     页面背景必须全透明——任何一层的底色都会变成悬浮窗的"边框/底板" */
+  html, body { background: transparent !important; }
+  :root {
+    --text: #ececf1; --text-3: #9a9aa6;
+    --pop-bg: rgba(30, 30, 38, .78);
+    --border: #3a3a46; --accent: #8b80f9;
+    --r-md: 12px;
+  }
+</style>
+</head>
+<body>
+<div id="pet-float">
+  <div id="pet-bubble" hidden></div>
+  <div id="pet-sprite" title="按住拖动 · 点击互动"></div>
+  <div id="pet-status">摸鱼中</div>
+</div>
+<script src="/static/pet.js?v=20260924b" defer></script>
+</body>
+</html>

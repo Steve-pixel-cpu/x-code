@@ -20,7 +20,7 @@ use std::time::{Duration, Instant};
 
 use tauri::window::Effect;
 use tauri::utils::config::WindowEffectsConfig;
-use tauri::{AppHandle, Manager, RunEvent, WebviewUrl, WebviewWindowBuilder};
+use tauri::{AppHandle, Manager, RunEvent, WindowEvent, WebviewUrl, WebviewWindowBuilder};
 use tauri_plugin_opener::OpenerExt;
 
 /// 本壳拉起的后端子进程; None = 复用外部已运行的服务（退出时不杀）
@@ -422,6 +422,94 @@ fn start_drag_main(app: AppHandle) {
     }
 }
 
+// ---------- 桌宠悬浮窗（pet） ----------
+
+/// pet.html 的完整地址: 后端端口 + token。cb 时间戳与主窗同理,
+/// 绕开 WebView2 对同 URL 的启发式缓存（否则改版后可能加载旧页面）。
+fn pet_url(token: &str) -> String {
+    let cb = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    format!(
+        "http://127.0.0.1:{}/pet.html?token={}&cb={}",
+        read_port(),
+        urlencode(token),
+        cb
+    )
+}
+
+/// 开关桌宠悬浮窗: 没开着则创建——透明 + 无边框 + 置顶 + 不进任务栏,
+/// 尺寸只够放下 192x208 的精灵图、气泡与状态行; 已开着则关闭
+/// (再点一次桌宠按钮 = 收起)。
+/// 必须 async: 同步命令在主线程执行, 而 WebviewWindowBuilder::build()
+/// 内部要向主线程派发创建——同步形态自己等自己, 实测整个应用卡死
+/// (点了按钮页面无响应)。async 命令跑在异步线程池, 创建正常派发。
+#[tauri::command]
+async fn open_pet_window(app: AppHandle, token: String) -> Result<(), String> {
+    if let Some(win) = app.get_webview_window("pet") {
+        let _ = win.close();
+        return Ok(());
+    }
+    let url = pet_url(&token);
+    WebviewWindowBuilder::new(
+        &app,
+        "pet",
+        WebviewUrl::External(url.parse().map_err(|e| format!("桌宠地址非法: {e}"))?),
+    )
+    .title("x-code 桌宠")
+    .decorations(false)
+    .transparent(true)
+    .always_on_top(true)
+    .skip_taskbar(true)
+    .resizable(false)
+    .shadow(false)
+    .inner_size(236.0, 264.0)
+    // 右下角附近出生, 用户可拖到任意位置
+    .position(1200.0, 600.0)
+    .visible(true)
+    // 悬浮窗自身也需要桥: startDragPet（拖动）/ petClose（双击收起）/
+    // setClickThrough（右键穿透）都经 window.xcodeDesktopPet 走 IPC
+    .initialization_script(BRIDGE_JS)
+    .build()
+    .map_err(|e| format!("创建桌宠窗口失败: {e}"))?;
+    Ok(())
+}
+
+#[tauri::command]
+fn close_pet(app: AppHandle) {
+    if let Some(win) = app.get_webview_window("pet") {
+        let _ = win.close();
+    }
+}
+
+/// 按住宠物拖动 = 移动悬浮窗（复用系统级 start_dragging, 与自绘标题栏同源）
+#[tauri::command]
+fn start_drag_pet(app: AppHandle) {
+    if let Some(win) = app.get_webview_window("pet") {
+        let _ = win.start_dragging();
+    }
+}
+
+/// 鼠标穿透开关: 右键开启后点宠物以外的区域都落到下层窗口;
+/// 恢复靠主窗的召唤按钮（open_pet_window 会先关穿透）
+#[tauri::command]
+fn set_pet_click_through(app: AppHandle, ignore: bool) {
+    if let Some(win) = app.get_webview_window("pet") {
+        let _ = win.set_ignore_cursor_events(ignore);
+    }
+}
+
+/// 手动拖动: pet 页按指针位移调这里挪窗（逻辑坐标, 与 JS 的
+/// screenX/screenY 同参照）。必须 async——同步命令在主线程执行,
+/// set_position 又要向主线程派发, 会与 open_pet_window 同款互等卡死。
+#[tauri::command]
+async fn move_pet_window(app: AppHandle, x: f64, y: f64) {
+    if let Some(win) = app.get_webview_window("pet") {
+        let _ = win.set_position(tauri::LogicalPosition::new(x, y));
+    }
+}
+
 // ---------- 注入页面的桥（对齐 electron/preload.js） ----------
 
 /// 桌面桥: window.xcodeDesktop 标记（app.js 入口守卫依赖）+
@@ -472,6 +560,33 @@ const BRIDGE_JS: &str = r#"
       }
     };
   }
+  // 桌宠悬浮窗桥: petFloat 打开/聚焦悬浮窗（token 从本页 cookie 取——
+  // 后端门禁认它）; petClose 关窗; startDragPet 把拖动交给系统;
+  // setClickThrough 右键鼠标穿透。全部走"失败必须可见": reject 而非静默 null。
+  if (!window.xcodeDesktopPet) {
+    const petInvoke = async (cmd, payload) => {
+      if (!window.__TAURI_INTERNALS__) {
+        throw new Error('桌面桥未就绪（__TAURI_INTERNALS__ 缺失）');
+      }
+      try {
+        return await window.__TAURI_INTERNALS__.invoke(cmd, payload);
+      } catch (e) {
+        console.error('[xcode] ' + cmd + ' IPC 失败:', e);
+        throw e;
+      }
+    };
+    window.xcodeDesktopPet = {
+      petFloat: () => petInvoke('open_pet_window', {
+        token: (document.cookie.match(/(?:^|;\s*)xcode_token=([^;]*)/) || [])[1]
+          ? decodeURIComponent((document.cookie.match(/(?:^|;\s*)xcode_token=([^;]*)/) || [])[1])
+          : ''
+      }),
+      petClose: () => petInvoke('close_pet'),
+      startDragPet: () => petInvoke('start_drag_pet'),
+      setClickThrough: (ignore) => petInvoke('set_pet_click_through', { ignore: !!ignore }),
+      movePet: (x, y) => petInvoke('move_pet_window', { x: Number(x), y: Number(y) }),
+    };
+  }
   // 2) DOM 相关: 注入时机 documentElement 可能尚未创建 → 空值安全 + 就绪后补挂
   const installDom = () => {
     if (document.documentElement.dataset.xcodeDomInstalled) return;  // 重申幂等
@@ -517,7 +632,12 @@ fn main() {
             minimize_main,
             toggle_maximize_main,
             close_main,
-            start_drag_main
+            start_drag_main,
+            open_pet_window,
+            close_pet,
+            start_drag_pet,
+            set_pet_click_through,
+            move_pet_window
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
@@ -550,6 +670,16 @@ fn main() {
                 // 退出: 杀掉自己拉起的后端（复用的外部服务不动）
                 if let Some(child) = CHILD.lock().unwrap().take() {
                     kill_tree(child.id());
+                }
+            }
+            RunEvent::WindowEvent { label, event: WindowEvent::CloseRequested { .. }, .. }
+                if label == "main" =>
+            {
+                // 主窗关闭 = 整个应用退出: 桌宠窗若还开着, "所有窗口已关"
+                // 永远不成立, ExitRequested(杀后端清理)就不会来——壳和后端
+                // 双双残留。主窗关时把桌宠一并带上, 走正常退出路径。
+                if let Some(pet) = app.get_webview_window("pet") {
+                    let _ = pet.close();
                 }
             }
             _ => {}

@@ -15,6 +15,7 @@
 <link rel="stylesheet" href="/static/vendor/katex.min.css">
 <script src="/static/vendor/katex.min.js"></script>
 <link rel="stylesheet" href="/static/app.css?v=20260922h">
+<link rel="stylesheet" href="/static/pet.css?v=20260924b">
 </head>
 <body>
 
@@ -126,6 +127,10 @@
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3a9 9 0 100 18c1.1 0 2-.9 2-2 0-.5-.2-1-.5-1.3-.3-.4-.5-.8-.5-1.2 0-1.1.9-2 2-2h2.4A4.9 4.9 0 0021 11c-.5-4.5-4.3-8-9-8z"/><circle cx="7.5" cy="11" r="1.2"/><circle cx="10.5" cy="7.5" r="1.2"/><circle cx="15" cy="7.5" r="1.2"/></svg>
       外观
     </button>
+    <button class="menu-item nav-item" data-section="pets">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M6.2 8.4 4.4 3.8l4.9 2.9M17.8 8.4l1.8-4.6-4.9 2.9"/><circle cx="12" cy="13.2" r="6.4"/><circle cx="9.7" cy="12.8" r=".5" fill="currentColor"/><circle cx="14.3" cy="12.8" r=".5" fill="currentColor"/><path d="M10.8 15.4c.7.6 1.7.6 2.4 0"/></svg>
+      桌宠
+    </button>
     <button class="menu-item nav-item" data-section="models">
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="16" rx="3"/><path d="M9 4v16M4 9h16M4 15h16M15 4v16"/></svg>
       模型
@@ -147,6 +152,9 @@
     <span id="conn-state"><span class="dot"></span><span id="conn-text">连接中…</span></span>
     <button class="icon-btn" id="btn-music" data-tip="摸鱼电台">
       <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>
+    </button>
+    <button class="icon-btn" id="btn-pet" data-tip="桌宠" hidden>
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M6.2 8.4 4.4 3.8l4.9 2.9M17.8 8.4l1.8-4.6-4.9 2.9"/><circle cx="12" cy="13.2" r="6.4"/><circle cx="9.7" cy="12.8" r=".5" fill="currentColor"/><circle cx="14.3" cy="12.8" r=".5" fill="currentColor"/><path d="M10.8 15.4c.7.6 1.7.6 2.4 0"/></svg>
     </button>
     <button class="icon-btn js-open-settings" id="btn-settings" data-tip="设置">
       <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3.2"/><path d="M19.4 15a1.7 1.7 0 00.34 1.87l.06.06a2 2 0 11-2.83 2.83l-.06-.06a1.7 1.7 0 00-1.87-.34 1.7 1.7 0 00-1.03 1.56V21a2 2 0 11-4 0v-.09a1.7 1.7 0 00-1.11-1.56 1.7 1.7 0 00-1.87.34l-.06.06a2 2 0 11-2.83-2.83l.06-.06a1.7 1.7 0 00.34-1.87 1.7 1.7 0 00-1.56-1.03H3a2 2 0 110-4h.09a1.7 1.7 0 001.56-1.11 1.7 1.7 0 00-.34-1.87l-.06-.06a2 2 0 112.83-2.83l.06.06a1.7 1.7 0 001.87.34h.08a1.7 1.7 0 001.03-1.56V3a2 2 0 114 0v.09a1.7 1.7 0 001.03 1.56 1.7 1.7 0 001.87-.34l.06-.06a2 2 0 112.83 2.83l-.06.06a1.7 1.7 0 00-.34 1.87v.08a1.7 1.7 0 001.56 1.03H21a2 2 0 110 4h-.09a1.7 1.7 0 00-1.51 1.03z"/></svg>
@@ -342,6 +350,25 @@
         <input type="file" id="icon-file" accept="image/png,image/jpeg,image/webp" hidden>
       </div>
       </div>
+      <div class="sp-section-body" data-section="pets" style="display:none">
+        <div class="sp-section">桌宠</div>
+        <div class="sp-section-desc">桌面悬浮小窗，实时反映任务状态；兼容 Codex 宠物格式（pet.json + spritesheet 图集），把宠物文件夹放进下方目录即可识别，无需重启</div>
+        <div class="set-row">
+          <div class="set-info">
+            <div class="set-name">桌宠开关</div>
+            <div class="set-desc">召唤或收起桌宠；按住宠物即可拖动，点击打招呼</div>
+          </div>
+          <button type="button" class="icon-act" id="btn-pet-summon">召唤桌宠</button>
+        </div>
+        <div class="set-row pet-set-col">
+          <div class="set-info">
+            <div class="set-name">宠物列表</div>
+            <div class="set-desc" id="pet-dir">扫描安装目录与 ~/.codex/pets 中的宠物</div>
+          </div>
+          <button type="button" class="icon-act" id="btn-pet-dir">打开目录</button>
+          <div class="pet-picker" id="pet-picker"></div>
+        </div>
+      </div>
       <div class="sp-section-body" data-section="models" style="display:none">
         <div class="sp-section">模型</div>
         <div class="sp-section-desc">管理 API 供应商与模型列表；改动停顿后自动保存，立即可在会话中切换</div>
@@ -431,5 +458,6 @@
 
 <script src="/static/app.js?v=20260922h" defer></script>
 <script src="/static/music.js?v=20260921c" defer></script>
+<script src="/static/pet.js?v=20260924b" defer></script>
 </body>
 </html>

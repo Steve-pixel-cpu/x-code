@@ -222,7 +222,7 @@ async def no_cache_shell(request: Request, call_next):
     """页面壳与静态资源禁缓存: 前端迭代频繁, 保证刷新即最新（ETag 未变时仍 304）。"""
     response = await call_next(request)
     p = request.url.path
-    if p == "/" or p.startswith("/static"):
+    if p == "/" or p == "/pet.html" or p.startswith("/static"):
         response.headers["Cache-Control"] = "no-cache"
     return response
 
@@ -1292,6 +1292,13 @@ async def index():
     return FileResponse(STATIC_DIR / "index.html")
 
 
+@app.get("/pet.html", include_in_schema=False)
+async def pet_page():
+    # 桌宠悬浮窗页面（Tauri pet 窗口加载）; 与 index 同一令牌门禁,
+    # 页面自己用 ?token= 种 cookie, 不跑 app.js 因此不经过桌面壳守卫
+    return FileResponse(STATIC_DIR / "pet.html")
+
+
 @app.get("/favicon.ico", include_in_schema=False)
 async def favicon():
     # 浏览器/工具的默认图标请求路径兜底（页面里已用 <link> 指到 /api/icon）
@@ -1649,6 +1656,178 @@ async def api_music_url(id: int, br: int = 128000):
 @app.get("/api/music/lyric")
 async def api_music_lyric(id: int):
     return await _music_call(_music.song_lyric, id)
+
+
+# ============================================================================
+# REST: 桌宠（兼容 Codex 宠物格式: <pets>/<pet-id>/pet.json + spritesheet 图集）
+# ============================================================================
+
+# Codex 图集契约: 固定 1536 宽、8 列; v1 高 1872(9 行), v2 高 2288(11 行,
+# 末两行是环视——本次也接受, 前端只播 0-8 行)。单格 192×208。
+_PET_SHEET_WIDTH = 1536
+_PET_ROW_HEIGHT = 208
+_PET_ID_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+_PET_SHEET_FALLBACKS = ("spritesheet.webp", "spritesheet.png", "spritesheet.gif")
+_PET_SHEET_MEDIA = {".webp": "image/webp", ".png": "image/png", ".gif": "image/gif"}
+
+# id → 精灵图绝对路径, 每次 /api/pets 重扫时整体重建（事件循环内串行, 无锁）
+_pet_sheets: dict[str, Path] = {}
+
+
+def _pets_dirs() -> list[tuple[Path, str]]:
+    """宠物目录候选（按优先级, id 冲突靠前者胜）: 安装目录 → Codex 目录。
+    冻结态后端在 <安装>/resources/server/ 下, 向上两级是安装根(Tauri 布局,
+    pets 装在 <安装>/pets); Electron 布局资源落在 resources/pets 一并兼容。
+    源码态安装目录即仓库根 pets/。Codex 目录支持 CODEX_HOME 覆盖, 只读。
+    返回 (目录, 来源标签) 对, 来源供前端区分 install/codex。"""
+    codex_home = os.environ.get("CODEX_HOME") or str(Path.home() / ".codex")
+    codex = (Path(codex_home) / "pets", "codex")
+    if getattr(sys, "frozen", False):
+        server_dir = Path(sys.executable).resolve().parent
+        return [(server_dir.parent.parent / "pets", "install"),   # Tauri: <安装>/pets
+                (server_dir.parent / "pets", "install"),          # Electron: resources/pets
+                codex]
+    return [(Path(__file__).resolve().parent / "pets", "install"), codex]
+
+
+def _image_size(path: Path) -> Optional[tuple[int, int]]:
+    """读文件头取宽高（宠物图集只可能是 PNG/WebP/GIF 三种）。失败返回 None。"""
+    try:
+        head = path.read_bytes()[:32]
+    except OSError:
+        return None
+    if head.startswith(b"\x89PNG\r\n\x1a\n") and len(head) >= 24:
+        return (int.from_bytes(head[16:20], "big"),
+                int.from_bytes(head[20:24], "big"))
+    if head[:6] in (b"GIF87a", b"GIF89a") and len(head) >= 10:
+        return (int.from_bytes(head[6:8], "little"),
+                int.from_bytes(head[8:10], "little"))
+    if len(head) >= 30 and head[:4] == b"RIFF" and head[8:12] == b"WEBP":
+        if head[12:16] == b"VP8X":   # 扩展头: canvas 尺寸存 1 偏移的 3 字节
+            return (int.from_bytes(head[24:27], "little") + 1,
+                    int.from_bytes(head[27:30], "little") + 1)
+        if head[12:16] == b"VP8 ":   # 有损: 关键帧起始码后跟 14bit 宽高
+            return (int.from_bytes(head[26:28], "little") & 0x3FFF,
+                    int.from_bytes(head[28:30], "little") & 0x3FFF)
+        if head[12:16] == b"VP8L" and len(head) >= 25:   # 无损: 宽高拆位存 4 字节
+            b = head[21:25]
+            return (1 + (((b[1] & 0x3F) << 8) | b[0]),
+                    1 + (((b[3] & 0x0F) << 10) | (b[2] << 2) | ((b[1] & 0xC0) >> 6)))
+    return None
+
+
+def _scan_pet_folder(folder: Path, source: str) -> Optional[tuple[dict, Path]]:
+    """解析一个宠物文件夹: manifest 缺字段回退, 找到合规精灵图才算宠物。
+    manifest 的 spritesheetPath 必须仍解析在文件夹内——Codex 生态的防穿越
+    约定。返回 (信息, 精灵图路径) 或 None。"""
+    manifest: dict = {}
+    try:
+        loaded = json.loads((folder / "pet.json").read_text(encoding="utf-8"))
+        if isinstance(loaded, dict):
+            manifest = loaded
+    except (OSError, ValueError):
+        pass
+    sheet: Optional[Path] = None
+    rel = manifest.get("spritesheetPath")
+    if isinstance(rel, str) and rel:
+        cand = (folder / rel).resolve()
+        try:
+            cand.relative_to(folder.resolve())
+        except ValueError:
+            cand = None
+        if cand and cand.is_file():
+            sheet = cand
+    if sheet is None:
+        for name in _PET_SHEET_FALLBACKS:
+            if (folder / name).is_file():
+                sheet = folder / name
+                break
+    if sheet is None:
+        return None
+    size = _image_size(sheet)
+    # 图集契约硬校验: 宽 1536、高是 208 的整数倍且行数只认 9(v1)/11(v2)
+    if (not size or size[0] != _PET_SHEET_WIDTH
+            or size[1] % _PET_ROW_HEIGHT
+            or size[1] // _PET_ROW_HEIGHT not in (9, 11)):
+        return None
+    pid = folder.name
+    name = manifest.get("displayName")
+    desc = manifest.get("description")
+    return ({"id": pid,
+             "displayName": name.strip() if isinstance(name, str) and name.strip() else pid,
+             "description": desc.strip() if isinstance(desc, str) else "",
+             "source": source,
+             "rows": size[1] // _PET_ROW_HEIGHT},
+            sheet)
+
+
+def _list_pets() -> dict:
+    """扫描全部宠物目录。首个候选(安装目录)顺手建出来——用户要往里放宠物;
+    其余目录(含 Codex 的)只读, 不存在就跳过。"""
+    dirs = _pets_dirs()
+    with suppress(OSError):
+        dirs[0][0].mkdir(parents=True, exist_ok=True)
+    pets: list[dict] = []
+    sheets: dict[str, Path] = {}
+    seen: set[str] = set()
+    for d, source in dirs:
+        try:
+            entries = sorted(d.iterdir())
+        except OSError:
+            continue
+        for folder in entries:
+            pid = folder.name
+            if (pid in seen or not folder.is_dir()
+                    or not _PET_ID_RE.match(pid)):
+                continue
+            found = _scan_pet_folder(folder, source)
+            if found:
+                info, sheet = found
+                seen.add(pid)
+                sheets[pid] = sheet
+                pets.append(info)
+    _pet_sheets.clear()
+    _pet_sheets.update(sheets)
+    return {"petsDir": str(dirs[0][0]), "pets": pets}
+
+
+@app.get("/api/pets")
+async def api_pets():
+    """桌宠列表: 安装目录 + ~/.codex/pets 里所有符合图集契约的宠物。"""
+    return _list_pets()
+
+
+@app.get("/api/pets/{pid}/sheet")
+async def api_pet_sheet(pid: str):
+    """宠物精灵图。id 只认白名单字符, 杜绝路径穿越; 命中不了缓存就重扫一次
+    （进程启动后才放进目录的宠物不必重启）。"""
+    if not _PET_ID_RE.match(pid):
+        raise HTTPException(status_code=404, detail="宠物不存在")
+    sheet = _pet_sheets.get(pid)
+    if sheet is None:
+        _list_pets()
+        sheet = _pet_sheets.get(pid)
+    if sheet is None or not sheet.is_file():
+        raise HTTPException(status_code=404, detail="宠物不存在")
+    return FileResponse(sheet, media_type=_PET_SHEET_MEDIA.get(sheet.suffix.lower(), "application/octet-stream"))
+
+
+@app.post("/api/pets/open-dir")
+async def api_pets_open_dir():
+    """设置页「打开目录」: 在系统文件管理器里打开宠物目录,
+    用户把宠物文件夹直接丢进去即可(与 /api/open-config 同一套打法)。"""
+    d = _pets_dirs()[0][0]
+    d.mkdir(parents=True, exist_ok=True)
+    try:
+        if sys.platform == "win32":
+            os.startfile(str(d))
+        elif sys.platform == "darwin":
+            subprocess.Popen(["open", str(d)])
+        else:
+            subprocess.Popen(["xdg-open", str(d)])
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"打开失败: {e}")
+    return {"ok": True}
 
 
 @app.get("/api/ping")

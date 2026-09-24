@@ -1,0 +1,219 @@
+/* ============================================================
+   x-code 桌宠样式(兼容 Codex 宠物格式)
+   两个运行环境共用本文件:
+     - pet.html 悬浮窗: #pet-float 布局, 自带固定深色令牌(见 pet.html)
+     - index.html 主界面: 设置→外观 的宠物选择器(.pet-picker)
+   精灵图渲染方式与 Codex 一致: 固定行列的 CSS background-position,
+   逐帧时长由 pet.js 驱动(行/帧表是 Codex 官方契约)。
+   ============================================================ */
+
+/* ---------- 悬浮窗(pet.html) ---------- */
+#pet-float {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-end;
+  padding-bottom: 6px;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+#pet-sprite {
+  width: 192px;
+  height: 208px;
+  background-repeat: no-repeat;
+  background-size: 1536px auto;   /* 单行宽; 高度按 rows 自适应 */
+  cursor: grab;
+  filter: drop-shadow(0 6px 10px rgba(0, 0, 0, .35));
+  will-change: transform;
+  transform-origin: 50% 82%;      /* 拖动倾斜/落地回弹的支点在脚部 */
+}
+#pet-sprite:active { cursor: grabbing; }
+#pet-sprite.pet-land {
+  animation: pet-land .38s ease-out;
+}
+@keyframes pet-land {
+  0%   { transform: scale(1.08, .8); }    /* 落地压扁 */
+  55%  { transform: scale(.94, 1.08); }   /* 弹起拉伸 */
+  100% { transform: none; }
+}
+
+/* 拖动扬尘: pet.js 在脚边生成的灰粒, 飘散后自行移除 */
+.dust-puff {
+  position: absolute;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: rgba(205, 205, 220, .5);
+  pointer-events: none;
+  animation: dust-fade .6s ease-out forwards;
+}
+@keyframes dust-fade {
+  to {
+    transform: translate(var(--dx, 0px), -12px) scale(.3);
+    opacity: 0;
+  }
+}
+
+#pet-status {
+  margin-top: 2px;
+  font-size: 11px;
+  line-height: 1;
+  color: var(--text);
+  background: var(--pop-bg);
+  border-radius: 999px;
+  padding: 4px 10px;
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  opacity: .92;
+  pointer-events: none;   /* 状态行不挡拖动 */
+}
+
+#pet-bubble {
+  position: absolute;
+  bottom: 232px;                     /* 精灵图(208) + 状态行上方 */
+  left: 50%;
+  transform: translateX(-50%);
+  max-width: 200px;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--text);
+  background: var(--pop-bg);
+  border-radius: var(--r-md);
+  padding: 7px 10px;
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, .3);
+  word-break: break-all;
+  pointer-events: none;
+  animation: pet-bubble-in .18s ease-out;
+}
+#pet-bubble::after {                 /* 气泡小尾巴(同底色方块旋转 45°) */
+  content: "";
+  position: absolute;
+  left: 50%;
+  bottom: -4px;
+  width: 8px;
+  height: 8px;
+  transform: translateX(-50%) rotate(45deg);
+  background: var(--pop-bg);
+}
+#pet-bubble.bubble-dim { color: var(--text-3); }
+#pet-bubble[hidden] { display: none; }
+
+@keyframes pet-bubble-in {
+  from { opacity: 0; transform: translateX(-50%) translateY(4px); }
+  to   { opacity: 1; transform: translateX(-50%) translateY(0); }
+}
+
+/* ---------- 主界面: 设置→桌宠 的宠物列表 ---------- */
+.pet-set-col { display: block; }
+#pet-dir {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-3);
+  word-break: break-all;
+}
+
+#pet-picker {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.pet-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  cursor: pointer;
+  transition: border-color .15s, background .15s;
+}
+.pet-item:hover { background: var(--hover); border-color: var(--border-strong); }
+.pet-item.on {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.pet-item-thumb {
+  position: relative;
+  width: 46px;
+  height: 50px;
+  overflow: hidden;
+  border-radius: 8px;
+  flex: none;
+  background:
+    linear-gradient(45deg, var(--surface-3) 25%, transparent 25%, transparent 75%, var(--surface-3) 75%),
+    linear-gradient(45deg, var(--surface-3) 25%, transparent 25%, transparent 75%, var(--surface-3) 75%);
+  background-size: 12px 12px;
+  background-position: 0 0, 6px 6px;
+}
+.pet-item-thumb .pet-sprite-mini {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 192px;
+  height: 208px;
+  background-repeat: no-repeat;
+  transform: scale(.24);
+  transform-origin: 0 0;
+}
+
+.pet-item-info { min-width: 0; flex: 1; }
+.pet-item-name {
+  font-size: 13px;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.pet-item-desc {
+  font-size: 11px;
+  color: var(--text-3);
+  margin-top: 3px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.pet-item-badge {
+  flex: none;
+  font-size: 10px;
+  color: var(--text-3);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 2px 8px;
+}
+.pet-item.on .pet-item-badge {
+  color: var(--accent);
+  border-color: var(--accent-border);
+}
+/* 选中态的圆形对勾 */
+.pet-item-check {
+  flex: none;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  border: 1.5px solid var(--border-strong);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: transparent;
+  transition: background .15s, border-color .15s, color .15s;
+}
+.pet-item.on .pet-item-check {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
+.pet-list-empty {
+  font-size: 12px;
+  color: var(--text-3);
+  padding: 4px 0;
+}

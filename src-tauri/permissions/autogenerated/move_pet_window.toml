@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-move-pet-window"
+description = "Enables the move_pet_window command without any pre-configured scope."
+commands.allow = ["move_pet_window"]
+
+[[permission]]
+identifier = "deny-move-pet-window"
+description = "Denies the move_pet_window command without any pre-configured scope."
+commands.deny = ["move_pet_window"]

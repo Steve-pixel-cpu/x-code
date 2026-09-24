@@ -89,6 +89,11 @@ if not exist src-tauri\server mkdir src-tauri\server
 copy /y build\server\x-code-server.exe src-tauri\server\
 if errorlevel 1 exit /b 1
 
+REM 桌宠资产随包: pets\ -> src-tauri\pets\(tauri.conf resources 再装到 安装目录\pets\)
+REM robocopy 返回码 >=8 才是失败, 1 表示有文件被复制——不能当错误退出
+robocopy pets src-tauri\pets /E /NFL /NDL /NJH /NJS >nul
+if errorlevel 8 exit /b 1
+
 echo.
 echo ====== Tauri [2/2] Building desktop app (NSIS installer) ======
 call npx tauri build

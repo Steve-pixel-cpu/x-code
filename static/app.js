@@ -1535,6 +1535,7 @@ async function selectSession(id) {
   state.draft = false;
   state.draftMode = null;       // 草稿态预选的模式作废: 不带到别的会话
   state.sessionId = id;
+  localStorage.setItem("xc-cur-session", id);   // 桌宠悬浮窗直连 WS 回退时用
   $("pane").classList.remove("empty-view");   // 真实会话: 输入卡回到常规底部布局
   renderDraftChrome();                        // 顺带清掉草稿态的工作区条/建议 chips
   const run = runOf(id);
@@ -1883,6 +1884,8 @@ function scheduleReconnect(id) {
  * ============================================================ */
 function handleServerMessage(msg, sid) {
   const run = runOf(sid);
+  // 桌宠悬浮窗(pet.js 转发): 前后台会话的运行事件都镜像一份给它做状态机
+  window.xcodePet?.onEvent?.(msg);
   // 继续聊天 = 隐性否决未决计划: 服务端此时会把旧计划自动拒绝并叫停当前轮
   // （见 server 的 user 分支）, turn_interrupting/turn_started 到达即收口 UI——
   // 计划卡与右侧面板按钮定格"已过期", 正文淡化。前后台会话都要收口。

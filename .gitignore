@@ -45,3 +45,6 @@ test_storage/
 
 # 打包中间产物: 由 build-exe.cmd 从 build/server/ 复制, 不入库
 src-tauri/server/
+
+# 宠物资产打包中间产物: 由 build-exe.cmd 从 pets/ 复制(仓库根 pets/ 是源)
+src-tauri/pets/
