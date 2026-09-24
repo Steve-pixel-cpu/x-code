@@ -12,6 +12,7 @@ dependencies = [
     "tzdata>=2026.4",
     "trafilatura>=2.0",
     "websearch-py>=0.1.0",
+    "playwright>=1.49",
 ]
 
 [dependency-groups]

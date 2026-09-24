@@ -46,6 +46,15 @@ WebView2 窗口加载本地服务；如果 8000 端口已有 x-code 在跑则直
 `~/.x-code/port`；桌面壳读取该文件动态访问，无需人工干预。想固定端口可给后端传
 `--port` 参数或设置 `XCODE_PORT` 环境变量。
 
+## 桌面端的浏览器测试工具
+
+桌面版自带 `browser_navigate` / `browser_snapshot` / `browser_click` /
+`browser_type` / `browser_console` 等浏览器工具（Playwright 驱动 headless
+Chromium），Agent 可实际操作 Web 系统做功能测试。冻结后端已把 Playwright
+driver 打进 exe（`--collect-all playwright`），无需 `playwright install`：
+启动渠道自动回退 chromium → 本机 Chrome → 本机 Edge（Win10/11 必有 Edge，
+等效零额外下载）；`XCODE_BROWSER_CHANNEL` 环境变量可强制指定渠道。
+
 ## 分发给别人时要带的配置
 
 不需要带任何配置文件。拿到 exe 的人首次打开会进入**初始化页**，填入 API Key

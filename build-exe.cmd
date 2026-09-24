@@ -56,11 +56,16 @@ if errorlevel 1 exit /b 1
 
 echo.
 echo ====== [2/2] Freezing Python backend (static/ bundled, uvicorn hidden imports) ======
+REM --collect-all playwright: 浏览器工具的 driver(node.exe+脚本, ~100MB)是包内
+REM 数据文件, PyInstaller 静态分析看不到, 必须显式收集, 否则冻结后 browser_* 工具
+REM 报 "Executable doesn't exist" / driver 缺失。桌面端浏览器用本机 Edge/Chrome
+REM 渠道兜底(见 browser_tools._launch), 无需 playwright install。
 if not exist build\server mkdir build\server
 .venv\Scripts\python.exe -m PyInstaller --noconfirm --clean --onefile ^
   --name x-code-server ^
   --distpath build\server --workpath build\pyinstaller --specpath build\pyinstaller ^
   --add-data "%~dp0static;static" --add-data "%~dp0pyproject.toml;." ^
+  --collect-all playwright ^
   --hidden-import uvicorn.logging ^
   --hidden-import uvicorn.loops ^
   --hidden-import uvicorn.loops.asyncio ^

@@ -148,7 +148,7 @@ async function createWindow() {
     if (!(await waitServer(30000))) {
       dialog.showErrorBox(
         "x-code 启动失败",
-        "Python 后端在 30 秒内未能就绪。\n若 8000–8019 端口被其他程序（如 C-Lodop 打印服务）占用, 请关闭后重试。"
+        "Python 后端在 30 秒内未能就绪。\n若 8000–8019 端口被其他程序占用, 请关闭后重试。"
       );
       app.quit();
       return;
