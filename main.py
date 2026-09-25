@@ -785,6 +785,21 @@ def display_title(store: SessionStore, session_id: str) -> str:
     return store.get_title(session_id) or UNTITLED
 
 
+def notify_done() -> None:
+    """一轮对话正常结束的终端提醒: Windows 弹系统提示音, 其他平台响终端铃。
+    尽力而为, 任何失败静默吞掉——提醒不该把 REPL 搞挂。"""
+    try:
+        if sys.platform == "win32":
+            import winsound
+            # MB_ICONASTERISK = 系统星号提示音, 比 Beep 的蜂鸣柔和
+            winsound.MessageBeep(winsound.MB_ICONASTERISK)
+        else:
+            sys.stdout.write("\a")
+            sys.stdout.flush()
+    except Exception:
+        pass
+
+
 def repair_interrupted_turn(session: Session) -> None:
     """中断后修补会话尾: 若 assistant 带着未答复的 tool_use, 补 error
     result——否则下一次请求(以及 resume)会因悬空 tool_use 被 API 拒绝。
@@ -875,6 +890,7 @@ def run_repl(runtime: ConversationRuntime,
             summary = None
             try:
                 summary = runtime.run_turn(text, prompter)
+                notify_done()   # 正常返回即干完: 提示音/终端铃, 异常路径不响
             except KeyboardInterrupt:
                 # Ctrl+C 只中断本轮, 不退出 REPL; 修补悬空 tool_use 后照常落盘
                 print()

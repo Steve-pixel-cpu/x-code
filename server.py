@@ -1797,7 +1797,10 @@ def _list_pets() -> dict:
 @app.get("/api/pets")
 async def api_pets():
     """桌宠列表: 安装目录 + ~/.codex/pets 里所有符合图集契约的宠物。"""
-    return _list_pets()
+    # no-store: 列表必须每次回源。WebView2 的启发式缓存会把无缓存头的响应
+    # 存下来——悬浮窗启动拉旧列表, 刷新进来的新宠物"不存在", 选它唤醒白屏,
+    # 得重启应用才恢复(实测)。
+    return JSONResponse(_list_pets(), headers={"Cache-Control": "no-store"})
 
 
 @app.get("/api/pets/{pid}/sheet")
@@ -1812,7 +1815,12 @@ async def api_pet_sheet(pid: str):
         sheet = _pet_sheets.get(pid)
     if sheet is None or not sheet.is_file():
         raise HTTPException(status_code=404, detail="宠物不存在")
-    return FileResponse(sheet, media_type=_PET_SHEET_MEDIA.get(sheet.suffix.lower(), "application/octet-stream"))
+    # no-cache: 图集允许缓存但要回源验证, 替换图集后各窗口能拿到新图
+    return FileResponse(
+        sheet,
+        media_type=_PET_SHEET_MEDIA.get(sheet.suffix.lower(), "application/octet-stream"),
+        headers={"Cache-Control": "no-cache"},
+    )
 
 
 @app.post("/api/pets/open-dir")
