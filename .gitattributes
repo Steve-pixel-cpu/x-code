@@ -1,0 +1,7 @@
+# 行尾统一: 本仓库在 Windows 开发, core.autocrlf 会把工作区转成 CRLF,
+# 导致 Cargo/uv 的生成文件(toml/lock)每次被工具重新写出 LF 后就显示为
+# 已修改(纯行尾噪音)。以下文件固定 LF——工具链全部接受 LF。
+*.toml text eol=lf
+Cargo.lock text eol=lf
+uv.lock text eol=lf
+package-lock.json text eol=lf
