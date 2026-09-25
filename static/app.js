@@ -1000,12 +1000,15 @@ if (DESKTOP) {
   $("tb-max").onclick = () => tbInvoke("toggle_maximize_main");
   $("tb-close").onclick = () => tbInvoke("close_main");
   const tbar = $("titlebar");
+  // 徽标(.tb-ver)可点击打开更新弹窗, 必须与 .tb-btn 一样排除在拖拽外——
+  // 否则 mousedown 触发 start_drag_main 进入系统拖拽循环, click 永远不触发
+  const TB_INTERACTIVE = ".tb-btn, .tb-ver";
   tbar.addEventListener("mousedown", e => {
-    if (e.button !== 0 || e.target.closest(".tb-btn")) return;
+    if (e.button !== 0 || e.target.closest(TB_INTERACTIVE)) return;
     tbInvoke("start_drag_main");
   });
   tbar.addEventListener("dblclick", e => {
-    if (e.target.closest(".tb-btn")) return;
+    if (e.target.closest(TB_INTERACTIVE)) return;
     tbInvoke("toggle_maximize_main");
   });
 }
