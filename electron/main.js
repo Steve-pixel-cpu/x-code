@@ -209,6 +209,8 @@ const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) {
   app.quit();
 } else {
+  // Windows 通知必需: 不设 AppUserModelID 的话 Web Notification toast 显示异常
+  if (process.platform === "win32") app.setAppUserModelId("com.xcode.desktop");
   // 系统原生"选择文件夹"对话框（渲染层经 preload 桥调用）
   ipcMain.handle("pick-folder", async () => {
     const opts = { title: "选择文件夹", properties: ["openDirectory"] };

@@ -385,6 +385,78 @@ function showCol(id) {
 }
 
 /* ============================================================
+ * 完成通知: 提示音(WebAudio 合成) + 系统桌面通知, localStorage 持久化
+ * 值: "1" 开 / "0" 关; 未设置时默认开
+ * ============================================================ */
+const NOTIFY_SOUND_KEY = "xc-notify-sound";
+const NOTIFY_DESKTOP_KEY = "xc-notify-desktop";
+function notifySoundPref() { return localStorage.getItem(NOTIFY_SOUND_KEY) !== "0"; }
+function notifyDesktopPref() { return localStorage.getItem(NOTIFY_DESKTOP_KEY) !== "0"; }
+
+/* 双音阶提示音: 正弦波 + 指数衰减, 约 0.6s。AudioContext 必须在用户手势
+ * 之后才能出声——首次交互时 resume 预热, 之后轮次结束可直接播。 */
+let _chimeCtx = null;
+function chimeCtx() {
+  if (!_chimeCtx) _chimeCtx = new (window.AudioContext || window.webkitAudioContext)();
+  if (_chimeCtx.state === "suspended") _chimeCtx.resume();
+  return _chimeCtx;
+}
+document.addEventListener("pointerdown", () => { try { chimeCtx(); } catch {} }, { once: true });
+
+function playChime() {
+  try {
+    const ctx = chimeCtx();
+    const t0 = ctx.currentTime;
+    // 两声上行（E5→A5）: 干完活上扬收尾, 比"叮"单音更醒目又不刺耳
+    [[659.25, 0], [880, 0.18]].forEach(([freq, offset]) => {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = "sine";
+      osc.frequency.value = freq;
+      gain.gain.setValueAtTime(0.0001, t0 + offset);
+      gain.gain.exponentialRampToValueAtTime(0.22, t0 + offset + 0.02);
+      gain.gain.exponentialRampToValueAtTime(0.0001, t0 + offset + 0.5);
+      osc.connect(gain).connect(ctx.destination);
+      osc.start(t0 + offset);
+      osc.stop(t0 + offset + 0.55);
+    });
+  } catch (e) { console.warn("提示音播放失败", e); }
+}
+
+/* 桌面通知权限: 只在用户手势上下文（开关/测试按钮）里申请, 静默页面
+ * 自动弹权限框会被浏览器拒掉。返回当前权限态。 */
+function ensureNotifyPermission() {
+  if (!("Notification" in window)) return "denied";
+  if (Notification.permission === "default") Notification.requestPermission();
+  return Notification.permission;
+}
+
+/* 轮次收尾统一通知入口（turn_done / error, 前台后台会话都经过这里）:
+ * 手动打断不提醒; 声音开关开了就播; 桌面弹窗只在窗口不可见或该会话
+ * 在后台时弹——人正盯着这个会话时不打扰。 */
+function notifyTurnEnd(msg, sid) {
+  if (msg.type === "turn_done" && msg.interrupted) return;
+  if (notifySoundPref()) playChime();
+  if (!notifyDesktopPref() || !("Notification" in window)) return;
+  if (Notification.permission !== "granted") return;
+  const visibleHere = sid === state.sessionId
+    && document.visibilityState === "visible"
+    && !document.hidden;
+  if (visibleHere) return;
+  const s = state.sessions.find(x => x.id === sid);
+  const title = (s?.name || s?.title || "会话") + " · 任务完成";
+  const body = msg.type === "error" ? ("出错了: " + (msg.message || "未知错误")) : "本轮已结束, 回来看看结果";
+  try {
+    const n = new Notification(title, { body, tag: "xcode-turn-" + sid, silent: true });
+    n.onclick = () => {
+      window.focus();
+      if (sid !== state.sessionId) selectSession(sid);
+      n.close();
+    };
+  } catch (e) { console.warn("桌面通知失败", e); }
+}
+
+/* ============================================================
  * 主题: dark | light | system（跟随系统），localStorage 持久化
  * ============================================================ */
 const THEME_KEY = "xc-theme";
@@ -1886,6 +1958,9 @@ function handleServerMessage(msg, sid) {
   const run = runOf(sid);
   // 桌宠悬浮窗(pet.js 转发): 前后台会话的运行事件都镜像一份给它做状态机
   window.xcodePet?.onEvent?.(msg);
+  // 完成通知（提示音 + 桌面弹窗）: turn_done/error 是轮次终点, 前台/后台
+  // 两条路径都从这里过, 单点挂钩全覆盖。内部自己判断"该不该响/该不该弹"。
+  if (msg.type === "turn_done" || msg.type === "error") notifyTurnEnd(msg, sid);
   // 继续聊天 = 隐性否决未决计划: 服务端此时会把旧计划自动拒绝并叫停当前轮
   // （见 server 的 user 分支）, turn_interrupting/turn_started 到达即收口 UI——
   // 计划卡与右侧面板按钮定格"已过期", 正文淡化。前后台会话都要收口。
@@ -4349,6 +4424,33 @@ const themeDd = makeDropdown($("sel-theme"), {
     syncAccentInput();
   },
 });
+
+/* ---------- 通知: 完成提示音 + 桌面通知, 开关即时生效并持久化 ---------- */
+const ONOFF_ITEMS = [{ value: "1", label: "开启" }, { value: "0", label: "关闭" }];
+const writeBoolPref = key => v => localStorage.setItem(key, v);
+const soundDd = makeDropdown($("sel-notify-sound"), {
+  items: ONOFF_ITEMS, value: notifySoundPref() ? "1" : "0",
+  onChange: writeBoolPref(NOTIFY_SOUND_KEY),
+});
+const desktopDd = makeDropdown($("sel-notify-desktop"), {
+  items: ONOFF_ITEMS, value: notifyDesktopPref() ? "1" : "0",
+  onChange: v => {
+    writeBoolPref(NOTIFY_DESKTOP_KEY)(v);
+    if (v === "1") {
+      // 用户手势上下文里才申请权限（浏览器禁止静默弹权限框）
+      if (ensureNotifyPermission() !== "granted") toast("浏览器未授予通知权限，弹窗将不生效");
+    }
+  },
+});
+$("btn-notify-test").onclick = () => {
+  playChime();
+  // 未授权时回落 toast, 让用户立刻知道桌面弹窗这条路通不通
+  if ("Notification" in window && Notification.permission !== "granted") {
+    ensureNotifyPermission();
+    toast("已播放提示音；桌面通知未授权" +
+      (Notification.permission === "denied" ? "（被浏览器拒绝）" : "，可再点一次确认授权"));
+  }
+};
 
 /* ---------- 强调颜色: 预设色板 + 自定义调色盘, 覆盖 --accent 令牌 ---------- */
 const ACCENT_KEY = "xc-accent";

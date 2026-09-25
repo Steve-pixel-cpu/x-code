@@ -14,7 +14,7 @@
 <script src="/static/vendor/highlight.min.js"></script>
 <link rel="stylesheet" href="/static/vendor/katex.min.css">
 <script src="/static/vendor/katex.min.js"></script>
-<link rel="stylesheet" href="/static/app.css?v=20260924a"><link rel="stylesheet" href="/static/pet.css?v=20260924f">
+<link rel="stylesheet" href="/static/app.css?v=20260924a"><link rel="stylesheet" href="/static/pet.css?v=20260925a">
 </head>
 <body>
 
@@ -125,6 +125,10 @@
     <button class="menu-item nav-item on" data-section="appearance">
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3a9 9 0 100 18c1.1 0 2-.9 2-2 0-.5-.2-1-.5-1.3-.3-.4-.5-.8-.5-1.2 0-1.1.9-2 2-2h2.4A4.9 4.9 0 0021 11c-.5-4.5-4.3-8-9-8z"/><circle cx="7.5" cy="11" r="1.2"/><circle cx="10.5" cy="7.5" r="1.2"/><circle cx="15" cy="7.5" r="1.2"/></svg>
       外观
+    </button>
+    <button class="menu-item nav-item" data-section="notify">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8a6 6 0 10-12 0c0 7-3 8-3 8h18s-3-1-3-8"/><path d="M13.7 20a2 2 0 01-3.4 0"/></svg>
+      通知
     </button>
     <button class="menu-item nav-item" data-section="pets">
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M6.2 8.4 4.4 3.8l4.9 2.9M17.8 8.4l1.8-4.6-4.9 2.9"/><circle cx="12" cy="13.2" r="6.4"/><circle cx="9.7" cy="12.8" r=".5" fill="currentColor"/><circle cx="14.3" cy="12.8" r=".5" fill="currentColor"/><path d="M10.8 15.4c.7.6 1.7.6 2.4 0"/></svg>
@@ -353,6 +357,31 @@
         <input type="file" id="icon-file" accept="image/png,image/jpeg,image/webp" hidden>
       </div>
       </div>
+      <div class="sp-section-body" data-section="notify" style="display:none">
+        <div class="sp-section">通知</div>
+        <div class="sp-section-desc">一轮任务结束时提醒你；提示音由浏览器现场合成，桌面通知在窗口最小化或切到别的会话时才会弹出</div>
+        <div class="set-row">
+          <div class="set-info">
+            <div class="set-name">完成提示音</div>
+            <div class="set-desc">任务结束时播放一声短促的双音提示（手动停止不响）</div>
+          </div>
+          <button type="button" class="dd set-dd" id="sel-notify-sound">
+            <span class="dd-label">开启</span>
+            <span class="dd-chev"><svg width="9" height="6" viewBox="0 0 9 6" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M1 1l3.5 3.5L8 1"/></svg></span>
+          </button>
+        </div>
+        <div class="set-row">
+          <div class="set-info">
+            <div class="set-name">桌面通知</div>
+            <div class="set-desc">任务结束时弹系统通知，点击可跳回对应会话；首次开启需允许浏览器通知权限</div>
+          </div>
+          <button type="button" class="dd set-dd" id="sel-notify-desktop">
+            <span class="dd-label">开启</span>
+            <span class="dd-chev"><svg width="9" height="6" viewBox="0 0 9 6" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M1 1l3.5 3.5L8 1"/></svg></span>
+          </button>
+          <button type="button" class="icon-act" id="btn-notify-test">测试</button>
+        </div>
+      </div>
       <div class="sp-section-body" data-section="pets" style="display:none">
         <div class="sp-section">桌宠</div>
         <div class="sp-section-desc">桌面悬浮小窗，实时反映任务状态；兼容 Codex 宠物格式（pet.json + spritesheet 图集），把宠物文件夹放进下方目录即可识别，无需重启</div>
@@ -475,7 +504,7 @@
   </div>
 </div>
 
-<script src="/static/app.js?v=20260924a" defer></script>
+<script src="/static/app.js?v=20260924b" defer></script>
 <script src="/static/music.js?v=20260921c" defer></script>
 <script src="/static/pet.js?v=20260924f" defer></script>
 </body>
