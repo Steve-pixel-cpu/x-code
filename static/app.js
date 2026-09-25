@@ -730,6 +730,152 @@ function promptDialog(msg, { title = "输入", value = "", placeholder = "", okT
 }
 
 /* ============================================================
+ * 自动更新（仅桌面壳, 经 window.xcodeDesktopUpdater 桥调 Rust 命令）:
+ *  - 启动后静默检查一次（check_update）; 发现新版本 → 版本徽标加红点 + toast 提示
+ *  - 点标题栏版本徽标 = 有更新则打开更新弹窗, 无更新则手动检查一次
+ *  - 立即更新 → install_update, 前端 300ms 轮询 update_status 画进度条;
+ *    下载完自动拉起 NSIS 安装器（passive）, 壳重启到新版本
+ * 失败可见性: 手动检查失败必提示; 启动静默检查失败不弹（可能只是没网）。
+ * ============================================================ */
+const UPD = {
+  checking: false,
+  info: null,        // check_update 返回 { hasUpdate, currentVersion, version, notes }
+  pollTimer: null,
+};
+
+function fmtMB(n) {
+  if (!n) return "?";
+  return (n / 1048576).toFixed(1) + " MB";
+}
+
+function updateBadgeMark(on, verText) {
+  const badge = $("tb-version");
+  if (!badge) return;
+  badge.classList.toggle("up", !!on);
+  badge.title = on ? `发现新版本 v${verText}, 点击更新` : "检查更新";
+}
+
+async function checkForUpdates(manual = false) {
+  if (!window.xcodeDesktopUpdater || UPD.checking) return null;
+  UPD.checking = true;
+  try {
+    const info = await window.xcodeDesktopUpdater.check();
+    UPD.info = info;
+    if (info && info.hasUpdate) {
+      updateBadgeMark(true, info.version);
+      if (manual) openUpdateDialog();
+      else toast(`发现新版本 v${info.version}, 点击标题栏版本号更新`, 3600);
+    } else {
+      updateBadgeMark(false);
+      if (manual) toast(`已是最新版本（v${info.currentVersion}）`);
+    }
+    return info;
+  } catch (e) {
+    if (manual) toast("检查更新失败: " + (e?.message || e));
+    return null;
+  } finally {
+    UPD.checking = false;
+  }
+}
+
+function initUpdateCheck() {
+  if (!window.xcodeDesktopUpdater) return;   // 浏览器/源码运行: 无壳
+  const badge = $("tb-version");
+  if (badge) badge.addEventListener("click", () => {
+    if (UPD.info && UPD.info.hasUpdate) openUpdateDialog();
+    else checkForUpdates(true);
+  });
+  checkForUpdates(false);   // 启动静默检查
+}
+
+function openUpdateDialog() {
+  const info = UPD.info;
+  if (!info || !info.hasUpdate || $("update-overlay")) return;
+  const ov = document.createElement("div");
+  ov.id = "update-overlay";
+  ov.style.display = "flex";
+  ov.innerHTML =
+    '<div id="update-modal" role="alertdialog" aria-modal="true">' +
+      '<div id="update-title">' +
+        '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-9-9"/><path d="M21 3v6h-6"/></svg>' +
+        '<span>发现新版本</span>' +
+      '</div>' +
+      '<div id="update-versions">v' + escapeHtml(info.currentVersion || "?") +
+        ' <span class="upd-arrow">→</span> v' + escapeHtml(info.version || "?") + '</div>' +
+      '<div id="update-notes">' + (info.notes ? escapeHtml(info.notes) : "") + '</div>' +
+      '<div id="update-progress" hidden><div id="update-progress-bar"></div></div>' +
+      '<div id="update-status-text"></div>' +
+      '<div id="update-actions">' +
+        '<button type="button" data-act="cancel">以后再说</button>' +
+        '<button type="button" data-act="ok">立即更新</button>' +
+      '</div>' +
+    '</div>';
+  document.body.appendChild(ov);
+  const onEsc = e => {
+    // 下载中不允许关（Rust 侧无取消接口, 关了下载还在跑只会更困惑）
+    if (e.key === "Escape" && !ov.dataset.busy) closeUpdateDialog(ov);
+  };
+  ov._onEsc = onEsc;
+  document.addEventListener("keydown", onEsc);
+  ov.addEventListener("mousedown", e => { if (e.target === ov && !ov.dataset.busy) closeUpdateDialog(ov); });
+  ov.querySelector("[data-act='cancel']").onclick = () => { if (!ov.dataset.busy) closeUpdateDialog(ov); };
+  ov.querySelector("[data-act='ok']").onclick = () => startUpdateInstall(ov);
+  ov.querySelector("[data-act='ok']").focus();
+}
+
+function closeUpdateDialog(ov) {
+  if (UPD.pollTimer) { clearInterval(UPD.pollTimer); UPD.pollTimer = null; }
+  document.removeEventListener("keydown", ov._onEsc || (() => {}));
+  ov.remove();
+}
+
+function updateInstallFail(ov, msg) {
+  if (UPD.pollTimer) { clearInterval(UPD.pollTimer); UPD.pollTimer = null; }
+  delete ov.dataset.busy;
+  const st = ov.querySelector("#update-status-text");
+  st.textContent = "更新失败: " + msg;
+  st.classList.add("upd-err");
+  // 允许关掉重试（下次点徽标重新检查）
+  const actions = ov.querySelector("#update-actions");
+  actions.hidden = false;
+  actions.querySelector("[data-act='ok']").hidden = true;
+  actions.querySelector("[data-act='cancel']").textContent = "关闭";
+}
+
+async function startUpdateInstall(ov) {
+  const bar = ov.querySelector("#update-progress");
+  const fill = ov.querySelector("#update-progress-bar");
+  const status = ov.querySelector("#update-status-text");
+  const actions = ov.querySelector("#update-actions");
+  actions.hidden = true;          // 下载不可取消, 也不许 ESC/点遮罩关
+  bar.hidden = false;
+  ov.dataset.busy = "1";
+  try {
+    await window.xcodeDesktopUpdater.install();
+  } catch (e) {
+    return updateInstallFail(ov, (e?.message || e) || "无法启动下载");
+  }
+  // install_update 立即返回（Rust 侧异步任务在跑）, 进度靠轮询
+  UPD.pollTimer = setInterval(async () => {
+    let st;
+    try { st = await window.xcodeDesktopUpdater.status(); } catch (_) { return; }
+    if (st.phase === 3) return updateInstallFail(ov, "下载或安装出错（详见 ~/.x-code/boot.log）");
+    if (st.phase === 2) {
+      fill.style.width = "100%";
+      status.textContent = "下载完成, 正在启动安装程序…";
+      return;
+    }
+    if (st.total > 0) {
+      const pct = Math.min(100, Math.round((st.received / st.total) * 100));
+      fill.style.width = pct + "%";
+      status.textContent = `下载中 ${pct}%（${fmtMB(st.received)} / ${fmtMB(st.total)}）`;
+    } else {
+      status.textContent = "正在连接更新服务器…";
+    }
+  }, 300);
+}
+
+/* ============================================================
  * 桌面端右键菜单 — 复制/粘贴, 只显示当前可用的项:
  * 有选中文字 → 复制; 右键输入框/可编辑区 → 粘贴; 都没有 → 不弹。
  * 自注册 contextmenu 监听（松开右键时触发, 与原生菜单同时机）:
@@ -5751,6 +5897,7 @@ document.addEventListener("scroll", tipHide, true);
   else startDraft();
   if (state.configured === false) openOnboarding();   // 首次使用: 先引导配置供应商
   $("input").focus();
+  initUpdateCheck();   // 桌面壳: 静默检查更新（浏览器/源码运行无桥, 内部直接跳过）
 })();
 (() => {
 /* ===== 悬浮循环滚动(跑马灯): 侧栏被截断的项目名 / 任务标题, 悬浮时循环滚动展示全文 ===== */

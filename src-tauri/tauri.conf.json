@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "x-code",
-  "version": "3.3.0",
+  "version": "3.3.1",
   "identifier": "com.xcode.desktop",
   "build": {
     "frontendDist": "../static"
@@ -17,6 +17,7 @@
     "active": true,
     "targets": ["nsis"],
     "icon": ["icons/icon.ico"],
+    "createUpdaterArtifacts": true,
     "resources": {
       "server/x-code-server.exe": "resources/server/x-code-server.exe",
       "pets": "pets",
@@ -29,5 +30,17 @@
         "displayLanguageSelector": false
       }
     }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDgxNUU0MjE2MEY2NDVBNDgKUldSSVdtUVBGa0plZ2NQNjJPQlNlWXlWMlFQdW02citKWU5OblR2cWcrZ1JOQ2V1cW8vLzFBQnoK",
+      "endpoints": [
+        "https://github.com/Steve-pixel-cpu/x-code/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
+    }
   }
 }
+
