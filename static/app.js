@@ -4908,31 +4908,35 @@ mqDark.addEventListener("change", () => {
   syncAccentInput();
 });
 
-/* ---------- 界面 / 聊天内容字号: 直接输入像素值, 换算成比例写入 --fs-ui ---------- */
+/* ---------- 界面 / 聊天内容字号: 直接输入像素值, 各自独立 ----------
+ * --fs-ui  界面文字（侧栏/设置/按钮等）, 基准 14px
+ * --fs-chat 聊天内容（气泡正文/代码块/diff 行）, 基准 14px
+ * 两个键、两个变量, 互不影响。 */
 const FS_UI_KEY = "xc-fs-ui";
-const FS_UI_BASE = 14;      // CSS 基准: 正文/界面基础字号
+const FS_CHAT_KEY = "xc-fs-chat";
+const FS_UI_BASE = 14;      // CSS 基准: 界面基础字号
+const FS_CHAT_BASE = 14;    // CSS 基准: 聊天内容基础字号
 const FS_UI_RANGE = [10, 24];
+const FS_CHAT_RANGE = [10, 24];
 function fsPref(key, base, range) {
   const v = parseFloat(localStorage.getItem(key));
   return Number.isFinite(v) && v >= range[0] && v <= range[1] ? v : base;
 }
 function fsUiPref()   { return fsPref(FS_UI_KEY, FS_UI_BASE, FS_UI_RANGE); }
+function fsChatPref() { return fsPref(FS_CHAT_KEY, FS_CHAT_BASE, FS_CHAT_RANGE); }
 function applyFontSize() {
   const st = document.documentElement.style;
   st.setProperty("--fs-ui", (fsUiPref() / FS_UI_BASE).toFixed(4));
+  st.setProperty("--fs-chat", (fsChatPref() / FS_CHAT_BASE).toFixed(4));
 }
-/* 输入即时生效; 清空或非法值在失焦时回退默认并回显。
-   两个设置项都改同一个 --fs-ui（聊天内容字号）, 任一处修改另一处回显同步。 */
+/* 输入即时生效; 清空或非法值在失焦时回退默认并回显 */
 function bindFsInput(inpId, key, base, range) {
   const inp = $(inpId);
-  const mirrors = () => {
-    $$("input[data-fs-mirror]").forEach(m => { if (m !== inp) m.value = inp.value; });
-  };
   inp.addEventListener("input", () => {
     const v = parseFloat(inp.value.trim());
     const ok = Number.isFinite(v) && v >= range[0] && v <= range[1];
     inp.classList.toggle("invalid", !ok);
-    if (ok) { localStorage.setItem(key, String(v)); applyFontSize(); mirrors(); }
+    if (ok) { localStorage.setItem(key, String(v)); applyFontSize(); }
   });
   inp.addEventListener("keydown", ev => {
     ev.stopPropagation();   // 别让 Enter/Esc 冒泡成全局快捷键
@@ -4944,11 +4948,10 @@ function bindFsInput(inpId, key, base, range) {
     inp.value = String(fsPref(key, base, range));
     inp.classList.remove("invalid");
     applyFontSize();
-    mirrors();
   });
 }
 bindFsInput("fs-ui-input", FS_UI_KEY, FS_UI_BASE, FS_UI_RANGE);
-bindFsInput("fs-code-input", FS_UI_KEY, FS_UI_BASE, FS_UI_RANGE);
+bindFsInput("fs-code-input", FS_CHAT_KEY, FS_CHAT_BASE, FS_CHAT_RANGE);
 applyFontSize();
 
 /* ---------- 壁纸亮度: 0-100 滑块, 50=默认观感, 持久化 localStorage ----------
@@ -5577,7 +5580,7 @@ $("skill-repo-input").addEventListener("keydown", (e) => {
 function openSettings() {
   themeDd.setValue(themePref());   // 每次打开回显当前值
   $("fs-ui-input").value = String(fsUiPref());
-  $("fs-code-input").value = String(fsUiPref());   // 两项同源, 都回显聊天内容字号
+  $("fs-code-input").value = String(fsChatPref());
   $("bg-bright").value = String(bgBrightPref());
   $("bg-bright-val").textContent = String(bgBrightPref());
   syncAccentInput();  // 迭代次数: 未加载过(服务端值未知)时留空给 placeholder 兜底, 已知则回显

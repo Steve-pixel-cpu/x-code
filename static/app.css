@@ -29,8 +29,9 @@
     --pop-bg: rgba(30, 30, 38, .74);   /* 悬浮层玻璃底: 半透明 + 模糊 */
     --content-w: min(1000px, calc(100% - 64px));
     --r-sm: 8px; --r-md: 12px; --r-lg: 16px; --r-xl: 20px;
-    /* 字号比例: 设置→外观 可调, JS 写在 documentElement 内联样式上 */
-    --fs-ui: 1; --fs-code: 1;
+    /* 字号比例: 设置→外观 可调, JS 写在 documentElement 内联样式上。
+       --fs-ui 界面文字 / --fs-chat 聊天内容（气泡+代码）, 两个互相独立 */
+    --fs-ui: 1; --fs-chat: 1;
     /* 等宽栈: 拉丁走 mono 字体, 中文回退到雅黑（否则 Windows 下会掉进宋体, 十分难看） */
     --font-mono: "Cascadia Code", "JetBrains Mono", Menlo, Consolas, "Microsoft YaHei", monospace;
     /* 代码高亮（hljs 类名，深色） */
@@ -668,7 +669,7 @@
     max-width: 76%; padding: 10px 16px;
     background: var(--accent-soft); border: 1px solid var(--accent-border);
     border-radius: var(--r-lg); border-bottom-right-radius: 6px;
-    font-size: calc(14px * var(--fs-ui)); line-height: 1.65; white-space: pre-wrap; word-break: break-word;
+    font-size: calc(14px * var(--fs-chat)); line-height: 1.65; white-space: pre-wrap; word-break: break-word;
   }
   /* 待发送条: 嵌在输入卡顶部的灰色标题条, 与输入框一体化 (Claude.ai 式)
      操作: 「↑ 立即」打断当前回复让它插队 / 编辑放回输入框 / 删除 */
@@ -721,7 +722,7 @@
     box-shadow: 0 2px 8px var(--accent-soft);
   }
   .msg.assistant .bubble {
-    flex: 1; min-width: 0; font-size: calc(14px * var(--fs-ui)); line-height: 1.75; word-break: break-word;
+    flex: 1; min-width: 0; font-size: calc(14px * var(--fs-chat)); line-height: 1.75; word-break: break-word;
   }
 
   /* 消息内容可自由选中: 支持右键菜单复制 / Ctrl+C */
@@ -739,7 +740,7 @@
   .bubble li { margin: .2em 0; }
   .bubble li::marker { color: var(--text-3); }
   .bubble code {
-    font-family: var(--font-mono); font-size: calc(.9em * var(--fs-code));
+    font-family: var(--font-mono); font-size: calc(.9em * var(--fs-chat));
     background: var(--surface-2); border: 1px solid var(--border);
     padding: 1.5px 6px; border-radius: 5px;
   }
@@ -782,7 +783,7 @@
   }
   .bubble pre code {
     background: none; border: none; padding: 0;
-    font-size: calc(12.5px * var(--fs-code)); line-height: 1.6; color: var(--text);
+    font-size: calc(12.5px * var(--fs-chat)); line-height: 1.6; color: var(--text);
   }
   /* hljs 语法配色（跟随主题令牌） */
   .hljs-comment, .hljs-quote { color: var(--hl-comment); font-style: italic; }
@@ -947,7 +948,7 @@
   .td-line {
     padding: 0 10px; white-space: pre;
     font-family: var(--font-mono);
-    font-size: calc(11.5px * var(--fs-code));
+    font-size: calc(11.5px * var(--fs-chat));
     line-height: 1.55; color: var(--text-2);
     min-height: 1.55em;
   }
