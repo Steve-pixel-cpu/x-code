@@ -172,6 +172,8 @@ def test_build_registry_with_mcp_end_to_end(tmp_path):
     TOOLS 列表同步, 内置工具不受影响。"""
     from main import TOOLS, build_registry, mcp_status_lines
     from mcp_client import get_mcp_manager
+    from skills import sync_skill_tools
+    sync_skill_tools(TOOLS, [])   # 归零技能 spec: server 导入时可能已同步真实技能
     before_builtin = [t["name"] for t in TOOLS
                       if not t["name"].startswith(MCP_TOOL_PREFIX)]
     registry = build_registry(mcp_servers=[_stdio_server()])
@@ -192,6 +194,8 @@ def test_build_registry_with_mcp_end_to_end(tmp_path):
 
 def test_build_registry_without_mcp_unchanged():
     from main import TOOLS, build_registry
+    from skills import sync_skill_tools
+    sync_skill_tools(TOOLS, [])   # 归零技能 spec: server 导入时可能已同步真实技能
     n_specs = len(TOOLS)
     registry = build_registry()
     assert len(TOOLS) == n_specs   # 原地同步是 no-op

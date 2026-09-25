@@ -100,8 +100,9 @@ from tools import ToolRegistry, git_bash_unavailable_reason, TOOL_CANCEL_CHECK
 from runtime import result_meta
 from runtime import TurnInterrupted
 from skills import (SkillError, delete_user_skill, discover_skills,
-                    install_from_repo, render_skills_section, skill_info,
-                    sync_skill_tools)
+                    expand_skill_command, install_from_repo,
+                    match_skill_command, register_skill_tools,
+                    render_skills_section, skill_info, sync_skill_tools)
 from multi_agent import set_api_config_provider
 from agent_tools import get_orchestrator
 import music as _music
@@ -574,7 +575,9 @@ class EmittingToolRegistry(ToolRegistry):
         return result
 
 
-registry = EmittingToolRegistry(build_registry(runtime_config.mcp_servers()))
+registry = EmittingToolRegistry(build_registry(
+    runtime_config.mcp_servers(),
+    discover_skills(Path.cwd(), USER_DIR)))
 
 
 # ============================================================================
@@ -1074,6 +1077,14 @@ def _start_turn(web_session: WebSession, text: str, emit: Callable,
     web_session.busy = True
     web_session.stop_requested = False
     web_session.persisted_count = len(web_session.runtime.session().messages)
+    # 斜杠技能命令: /<技能名> [请求…] 在进 runtime 前确定性展开成
+    # skill_read 提示词（气泡仍显示用户原始输入）。唯一咽喉点——普通发送、
+    # 排队、插队、合并接力全经此处, 且此刻 workdir 已绑定, 项目级技能同样命中。
+    skill = match_skill_command(text, discover_skills(
+        Path(web_session.workdir) if web_session.workdir else Path.cwd(),
+        USER_DIR))
+    if skill is not None:
+        text = expand_skill_command(skill, text)
     emitter = TurnEmitter(emit)
 
     def _upgrade_after_plan() -> None:
@@ -1976,10 +1987,24 @@ def _resync_session_prompts() -> None:
         ws.runtime.set_system_prompt(_session_system_prompt(ws.workdir))
 
 
+def _rebind_skill_tools() -> None:
+    """skills 安装/卸载后换绑 skill_read 的 handler 到 _inner（理由同
+    _attach_mcp_tools: execute 走 _inner, 挂外层壳永远调不到）。
+    TOOLS 里 skill_read spec 的增删由 sync_skill_tools 完成。"""
+    sync_skill_tools(TOOLS, discover_skills(Path.cwd(), USER_DIR))
+    register_skill_tools(registry._inner,
+                         discover_skills(Path.cwd(), USER_DIR))
+
+
 @app.get("/api/skills")
-async def api_get_skills():
-    """已安装技能清单（设置页 Skills 分区; 含项目级, 标 source 供 UI 区分）。"""
-    skills = discover_skills(Path.cwd(), USER_DIR, on_error=lambda msg: None)
+async def api_get_skills(workdir: Optional[str] = None):
+    """已安装技能清单（设置页 Skills 分区 + 聊天框斜杠补全数据源; 含项目级,
+    标 source 供 UI 区分）。带 workdir 时按该目录发现项目级技能——Web 会话
+    的技能因项目而异, 补全菜单要跟当前会话的工作目录走; 无效路径回退 cwd。"""
+    wd = Path(workdir.strip()) if (workdir or "").strip() else Path.cwd()
+    if not wd.is_dir():
+        wd = Path.cwd()
+    skills = discover_skills(wd, USER_DIR, on_error=lambda msg: None)
     return {"skills": skill_info(skills)}
 
 
@@ -2001,6 +2026,7 @@ async def api_install_skills(request: dict):
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"安装失败: {e}")
     sync_skill_tools(TOOLS, discover_skills(Path.cwd(), USER_DIR))
+    _rebind_skill_tools()
     _resync_session_prompts()
     return {"ok": True, "installed": skill_info(installed)}
 
@@ -2021,6 +2047,7 @@ async def api_delete_skill(name: str):
                            "请在项目仓库里管理")
         raise HTTPException(status_code=400, detail=msg)
     sync_skill_tools(TOOLS, discover_skills(Path.cwd(), USER_DIR))
+    _rebind_skill_tools()
     _resync_session_prompts()
     return {"ok": True}
 

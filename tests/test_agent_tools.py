@@ -74,6 +74,8 @@ def fake_orchestrator():
 # ------------------------------------------------------------
 
 def test_tools_include_agent_quartet():
+    from skills import sync_skill_tools
+    sync_skill_tools(TOOLS, [])   # 归零技能 spec: server 导入时可能已同步真实技能
     names = [s["name"] for s in TOOLS]
     assert names[-4:] == ["agent_tool", "agent_status", "agent_reap", "agent_list"]
 

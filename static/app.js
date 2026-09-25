@@ -83,6 +83,7 @@ const curRun = () => (state.sessionId ? runOf(state.sessionId) : null);
 state.customProjects = JSON.parse(localStorage.getItem("xc-projects") || "[]");
 state.collapsedProjects = new Set(JSON.parse(localStorage.getItem("xc-collapsed") || "[]"));
 state.draftInput = "";   // 草稿态未发送的输入
+state.skillCache = null; // 当前工作目录的技能清单（refreshSkillCache 填充, 斜杠补全数据源）
 
 /* ============================================================
  * 侧栏拖拽调宽: 左会话栏(--side-w) / 右计划面板(--plan-w)
@@ -1858,6 +1859,8 @@ async function selectSession(id) {
   syncThinkingIndicator();   // 切会话必须重算: 转圈只属于"正在等待输出的那个会话"
   setConn(run.ws && run.ws.readyState === 1 ? "on" : "", run.ws ? (run.ws.readyState === 1 ? "已连接" : "连接中…") : "未连接");
   restoreCurrentInput();        // 输入框恢复成该会话未发送的内容
+  skillMenuDestroy();           // 切会话收起斜杠菜单; 目录变了下次输入自动重拉
+  skillCacheDir = null;         // 会话可能换项目: 强制下次输入重拉技能清单
   scrollToBottom(true);
 }
 
@@ -2030,6 +2033,8 @@ function startDraft(draftDir = null) {
                                  // （切走瞬间原会话正在 prefill 空窗, 否则没人再碰这个 DOM,
                                  //   后台轮次的空窗事件都带 sid 守卫, 不会点亮这里）
   setConn("", "未连接");
+  skillMenuDestroy();           // 切草稿收起斜杠菜单; 预选项目变了下次输入自动重拉
+  skillCacheDir = null;
   // 草稿态下拉 = 新会话将用的全局默认值。必须显式重置: 否则残留上一个
   // 会话的显示值, 而首条消息实际按全局默认起跑 → 显示与实际不一致
   {
@@ -3931,6 +3936,7 @@ async function sendCurrent() {
   }
   msgCol().querySelector(".empty-state")?.remove();
   $("pane").classList.remove("empty-view");   // 有内容了: 输入卡落回底部
+  skillMenuDestroy();   // 发送即收起斜杠补全（排队/插队路径同样覆盖）
   $("ws-dock").innerHTML = "";                // 草稿态的工作区条/建议 chips 一并撤下
   $("sug-dock").innerHTML = "";
   nearBottom = true;
@@ -4021,16 +4027,158 @@ $("btn-new").onclick = () => startDraft();   // 包一层: 别把点击事件对
 
 $("input").addEventListener("keydown", ev => {
   if (ev.key === "Enter" && !ev.shiftKey) {
+    if (skillMenuActive()) return;   // 斜杠补全菜单开着: Enter 交给它(选用, 不发送)
     ev.preventDefault();
     sendCurrent();
   }
 });
-$("input").addEventListener("input", () => { saveCurrentInput(); updateSendBtn(); });
+$("input").addEventListener("input", () => { saveCurrentInput(); updateSendBtn(); skillMenuUpdate(); });
 function autoGrow(el) {
   el.style.height = "auto";
   el.style.height = Math.min(el.scrollHeight, 160) + "px";
 }
 $("input").addEventListener("input", () => autoGrow($("input")));
+
+/* ============================================================
+ * 斜杠技能补全: 输入 /xx 时在输入卡上方列出匹配技能, 键盘/鼠标选用。
+ * 仅当整段输入是 " /词 "（命令是消息的第一个词）时出现; 出现空格+正文即隐藏。
+ * 数据源 = 当前工作目录的技能清单（安装/卸载/切会话时刷新）。
+ * ============================================================ */
+let skillCacheDir = null;      // skillCache 对应的工作目录（变了才重新拉取）
+async function refreshSkillCache() {
+  // 草稿 → 预选项目; 会话 → 其工作目录（历史接口给出）。无目录 = 服务 cwd。
+  const wd = state.draft ? state.draftDir
+    : (curRun() ? curRun().currentWorkdir : null);
+  if (skillCacheDir === (wd || "") && state.skillCache) return state.skillCache;
+  skillCacheDir = wd || "";
+  try {
+    const q = wd ? "?workdir=" + encodeURIComponent(wd) : "";
+    const r = await fetch("/api/skills" + q);
+    state.skillCache = r.ok ? (await r.json()).skills || [] : [];
+  } catch (e) {
+    state.skillCache = [];
+  }
+  return state.skillCache;
+}
+
+const skillMenu = {
+  el: null,
+  items: [],      // [{ name, desc, source }]
+  idx: -1,        // 键盘高亮项
+  empty: false,   // true = "暂无技能" 提示态（不可选）
+};
+const SLASH_MENU_MAX = 8;
+
+function skillMenuDestroy() {
+  if (skillMenu.el) { skillMenu.el.remove(); skillMenu.el = null; }
+  skillMenu.items = [];
+  skillMenu.idx = -1;
+  skillMenu.empty = false;
+}
+
+function skillMenuHighlight() {
+  if (!skillMenu.el) return;
+  skillMenu.el.querySelectorAll(".sk-opt").forEach((o, i) => {
+    o.classList.toggle("on", i === skillMenu.idx);
+  });
+  const on = skillMenu.el.querySelectorAll(".sk-opt")[skillMenu.idx];
+  if (on) on.scrollIntoView({ block: "nearest" });
+}
+
+function skillMenuRender(query) {
+  const q = (query || "").toLowerCase();
+  const all = state.skillCache || [];
+  const hits = q ? all.filter(s => s.name.toLowerCase().startsWith(q)) : all;
+  skillMenu.items = hits.slice(0, SLASH_MENU_MAX);
+  if (!skillMenu.items.length) { skillMenuDestroy(); return; }
+
+  const first = !skillMenu.el;
+  if (first) {
+    skillMenu.el = document.createElement("div");
+    skillMenu.el.id = "skill-menu";
+    $("input-card").appendChild(skillMenu.el);   // 输入卡是定位父级, 菜单贴其上沿
+  }
+  skillMenu.el.innerHTML = skillMenu.items.map((s, i) =>
+    '<button type="button" class="sk-opt' + (i === skillMenu.idx ? " on" : "") + '" data-i="' + i + '">'
+    + '<span class="sk-name">/' + escapeHtml(s.name) + '</span>'
+    + '<span class="sk-src">' + (s.source === "project" ? "项目级" : "用户级") + '</span>'
+    + (s.description ? '<span class="sk-desc"></span>' : '')
+    + "</button>"
+  ).join("") + '<div class="sk-hint">↑↓ 选择 · Enter/Tab 补全 · Esc 关闭</div>';
+  const descEl = skillMenu.el.querySelectorAll(".sk-desc");
+  skillMenu.items.forEach((s, i) => {
+    if (s.description && descEl[i]) descEl[i].textContent = s.description;
+    const btn = skillMenu.el.querySelector(`.sk-opt[data-i="${i}"]`);
+    btn.onclick = () => skillMenuAccept(i);
+    btn.onmouseenter = () => { skillMenu.idx = i; skillMenuHighlight(); };
+  });
+}
+
+function skillMenuUpdate() {
+  const v = $("input").value;
+  const m = /^\/([A-Za-z0-9_-]*)$/.exec(v);   // 整段输入恰为一个 /词 才弹
+  if (!m) { skillMenuDestroy(); return; }
+  refreshSkillCache().then(() => {
+    // 拉取期间输入可能已变, 以当前值为准再判一次
+    const cur = /^\/([A-Za-z0-9_-]*)$/.exec($("input").value);
+    if (!cur) { skillMenuDestroy(); return; }
+    const all = state.skillCache || [];
+    if (!all.length) {
+      // 无技能: 提示去哪里装, 不可选
+      if (!skillMenu.el) {
+        skillMenu.el = document.createElement("div");
+        skillMenu.el.id = "skill-menu";
+        $("input-card").appendChild(skillMenu.el);
+      }
+      skillMenu.el.innerHTML = '<div class="sk-none">暂无技能 — 到 设置 → Skills 从 GitHub 仓库安装</div>';
+      skillMenu.items = [];
+      skillMenu.idx = -1;
+      skillMenu.empty = true;
+      return;
+    }
+    skillMenu.empty = false;
+    skillMenu.idx = 0;
+    skillMenuRender(cur[1]);
+  });
+}
+
+function skillMenuAccept(i) {
+  const it = skillMenu.items[i];
+  if (!it) return;
+  $("input").value = "/" + it.name + " ";
+  autoGrow($("input"));
+  saveCurrentInput();
+  skillMenuDestroy();
+  $("input").focus();
+}
+
+function skillMenuActive() {
+  return !!(skillMenu.el && skillMenu.items.length);
+}
+
+/* 键盘接管: 菜单开着时 ↑↓ 移动高亮, Enter/Tab 选用（Enter 不发送）, Esc 关闭 */
+$("input").addEventListener("keydown", ev => {
+  if (!skillMenuActive()) return;
+  if (ev.key === "ArrowDown" || ev.key === "ArrowUp") {
+    ev.preventDefault();
+    const n = skillMenu.items.length;
+    skillMenu.idx = ev.key === "ArrowDown"
+      ? (skillMenu.idx + 1) % n : (skillMenu.idx - 1 + n) % n;
+    skillMenuHighlight();
+  } else if (ev.key === "Enter" || ev.key === "Tab") {
+    ev.preventDefault();
+    skillMenuAccept(skillMenu.idx);
+  } else if (ev.key === "Escape") {
+    ev.preventDefault();
+    ev.stopPropagation();   // 只关菜单, 别顺带触发全局 Esc 逻辑
+    skillMenuDestroy();
+  }
+});
+document.addEventListener("click", ev => {
+  // 点击输入卡以外区域关闭（点击候选项走自身的 onclick, 不经过这里）
+  if (skillMenu.el && !skillMenu.el.contains(ev.target)
+      && ev.target !== $("input")) skillMenuDestroy();
+});
 
 /* ---------- 附件入口 1: 📎 按钮 + 隐藏文件选择框 ---------- */
 $("btn-attach").onclick = () => $("file-input").click();
@@ -5695,6 +5843,10 @@ async function loadSkills() {
     const r = await fetch("/api/skills");
     if (r.ok) skills = (await r.json()).skills || [];
   } catch (e) { /* 服务不可达: 列表留空 */ }
+  // 同一份清单喂给斜杠补全（设置页拉的是 cwd 视图; 会话绑定其他目录时,
+  // 补全按 skillCacheDir 失配自动重拉, 不吃这里的缓存）
+  state.skillCache = skills;
+  skillCacheDir = "";
   list.innerHTML = "";
   if (!skills.length) {
     const empty = document.createElement("div");
@@ -5739,8 +5891,7 @@ async function loadSkills() {
                                { method: "DELETE" });
           if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `HTTP ${r.status}`);
           toast("已卸载 " + s.name);
-          loadSkills();
-        } catch (e) {
+          loadSkills();        } catch (e) {
           del.disabled = false;
           toast("卸载失败: " + e.message);
         }
@@ -5957,6 +6108,7 @@ document.addEventListener("scroll", tipHide, true);
 (async function init() {
   await loadSettings();
   await loadSessions();
+  refreshSkillCache();   // 斜杠补全数据源: 预取一次（cwd 视图; 切会话后按需重拉）
   // 默认选最近的会话（列表已倒序，第一个即最新）; 没有会话则进入草稿态
   const first = state.sessions[0];
   if (first) await selectSession(first.id);

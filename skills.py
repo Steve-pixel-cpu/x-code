@@ -355,3 +355,41 @@ def skill_info(skills: list[Skill]) -> list[dict]:
          "skill_file": str(s.dir / SKILL_FILE)}
         for s in skills
     ]
+
+
+# --- 斜杠技能命令: /<技能名> [请求…] ---
+
+_CMD_RE = re.compile(r"^/([A-Za-z0-9_-]+)(?:\s+(.*))?$", re.S)
+
+
+def match_skill_command(text: str,
+                        skills: list[Skill]) -> Optional[Skill]:
+    """/<名> [请求…] → 唯一命中的技能, 否则 None。精确名优先; 之后接受唯一
+    前缀（大小写不敏感, /brain → brainstorming）; 多个前缀命中视为有歧义,
+    不展开——用户拼错一半时静默选错技能比原样透传更糟。非 / 开头必 None。"""
+    m = _CMD_RE.match(text or "")
+    if not m:
+        return None
+    cmd = m.group(1)
+    lowered = cmd.lower()
+    for s in skills:
+        if s.name.lower() == lowered:
+            return s
+    hits = [s for s in skills if s.name.lower().startswith(lowered)]
+    return hits[0] if len(hits) == 1 else None
+
+
+def expand_skill_command(skill: Skill, text: str) -> str:
+    """/<技能名> [请求…] → 模型指令。气泡仍显示用户原始输入, 展开只发生在
+    进 runtime 之前: 第一段确定性触发 skill_read（技能触发不再赌模型自觉）,
+    第二段把原始请求交给模型在技能框架内处理。"""
+    rest = _CMD_RE.match(text or "").group(2) or ""
+    rest = rest.strip()
+    ask = (f'用户请求: "{rest}"'
+           if rest else "用户没有附加具体请求, 请按技能开头的方式主动开始。")
+    return (
+        f"/{skill.name}\n\n"
+        f"使用 skill_read 工具读取 {skill.dir / SKILL_FILE}（用户的斜杠命令 "
+        f"/{skill.name} 即此技能）, 然后严格按 SKILL.md 的指引处理。\n"
+        f"{ask}"
+    )

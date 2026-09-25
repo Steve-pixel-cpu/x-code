@@ -1161,6 +1161,7 @@
     background: var(--surface); box-shadow: var(--shadow-lg);
     padding: 13px 14px 11px 17px;
     transition: border-color .15s, box-shadow .15s;
+    position: relative;   /* 斜杠技能补全菜单的定位父级 */
   }
   #input-card:focus-within {
     border-color: var(--accent-border);
@@ -1215,8 +1216,47 @@
   .att-del:hover { color: var(--err); background: var(--err-soft); }
   /* 拖拽高亮: 输入卡描边提示可松手 */
   #input-card.dragging {
+
     outline: 2px dashed var(--accent-border);
     outline-offset: -2px; background: var(--accent-soft);
+  }
+  /* 斜杠技能补全菜单: 贴输入卡上沿弹出, 视觉与 dd-pop 同语言 */
+  #skill-menu {
+    position: absolute; left: 10px; right: 10px; bottom: calc(100% + 6px);
+    z-index: 290; display: flex; flex-direction: column;
+    max-height: 262px; overflow-y: auto; padding: 6px;
+    background: var(--surface);
+    background: var(--pop-bg);
+    -webkit-backdrop-filter: blur(18px) saturate(1.5); backdrop-filter: blur(18px) saturate(1.5);
+    border: 1px solid var(--border);
+    border-radius: var(--r-lg); box-shadow: var(--shadow-pop);
+    animation: rise .18s cubic-bezier(.16, 1, .3, 1);
+  }
+  .sk-opt {
+    display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap;
+    border: none; background: none; text-align: left; width: 100%;
+    padding: 7px 9px; border-radius: 8px; font-family: inherit;
+    font-size: calc(12.5px * var(--fs-ui)); color: var(--text-2);
+    transition: background .1s;
+  }
+  .sk-opt:hover, .sk-opt.on { background: var(--hover); color: var(--text); }
+  .sk-name { font-weight: 600; color: var(--text); font-family: ui-monospace, Consolas, monospace; }
+  .sk-opt.on .sk-name, .sk-opt:hover .sk-name { color: var(--accent); }
+  .sk-src {
+    flex: none; font-size: calc(10px * var(--fs-ui)); padding: 1px 6px;
+    border-radius: 6px; border: 1px solid var(--border); color: var(--text-3);
+  }
+  .sk-desc {
+    flex-basis: 100%; font-size: calc(11.5px * var(--fs-ui));
+    color: var(--text-3); overflow: hidden; text-overflow: ellipsis;
+    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+  }
+  .sk-hint {
+    padding: 6px 9px 2px; font-size: calc(10.5px * var(--fs-ui));
+    color: var(--text-3); border-top: 1px solid var(--border); margin-top: 4px;
+  }
+  .sk-none {
+    padding: 9px 10px; font-size: calc(12px * var(--fs-ui)); color: var(--text-3);
   }
   /* 文件 chip: 名字 + 大小, 预览行/用户气泡共用 */
   .file-chip {

@@ -997,6 +997,40 @@ def run_repl(runtime: ConversationRuntime,
                 print("bye!")
                 break
             elif cmd == SlashCommand.HELP or cmd == SlashCommand.UNKNOWN:
+                # 未知 /词 先当技能命令试: /brainstorming … 命中即展开跑本轮,
+                # 未命中维持原来的帮助输出（CLI 与 Web 端同一套匹配规则）
+                skill = None
+                try:
+                    from skills import discover_skills as _ds, \
+                        match_skill_command as _match, \
+                        expand_skill_command as _expand
+                    skill = _match(text, _ds(Path.cwd(), USER_DIR))
+                except Exception:
+                    skill = None
+                if skill is not None:
+                    print(c_dim(f"→ 技能命令: /{skill.name}"))
+                    try:
+                        summary = runtime.run_turn(
+                            _expand(skill, text), prompter)
+                        notify_done()
+                    except KeyboardInterrupt:
+                        print()
+                        print(c_yellow("⚠ 已中断本轮对话"))
+                        repair_interrupted_turn(runtime.session())
+                    except Exception as e:
+                        print()
+                        print(c_red(f"✗ {e}"))
+                        continue
+                    for msg in runtime.session().messages[idx_before + 1:]:
+                        last_uuid = store.save_message(
+                            session_id=session_id,
+                            message=msg,
+                            parent_uuid=last_uuid,
+                        )
+                    idx_before = len(runtime.session().messages) - 1
+                    titled = maybe_auto_title(runtime, store, session_id,
+                                              titled)
+                    continue
                 SlashCommand.print_cmd()
             elif cmd == SlashCommand.STATUS:
                 print_status(runtime)
