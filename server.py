@@ -2595,6 +2595,12 @@ async def ws_endpoint(websocket: WebSocket, session_id: str):
     token = web_session.add_emit(emit)
     web_session.loop = loop
 
+    # 连接即下发权威 busy 快照: 客户端 busy 的唯一清除途径是 turn_done/error,
+    # 服务进程死亡丢掉收尾事件后, 重连客户端会带着过期的本地 busy 把死轮次
+    # 的悬空工具卡永远保留"运行中"（历史回放的收口被 !busy 跳过）。快照只进
+    # 本连接的队列（非广播）: false 而本地忙碌 → 按轮次终点收口; true → 跟上。
+    out_queue.put_nowait({"type": "busy_sync", "busy": web_session.busy})
+
     def emit_error(message: str) -> None:
         emit({"type": "error", "message": message})
 

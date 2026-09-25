@@ -2194,6 +2194,21 @@ function handleServerMessage(msg, sid) {
   if (run && (msg.type === "turn_interrupting" || msg.type === "turn_started")) {
     expirePlanCard(run, sid, "已过期 · 继续对话后重新规划");
   }
+  // WS 建连时的服务端 busy 快照校正（前台/后台都要）: 本地 busy 的唯一清除
+  // 途径是 turn_done/error, 服务进程死亡丢掉收尾事件后本地永远忙碌——
+  // 死轮次的悬空工具卡在历史回放里被 !busy 跳过收口, 永远停在"运行中"。
+  // 以服务端为准: 快照 false 而本地忙碌 → 按轮次终点收口; 快照 true 而本地
+  // 空闲 → 跟上忙碌（轮次在别的窗口活着, 保留"运行中"卡等 tool_result 配对）。
+  if (msg.type === "busy_sync") {
+    if (!msg.busy && run && run.busy) {
+      if (sid === state.sessionId) endTurnUiReset();
+      else settleBackgroundTurnEnd(run, sid);
+    } else if (msg.busy && run && !run.busy) {
+      run.busy = true;
+      renderSessionList();
+    }
+    return;
+  }
   // 后台会话: 流式内容照常写进它自己的常驻列（隐藏）, 切回时完整可见;
   // 只对 权限/结果/结束/错误 累计未读。结束/接力时同步运行态。
   if (sid !== state.sessionId) {
@@ -2220,18 +2235,7 @@ function handleServerMessage(msg, sid) {
     else if (msg.type === "permission_resolved") onPermissionResolved(msg, sid);
     else if (msg.type === "turn_done" || msg.type === "error") {
       bumpUnread(sid);
-      run.busy = false;
-      run.awaiting = false;
-      run.queued = false;
-      settlePendingPermsOnTurnEnd(run, sid);
-      // 轮次收口: 悬空工具行标"已中断", 清掉流式指针
-      sweepPendingToolCards(run);
-      collapseFinishedToolGroups(colOf(sid));   // 后台会话同样收起已结束的大分组
-      clearRateLimitNote(run);   // 限流退避提示一并撤下
-      run.curBubble = null;
-      // 思考行/乐观胶囊兜底收口（客户端计时）, 与前台 endTurnUiReset 一致;
-      // 只清指针的话, 行会永远卡在"思考中…"动画态
-      if (run.curThinking) onThinkingEnd({}, sid);
+      settleBackgroundTurnEnd(run, sid);
       // 打断收口与前台 onTurnDone 一致: 「已停止」挂在本轮思考行上
       if (msg.type === "turn_done" && msg.interrupted
           && run.lastThinkRow && run.lastThinkRow.isConnected) {
@@ -2756,9 +2760,10 @@ function onToolResult(msg, sid) {
     if (msg.id && run.liveToolCards[msg.id]) {
       const card = run.liveToolCards[msg.id];
       delete run.liveToolCards[msg.id];
+      const group = card.closest(".tool-group");   // 先取: remove 后节点脱离 DOM, closest 拿不到分组
       card.remove();
       if (run.activeToolCard === card) run.activeToolCard = null;
-      updateToolGroupHeader(card.closest(".tool-group"));   // 空了会整个撤掉分组
+      updateToolGroupHeader(group);   // 空了会整个撤掉分组
     }
     return;
   }
@@ -2793,6 +2798,23 @@ function sweepPendingToolCards(run) {
   run.liveToolCards = {};
   run.toolResultIndex = {};
   run.activeToolCard = null;
+}
+
+/* 后台会话的轮次终点收口: busy 复位 + 悬空工具卡 sweep + 各类滞留 UI 清理。
+ * turn_done/error 分支与 busy_sync 校正共用（前台会话走 endTurnUiReset）。 */
+function settleBackgroundTurnEnd(run, sid) {
+  run.busy = false;
+  run.awaiting = false;
+  run.queued = false;
+  settlePendingPermsOnTurnEnd(run, sid);
+  // 轮次收口: 悬空工具行标"已中断", 清掉流式指针
+  sweepPendingToolCards(run);
+  collapseFinishedToolGroups(colOf(sid));   // 后台会话同样收起已结束的大分组
+  clearRateLimitNote(run);   // 限流退避提示一并撤下
+  run.curBubble = null;
+  // 思考行/乐观胶囊兜底收口（客户端计时）, 与前台 endTurnUiReset 一致;
+  // 只清指针的话, 行会永远卡在"思考中…"动画态
+  if (run.curThinking) onThinkingEnd({}, sid);
 }
 
 /* ---------- 权限审批: 聊天流内联卡片（替代旧模态弹窗） ---------- */

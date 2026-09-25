@@ -24,6 +24,7 @@ from permissions import (
     PermissionRequest,
 )
 from main import TOOL_REQUIREMENTS, build_registry
+from conftest import ws_connect
 from tests.test_permission_prompt import RecordingPrompter
 
 
@@ -433,8 +434,8 @@ def test_two_sessions_plan_approval_do_not_block_each_other(
                 return m
         raise AssertionError("事件窗口内未等到目标事件")
 
-    with client.websocket_connect("/ws/pp-a") as ws_a, \
-            client.websocket_connect("/ws/pp-b") as ws_b:
+    with ws_connect(client, "pp-a") as ws_a, \
+            ws_connect(client, "pp-b") as ws_b:
         ws_a.send_json({"type": "user", "text": "A 计划任务"})
         ws_b.send_json({"type": "user", "text": "B 计划任务"})
 

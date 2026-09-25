@@ -15,6 +15,7 @@ from fastapi.testclient import TestClient
 
 import server
 from storage import SessionStore
+from conftest import ws_connect
 
 
 # ------------------------------------------------------------
@@ -254,6 +255,8 @@ def test_web_session_model_none_when_no_record(isolated_store):
 def _ws_connect(client, sid, mocks):
     """建立 WS 连接并注入会话级 mock（runtime / 专属 client 探针）。"""
     with client.websocket_connect(f"/ws/{sid}") as websocket:
+        first = json.loads(websocket.receive_text())
+        assert first["type"] == "busy_sync"   # 消费建连快照
         ws = server.get_or_create_web_session(sid)
         if "runtime" in mocks:
             ws.runtime = mocks["runtime"]
@@ -265,7 +268,7 @@ def test_ws_set_thinking_level_isolated(client, isolated_store):
     other = server.get_or_create_web_session("s-other")
     other.thinking_level = "low"
 
-    with client.websocket_connect("/ws/s-a") as websocket:
+    with ws_connect(client, "s-a") as websocket:
         ws = server.get_or_create_web_session("s-a")
         ws.runtime = _FakeRuntime("low")
         websocket.send_json({"type": "set_thinking_level", "level": "high"})
@@ -284,7 +287,7 @@ def test_ws_set_thinking_level_isolated(client, isolated_store):
 
 
 def test_ws_set_thinking_level_invalid_rejected(client, isolated_store):
-    with client.websocket_connect("/ws/s-bad") as websocket:
+    with ws_connect(client, "s-bad") as websocket:
         websocket.send_json({"type": "set_thinking_level", "level": "ultra"})
         ack = websocket.receive_json()
         assert ack["type"] == "error"
@@ -300,7 +303,7 @@ def test_ws_set_model_same_provider(client, isolated_store, monkeypatch):
         "active": {"provider": "prov-a", "model": "model-1"},
     })
 
-    with client.websocket_connect("/ws/s-m") as websocket:
+    with ws_connect(client, "s-m") as websocket:
         ws = server.get_or_create_web_session("s-m")
         ws.runtime = _FakeRuntime("low")
         websocket.send_json({"type": "set_model",
@@ -321,7 +324,7 @@ def test_ws_set_model_unknown_rejected(client, isolated_store, monkeypatch):
                        "models": [{"id": "model-1"}]}],
         "active": {"provider": "prov-a", "model": "model-1"},
     })
-    with client.websocket_connect("/ws/s-m2") as websocket:
+    with ws_connect(client, "s-m2") as websocket:
         websocket.send_json({"type": "set_model",
                              "provider_id": "prov-a", "model_id": "nope"})
         ack = websocket.receive_json()

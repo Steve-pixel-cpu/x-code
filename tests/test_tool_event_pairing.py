@@ -12,6 +12,7 @@ import server
 from permissions import ALLOW_MODE, PermissionPolicy
 from server import EmittingToolRegistry
 from storage import SessionStore
+from conftest import ws_connect
 from tools import ToolRegistry
 
 
@@ -214,7 +215,7 @@ def test_single_turn_serial_tool_pairing(client, isolated_store, monkeypatch):
     _install(monkeypatch,
              script=[_tool_turn(("tu-1", "echo_test", '{"n": 1}')), _text_turn()],
              tool_results={})
-    with client.websocket_connect("/ws/s-pair") as ws:
+    with ws_connect(client, "s-pair") as ws:
         sid = "s-pair"
         ws.send_json({"type": "user", "text": "跑一个工具"})
         events = _drain_until_turn_done(ws, sid)
@@ -232,7 +233,7 @@ def test_single_turn_parallel_tools_pairing(client, isolated_store, monkeypatch)
                  _text_turn(),
              ],
              tool_results={})
-    with client.websocket_connect("/ws/s-par") as ws:
+    with ws_connect(client, "s-par") as ws:
         sid = "s-par"
         ws.send_json({"type": "user", "text": "并行跑三个"})
         events = _drain_until_turn_done(ws, sid)
@@ -269,8 +270,8 @@ def test_two_concurrent_sessions_no_cross_talk(client, isolated_store, monkeypat
                         PerSessionMessages().stream)
 
     collected = {}
-    with client.websocket_connect("/ws/cc-a") as ws_a, \
-            client.websocket_connect("/ws/cc-b") as ws_b:
+    with ws_connect(client, "cc-a") as ws_a, \
+            ws_connect(client, "cc-b") as ws_b:
         ws_a.send_json({"type": "user", "text": "A 任务"})
         ws_b.send_json({"type": "user", "text": "B 任务"})
         # 两条 WS 交替收: 用后台线程收 B, 主线程收 A
@@ -301,7 +302,7 @@ def test_policy_denied_tool_still_pairs(client, isolated_store, monkeypatch):
              script=[_tool_turn(("d-1", "echo_test", "{}")), _text_turn()],
              tool_results={})
     monkeypatch.setattr(server.app_state, "_mode", PLAN_MODE)
-    with client.websocket_connect("/ws/s-deny") as ws:
+    with ws_connect(client, "s-deny") as ws:
         sid = "s-deny"
         ws.send_json({"type": "user", "text": "跑一个会被拒的工具"})
         events = _drain_until_turn_done(ws, sid)
@@ -320,7 +321,7 @@ def test_prompter_denied_tool_pairs_with_explicit_id(client, isolated_store, mon
              script=[_tool_turn(("p-1", "echo_test", "{}")), _text_turn()],
              tool_results={})
     monkeypatch.setattr(server.app_state, "_mode", PROMPT_MODE)
-    with client.websocket_connect("/ws/s-prompt") as ws:
+    with ws_connect(client, "s-prompt") as ws:
         sid = "s-prompt"
         ws.send_json({"type": "user", "text": "要审批的工具"})
         events = []
@@ -360,7 +361,7 @@ def test_mixed_batch_denied_and_executed_all_pair(client, isolated_store, monkey
         rt._permission_policy.with_tool_requirement("echo_test", PLAN_MODE)
         return rt
     monkeypatch.setattr(server, "build_runtime", patched_build)
-    with client.websocket_connect("/ws/s-mix") as ws:
+    with ws_connect(client, "s-mix") as ws:
         sid = "s-mix"
         ws.send_json({"type": "user", "text": "混合批次"})
         events = _drain_until_turn_done(ws, sid)
@@ -380,7 +381,7 @@ def test_tool_use_started_镜像先于tool_use(client, isolated_store, monkeypat
     _install(monkeypatch,
              script=[_tool_turn(("tu-early", "echo_test", '{"n": 1}')), _text_turn()],
              tool_results={})
-    with client.websocket_connect("/ws/s-early") as ws:
+    with ws_connect(client, "s-early") as ws:
         sid = "s-early"
         ws.send_json({"type": "user", "text": "提前建卡"})
         events = _drain_until_turn_done(ws, sid)

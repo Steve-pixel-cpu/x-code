@@ -21,6 +21,7 @@ from models import Message, ImageContentBlock
 from permissions import PermissionDecision, PermissionRequest, PermissionMode
 from runtime import TurnInterrupted
 from storage import SessionStore
+from conftest import ws_connect
 
 
 # ------------------------------------------------------------
@@ -232,15 +233,38 @@ def isolated_store(tmp_path, monkeypatch):
 
 
 def test_ws_unknown_message_type(client, isolated_store):
-    with client.websocket_connect("/ws/s1") as ws:
+    with ws_connect(client, "s1") as ws:
         ws.send_json({"type": "nope"})
         reply = json.loads(ws.receive_text())
         assert reply["type"] == "error"
         assert "未知消息类型" in reply["message"]
 
 
+def test_ws_connect_busy_snapshot_idle(client, isolated_store):
+    """建连快照（闲）: 连接即下发 busy_sync(busy=False)——服务进程死亡丢掉
+    turn_done 后, 重连客户端据此把过期忙碌态与悬空工具卡收口。快照只进
+    本连接队列, 消费完正常消息流不受影响。"""
+    with ws_connect(client, "s-snap-idle") as ws:
+        ws.send_json({"type": "nope"})
+        reply = json.loads(ws.receive_text())
+        assert reply["type"] == "error"
+
+
+def test_ws_connect_busy_snapshot_busy(client, isolated_store):
+    """建连快照（忙）: 会话正跑轮次时快照 busy=True——别的窗口连上来
+    也要跟上忙碌, 保留"运行中"工具卡等活动流的 tool_result 配对闭合。"""
+    web_session = server.get_or_create_web_session("s-snap-busy")
+    web_session.busy = True
+    try:
+        with client.websocket_connect("/ws/s-snap-busy") as ws:
+            first = json.loads(ws.receive_text())
+            assert first == {"type": "busy_sync", "busy": True}
+    finally:
+        web_session.busy = False
+
+
 def test_ws_permission_response_without_pending(client, isolated_store):
-    with client.websocket_connect("/ws/s1") as ws:
+    with ws_connect(client, "s1") as ws:
         ws.send_json({"type": "permission_response", "request_id": "perm-1",
                       "approved": True})
         reply = json.loads(ws.receive_text())
@@ -253,7 +277,7 @@ def test_ws_queues_second_turn_while_busy(client, isolated_store, monkeypatch):
     web_session = server.get_or_create_web_session("s-busy")
     web_session.busy = True
     try:
-        with client.websocket_connect("/ws/s-busy") as ws:
+        with ws_connect(client, "s-busy") as ws:
             ws.send_json({"type": "user", "text": "第二条", "qid": "q-1"})
             reply = json.loads(ws.receive_text())
             assert reply["type"] == "turn_queued_user"
@@ -271,7 +295,7 @@ def test_ws_queue_promote_jumps_queue_while_busy(client, isolated_store):
     web_session.pending = [{"qid": "q-1", "text": "第一条", "attachments": []},
                            {"qid": "q-2", "text": "第二条", "attachments": []}]
     try:
-        with client.websocket_connect("/ws/s-promote") as ws:
+        with ws_connect(client, "s-promote") as ws:
             ws.send_json({"type": "queue_promote", "qid": "q-2"})
             ws.send_json({"type": "nope"})   # 探测: queue_promote 分支应静默
             reply = json.loads(ws.receive_text())
@@ -291,7 +315,7 @@ def test_ws_queue_promote_ignores_unknown_text(client, isolated_store):
     web_session.busy = True
     web_session.pending = [{"qid": "q-1", "text": "第一条", "attachments": []}]
     try:
-        with client.websocket_connect("/ws/s-promote2") as ws:
+        with ws_connect(client, "s-promote2") as ws:
             ws.send_json({"type": "queue_promote", "qid": "不存在的qid"})
             ws.send_json({"type": "nope"})
             reply = json.loads(ws.receive_text())
@@ -311,7 +335,7 @@ def test_ws_queue_remove_drops_pending_text(client, isolated_store):
                            {"qid": "q-2", "text": "第二条", "attachments": []},
                            {"qid": "q-3", "text": "第一条", "attachments": []}]
     try:
-        with client.websocket_connect("/ws/s-rm") as ws:
+        with ws_connect(client, "s-rm") as ws:
             ws.send_json({"type": "queue_remove", "qid": "q-2"})
             ws.send_json({"type": "nope"})
             reply = json.loads(ws.receive_text())
@@ -326,7 +350,7 @@ def test_ws_queue_remove_drops_pending_text(client, isolated_store):
 
 def test_ws_empty_user_message_is_ignored(client, isolated_store):
     """空文本不回错也不开轮: 服务端静默丢弃（收不到任何回复）。"""
-    with client.websocket_connect("/ws/s-empty") as ws:
+    with ws_connect(client, "s-empty") as ws:
         ws.send_json({"type": "user", "text": "   "})
         ws.send_json({"type": "nope"})          # 用已知会回包的消息探测
         reply = json.loads(ws.receive_text())
@@ -711,7 +735,7 @@ def test_ws_user_with_attachments_persists_blocks(client, isolated_store):
     original = server._start_turn
     server._start_turn = fake_start_turn
     try:
-        with client.websocket_connect("/ws/s-att") as ws:
+        with ws_connect(client, "s-att") as ws:
             ws.send_json({
                 "type": "user", "text": "看图",
                 "attachments": [
@@ -743,7 +767,7 @@ def test_ws_user_image_only_not_dropped(client, isolated_store):
     original = server._start_turn
     server._start_turn = fake_start_turn
     try:
-        with client.websocket_connect("/ws/s-imgonly") as ws:
+        with ws_connect(client, "s-imgonly") as ws:
             ws.send_json({
                 "type": "user", "text": "",
                 "attachments": [
@@ -768,7 +792,7 @@ def test_ws_user_oversize_attachment_returns_error(client, isolated_store):
     original = server._start_turn
     server._start_turn = lambda ws, t, e, attachments=None: started.append(1)
     try:
-        with client.websocket_connect("/ws/s-over") as ws:
+        with ws_connect(client, "s-over") as ws:
             ws.send_json({
                 "type": "user", "text": "hi",
                 "attachments": [
@@ -788,7 +812,7 @@ def test_ws_user_oversize_attachment_returns_error(client, isolated_store):
 
 def test_ws_user_empty_text_and_no_attachments_dropped(client, isolated_store):
     """text 与 attachments 同时为空: 静默丢弃。"""
-    with client.websocket_connect("/ws/s-empty2") as ws:
+    with ws_connect(client, "s-empty2") as ws:
         ws.send_json({"type": "user", "text": "   "})
         ws.send_json({"type": "nope"})
         reply = json.loads(ws.receive_text())
@@ -815,7 +839,7 @@ def test_ws_busy_queue_with_attachments_and_qid(client, isolated_store):
     web_session = server.get_or_create_web_session("s-busy-att")
     web_session.busy = True
     try:
-        with client.websocket_connect("/ws/s-busy-att") as ws:
+        with ws_connect(client, "s-busy-att") as ws:
             ws.send_json({
                 "type": "user", "text": "排队看图", "qid": "q-x1",
                 "attachments": [
@@ -839,7 +863,7 @@ def test_ws_busy_queue_without_qid_gets_generated(client, isolated_store):
     web_session = server.get_or_create_web_session("s-busy-noqid")
     web_session.busy = True
     try:
-        with client.websocket_connect("/ws/s-busy-noqid") as ws:
+        with ws_connect(client, "s-busy-noqid") as ws:
             ws.send_json({"type": "user", "text": "旧客户端消息"})
             reply = json.loads(ws.receive_text())
             assert reply["type"] == "turn_queued_user"
@@ -985,7 +1009,7 @@ def test_ws_set_permission_mode_session_scoped(client, isolated_store):
     a.permission_mode = server.NAME_TO_MODE["prompt"]
     b.permission_mode = server.NAME_TO_MODE["prompt"]
     try:
-        with client.websocket_connect("/ws/s-mode-a") as ws:
+        with ws_connect(client, "s-mode-a") as ws:
             ws.send_json({"type": "set_permission_mode", "mode": "workspace-write"})
             reply = json.loads(ws.receive_text())
             assert reply["type"] == "mode_changed"
@@ -997,7 +1021,7 @@ def test_ws_set_permission_mode_session_scoped(client, isolated_store):
 
 
 def test_ws_set_permission_mode_allow_rejected(client, isolated_store):
-    with client.websocket_connect("/ws/s-mode-allow") as ws:
+    with ws_connect(client, "s-mode-allow") as ws:
         ws.send_json({"type": "set_permission_mode", "mode": "allow"})
         reply = json.loads(ws.receive_text())
         assert reply["type"] == "error"
@@ -1022,7 +1046,7 @@ def test_ws_set_permission_mode_applies_to_running_runtime(client, isolated_stor
 
     web_session.runtime = _Rt()
     try:
-        with client.websocket_connect("/ws/s-mode-rt") as ws:
+        with ws_connect(client, "s-mode-rt") as ws:
             ws.send_json({"type": "set_permission_mode", "mode": "read-only"})   # 旧名
             reply = json.loads(ws.receive_text())
             assert reply["type"] == "mode_changed"

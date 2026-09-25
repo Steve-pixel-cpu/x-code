@@ -6,6 +6,9 @@
   工厂镜像同一份连接信息——测试里泄漏的工作线程会拿真实额度打真网
   （表现为用户账户莫名 1302 限流、测试进程被 300s 的 SSL 读拖住）。
   这里在每条用例前统一清空连接信息, 用后恢复。"""
+import json
+from contextlib import contextmanager
+
 import pytest
 
 import server
@@ -58,3 +61,14 @@ def _no_real_api():
     yield
     _apply(saved_key, saved_url)
     multi_agent.set_api_config_provider(saved_provider_fn)
+
+
+@contextmanager
+def ws_connect(client, session_id: str):
+    """建连并消费服务端的首条 busy_sync 快照, 用例内的消息流回到
+    "第一条收到的就是首条回复"的既有假设。快照语义本身在 test_server
+    的专项用例里验证。"""
+    with client.websocket_connect(f"/ws/{session_id}") as ws:
+        first = json.loads(ws.receive_text())
+        assert first["type"] == "busy_sync", f"expected busy_sync, got {first}"
+        yield ws
