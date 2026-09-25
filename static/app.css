@@ -507,7 +507,6 @@
     flex: none; display: flex; align-items: center; gap: 10px;
     height: 56px; padding: 0 22px; border-bottom: 1px solid var(--border);
     background: color-mix(in srgb, var(--bg) 86%, transparent);
-    backdrop-filter: blur(8px);
   }
   @supports not (background: color-mix(in srgb, red 50%, blue)) {
     #doc-header { background: var(--bg); }
