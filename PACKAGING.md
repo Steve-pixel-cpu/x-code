@@ -87,11 +87,63 @@ UTF-8 不经转码；PowerShell 5.1 的 cmdlet 会按 ANSI(GBK) 转码，读 UTF
 | 文件 | 作用 |
 |---|---|
 | `build-exe.cmd` | 一键打包入口：装 PyInstaller → 冻结后端 → 按目标走 Tauri 或 Electron 打包 |
+| `scripts/make-latest.js` | 生成自动更新清单 `dist\latest.json`（版本号 + .sig 签名内容 + 下载直链） |
+| `scripts/publish.cmd` | 发布一个版本：打 tag → `gh release create` 上传安装包/.sig/latest.json |
 | `build/server/x-code-server.exe` | PyInstaller 产物（中间产物），`static/` 已打入 exe 内部 |
 | `src-tauri/tauri.conf.json` | Tauri 配置：窗口、NSIS 打包、后端 exe 经 `bundle.resources` 进安装包 |
-| `src-tauri/src/main.rs` | 桌面壳主体：探活/拉后端/整树杀、令牌门禁、单实例、外部链接转系统浏览器 |
+| `src-tauri/src/main.rs` | 桌面壳主体：探活/拉后端/整树杀、令牌门禁、单实例、外部链接转系统浏览器、自动更新命令 |
 | `src-tauri/icons/icon.ico` | 应用图标（由 `static/icon.png` 转制，256px PNG 直嵌 ICO） |
 | `src-tauri/server/x-code-server.exe` | 打包前从 `build/server/` 复制来的后端（打包脚本自动做） |
+
+## 自动更新（Tauri 版）
+
+发布新版后，已安装旧版的用户**重启应用**即可收到更新提示：启动时静默检查
+GitHub Release 上的更新清单，发现新版本 → 标题栏版本号出现红点 + toast 提示 →
+点击版本号弹更新框（版本号/更新说明/进度条）→「立即更新」应用内下载并自动
+运行安装包（NSIS passive 模式，无交互）→ 重启进入新版。数据都在 `~/.x-code/`，
+更新不丢配置与会话。
+
+### 更新链路
+
+```
+build-exe.cmd tauri <版本>          ← .tauri\x-code.key 签名, 产出 .exe + .exe.sig
+  └─ node scripts\make-latest.js   ← 生成 dist\latest.json（签名内容 + 下载直链）
+scripts\publish.cmd <版本> "说明"    ← git tag v<版本> + gh release create 上传 3 个文件
+                                        ↓
+用户端应用启动 → 读 releases/latest/download/latest.json
+  → 比对版本 → 校验 minisign 签名 → 下载 → 校验 → NSIS 静默装 → 重启
+```
+
+### 签名密钥（重要）
+
+- 私钥 `.tauri/x-code.key`（已 gitignore，**绝不能提交、不能丢**）；公钥已烤进
+  `tauri.conf.json` 的 `plugins.updater.pubkey`，升级包必须持私钥签名，否则用户端
+  拒绝安装（防篡改，无法关闭）。
+- 丢了私钥 = 已发布的老用户收不到自动更新，只能官网重下，且必须换公钥重发一版。
+- 打包时 `build-exe.cmd` 自动把私钥注入 `TAURI_SIGNING_PRIVATE_KEY`；CI 环境改为
+  设置该环境变量即可。无密钥也能打包，但产物没有 `.sig`，无法作为更新目标。
+
+### 发布清单（每次发版）
+
+1. `build-exe.cmd tauri <新版本>`（会同步版本号到四处配置文件）
+2. 确认 `dist\` 里三件套齐全：`x-code_<版本>_x64-setup.exe`、同名 `.sig`、`latest.json`
+3. `scripts\publish.cmd <版本> "更新说明"`（需要 gh CLI 并已 `gh auth login`；
+   没装就按脚本打印的手动步骤在 GitHub 网页上传同样三个文件）
+4. 资产名是约定：tag 必须 `v<版本>`、安装包名不能改——`latest.json` 里的直链靠它定位
+
+### 实现位置
+
+| 侧 | 文件 | 内容 |
+|---|---|---|
+| Rust | `src-tauri/src/main.rs` | `check_update` / `install_update` / `update_status` 三个命令 + `window.xcodeDesktopUpdater` 桥 |
+| 壳配置 | `tauri.conf.json` | `bundle.createUpdaterArtifacts` + `plugins.updater`（公钥/端点/passive 安装） |
+| 前端 | `static/app.js`（UPD 段） | 启动静默检查、徽标红点、更新弹窗与进度轮询 |
+| 进度 | 轮询 `update_status` | 下载进度经静态原子量传递（不用插件事件——远端页面事件 ACL 不可靠） |
+
+更新检查失败的常见原因看 `~/.x-code/boot.log` 的 `[updater]` 段：无网/清单 404
+（还没发过版）/签名不匹配（私钥换过）。
+
+ |
 
 ## 常见问题
 

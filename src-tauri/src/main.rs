@@ -15,6 +15,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
@@ -311,6 +312,122 @@ fn kill_tree(pid: u32) {
     {
         let _ = Command::new("kill").arg(pid.to_string()).status();
     }
+}
+
+// ---------- 自动更新（tauri-plugin-updater） ----------
+
+/// 检查到的待安装更新; install_update 消费后置 None（复用 CHILD 的静态模式）。
+/// Update 非 Clone, 装进 Option 整体替换; INSTALLED 标记防止双击按钮二连装。
+static PENDING_UPDATE: LazyLock<Mutex<Option<tauri_plugin_updater::Update>>> =
+    LazyLock::new(|| Mutex::new(None));
+static INSTALL_STARTED: LazyLock<Mutex<bool>> = LazyLock::new(|| Mutex::new(false));
+
+/// 下载进度: install_update 的回调线程写入, update_status 由前端轮询读取。
+/// phase: 0=空闲 1=下载中 2=下载完成(安装器已拉起) 3=安装失败
+static DL_PHASE: AtomicU8 = AtomicU8::new(0);
+static DL_RECEIVED: AtomicU64 = AtomicU64::new(0);
+static DL_TOTAL: AtomicU64 = AtomicU64::new(0);
+
+/// 检查更新: 有无更新都正常返回（has_update 区分）, 网络失败返回 Err。
+#[tauri::command]
+async fn check_update(app: AppHandle) -> Result<serde_json::Value, String> {
+    use tauri_plugin_updater::UpdaterExt;
+    let current = app.package_info().version.to_string();
+    boot_log("updater", &format!("检查更新（当前 {current}）"));
+    let update = app
+        .updater()
+        .map_err(|e| {
+            boot_log("updater", &format!("ERROR: updater 未就绪: {e}"));
+            format!("更新器未就绪: {e}")
+        })?
+        .check()
+        .await;
+    match update {
+        Ok(Some(update)) => {
+            boot_log("updater", &format!("发现新版本 {}", update.version));
+            *PENDING_UPDATE.lock().unwrap() = Some(update);
+            Ok(serde_json::json!({
+                "hasUpdate": true,
+                "currentVersion": current,
+                "version": PENDING_UPDATE.lock().unwrap().as_ref().map(|u| u.version.clone()),
+                "notes": PENDING_UPDATE.lock().unwrap().as_ref().map(|u| u.body.clone()).flatten(),
+            }))
+        }
+        Ok(None) => {
+            boot_log("updater", "已是最新版本");
+            *PENDING_UPDATE.lock().unwrap() = None;
+            Ok(serde_json::json!({ "hasUpdate": false, "currentVersion": current }))
+        }
+        Err(e) => {
+            boot_log("updater", &format!("ERROR: {e}"));
+            Err(format!("检查更新失败: {e}"))
+        }
+    }
+}
+
+/// 开始下载并安装: 下载在后台线程推进（进度写 DL_* 原子量, 前端轮询
+/// update_status）; 完成后拉起 NSIS 安装器（passive 模式）, 旧进程退出、
+/// 新版本启动。后端子进程由 --parent-pid 看门狗随壳退出, 端口自动释放。
+#[tauri::command]
+async fn install_update(app: AppHandle) -> Result<(), String> {
+    let Some(update) = PENDING_UPDATE.lock().unwrap().take() else {
+        return Err("没有待安装的更新（请先检查更新）".into());
+    };
+    {
+        let mut started = INSTALL_STARTED.lock().unwrap();
+        if *started {
+            return Err("更新已在进行中".into());
+        }
+        *started = true;
+    }
+    DL_TOTAL.store(0, Ordering::SeqCst);
+    DL_RECEIVED.store(0, Ordering::SeqCst);
+    DL_PHASE.store(1, Ordering::SeqCst);
+    boot_log("updater", "开始下载更新");
+    // download_and_install 是 async 且阻塞到安装完成, 放 tauri 异步运行时
+    // 的独立任务里跑, 命令立刻返回——进度靠前端轮询 DL_*
+    let app2 = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let result = update
+            .download_and_install(
+                |chunk, total| {
+                    if let Some(t) = total {
+                        DL_TOTAL.store(t as u64, Ordering::SeqCst);
+                    }
+                    DL_RECEIVED.fetch_add(chunk as u64, Ordering::SeqCst);
+                },
+                || {
+                    DL_PHASE.store(2, Ordering::SeqCst);
+                    boot_log("updater", "下载完成, 拉起安装器");
+                },
+            )
+            .await;
+        match result {
+            Ok(()) => {
+                // Windows NSIS: 安装器运行时本进程已被要求退出; 若仍在运行
+                // （被动安装的边缘情况）, 主动重启走正常退出路径（杀后端）
+                boot_log("updater", "更新安装完成, 重启应用");
+                let _ = app2.restart();
+            }
+            Err(e) => {
+                boot_log("updater", &format!("ERROR: 安装失败: {e}"));
+                DL_PHASE.store(3, Ordering::SeqCst);
+                *INSTALL_STARTED.lock().unwrap() = false;
+                *PENDING_UPDATE.lock().unwrap() = None;
+            }
+        }
+    });
+    Ok(())
+}
+
+/// 前端轮询的进度快照
+#[tauri::command]
+fn update_status() -> serde_json::Value {
+    serde_json::json!({
+        "phase": DL_PHASE.load(Ordering::SeqCst),
+        "received": DL_RECEIVED.load(Ordering::SeqCst),
+        "total": DL_TOTAL.load(Ordering::SeqCst),
+    })
 }
 
 // ---------- 对话框 ----------
@@ -687,6 +804,26 @@ const BRIDGE_JS: &str = r#"
       resizePet: (scale) => petInvoke('resize_pet_window', { scale: Number(scale) || 1 }),
     };
   }
+  // 自动更新桥: 检查/安装/进度查询。安装进度走轮询而非事件监听——
+  // 远端上下文的事件 ACL 曾实测拒过插件命令, invoke 应用命令是已验证的路子。
+  if (!window.xcodeDesktopUpdater) {
+    const updInvoke = async (cmd) => {
+      if (!window.__TAURI_INTERNALS__) {
+        throw new Error('桌面桥未就绪（__TAURI_INTERNALS__ 缺失）');
+      }
+      try {
+        return await window.__TAURI_INTERNALS__.invoke(cmd);
+      } catch (e) {
+        console.error('[xcode] ' + cmd + ' IPC 失败:', e);
+        throw e;
+      }
+    };
+    window.xcodeDesktopUpdater = {
+      check: () => updInvoke('check_update'),
+      install: () => updInvoke('install_update'),
+      status: () => updInvoke('update_status'),
+    };
+  }
   // 2) DOM 相关: 注入时机 documentElement 可能尚未创建 → 空值安全 + 就绪后补挂
   const installDom = () => {
     if (document.documentElement.dataset.xcodeDomInstalled) return;  // 重申幂等
@@ -720,6 +857,7 @@ fn main() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             // 单实例: 二次启动只把已有窗口带到前台
             if let Some(win) = app.get_webview_window("main") {
@@ -731,6 +869,9 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             pick_folder,
             notify_desktop,
+            check_update,
+            install_update,
+            update_status,
             minimize_main,
             toggle_maximize_main,
             close_main,

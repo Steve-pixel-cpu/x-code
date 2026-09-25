@@ -1,6 +1,6 @@
 [package]
 name = "x-code"
-version = "3.3.0"
+version = "3.3.1"
 description = "x-code 桌面壳（Tauri 版）"
 edition = "2021"
 
@@ -18,6 +18,11 @@ rfd = "0.15"
 # 系统原生桌面通知: WebView2 未实现 Web Notification API, 前端的
 # new Notification() 在壳里静默失败——由壳内 notify_desktop 命令代发
 tauri-plugin-notification = "2"
+# 应用内自动更新: 启动检查 + 签名校验 + NSIS 被动安装。经自定义命令
+# (check_update/install_update/update_status)暴露给前端, 不用插件的 JS 绑定
+tauri-plugin-updater = "2"
+# 更新命令的返回值结构（tauri 内部也用它, 但命令签名直接引用需显式依赖）
+serde_json = "1"
 
 # 关闭 WebView2 浏览器快捷键（F5/Ctrl+R 刷新等, tauri 未透传该设置）
 [target.'cfg(windows)'.dependencies]

@@ -13,6 +13,9 @@ fn main() {
             .app_manifest(tauri_build::AppManifest::new().commands(&[
                 "pick_folder",
                 "notify_desktop",
+                "check_update",
+                "install_update",
+                "update_status",
                 "minimize_main",
                 "toggle_maximize_main",
                 "close_main",
