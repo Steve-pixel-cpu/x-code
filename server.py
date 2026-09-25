@@ -2820,6 +2820,11 @@ if __name__ == "__main__":
     args = sys.argv[1:]
     port = int(args[args.index("--port") + 1]) if "--port" in args \
         else int(os.getenv("XCODE_PORT") or 8000)
+    # 端口文件: 壳由此得知避让后的实际端口。发布壳与开发态各用各的文件
+    # （发布壳以 --port/--port-file 显式传入, 两种形态可同时存活互不抢占）
+    port_file = USER_DIR / "port"
+    if "--port-file" in args:
+        port_file = Path(args[args.index("--port-file") + 1])
 
     # 父进程看门狗: 桌面壳拉起后端时把自己的 PID 传进来。壳无论怎么死
     # （正常退出/崩溃/被任务管理器强杀, RunEvent 清理都来不及跑）, OS 都会
@@ -2846,15 +2851,17 @@ if __name__ == "__main__":
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             return s.connect_ex(("127.0.0.1", p)) != 0
 
-    # C-Lodop 等程序会抢占 8000: 被占则自动向后避让（8010–8019）,
-    # 实际端口写 ~/.x-code/port, 桌面壳由此得知该访问哪个端口
-    candidates = [port] + [q for q in range(8010, 8020) if q != port]
+    # 端口被占则向后避让（基准+10 起的 10 个）: 开发态 8000 → 8010–8019
+    # （与既有行为一致）, 发布版 18080 → 18090–18099。实际端口写 port 文件,
+    # 桌面壳由此得知该访问哪个端口
+    candidates = [port] + [q for q in range(port + 10, port + 20) if q != port]
     chosen = next((q for q in candidates if _port_free(q)), None)
     if chosen is None:
-        print("✗ 8000–8019 端口全部被占用（如 C-Lodop 打印服务）, 请释放后重试")
+        print(f"✗ {port}–{port + 19} 端口全部被占用（如 C-Lodop 打印服务）, 请释放后重试")
         sys.exit(1)
     USER_DIR.mkdir(parents=True, exist_ok=True)
-    (USER_DIR / "port").write_text(str(chosen), encoding="utf-8")
+    port_file.parent.mkdir(parents=True, exist_ok=True)
+    port_file.write_text(str(chosen), encoding="utf-8")
     (USER_DIR / "startup-error.log").unlink(missing_ok=True)   # 启动成功: 旧原因作废
     print(f"✓ x-code 服务: http://127.0.0.1:{chosen}")
     uvicorn.run(app, host="127.0.0.1", port=chosen)

@@ -1,6 +1,8 @@
 // x-code 桌面壳:
-//   - 端口 8000 上已有 x-code 服务在跑 → 直接复用, 不拉进程、退出时不杀
-//   - 否则拉起 .venv 里的 python server.py 作为子进程, 退出时整树杀掉
+//   - 缺省端口上已有 x-code 服务在跑 → 直接复用, 不拉进程、退出时不杀
+//     （开发态 8000 / ~/.x-code/port; 打包态 18080 / ~/.x-code/release-port,
+//      与开发/测试后端隔离, 两种形态可同时存活）
+//   - 否则拉起后端（.venv 里的 python server.py / 打包态冻结二进制）, 退出时整树杀掉
 //   - 窗口只加载本地服务; 外部链接一律转交系统浏览器, 防止窗口被带跑
 const { app, BrowserWindow, shell, dialog, Menu, ipcMain, session, clipboard } = require("electron");
 const { spawn } = require("child_process");
@@ -28,15 +30,19 @@ function ensureToken() {
 }
 const API_TOKEN = ensureToken();
 
-// 后端端口: 默认 8000, 被 C-Lodop 等程序占用时后端自动避让（8010–8019）,
-// 实际端口写在 ~/.x-code/port, 这里动态读取
-const PORT_FILE = path.join(os.homedir(), ".x-code", "port");
+// 后端端口: 开发态缺省 8000（被占时后端避让 8010–8019, 端口文件 ~/.x-code/port）;
+// 打包态缺省 18080（避让 18090–18099, 端口文件 ~/.x-code/release-port, 以
+// --port/--port-file 显式传给后端）——不与开发/测试后端常占的 8000 撞车,
+// 两种形态可同时存活
+const PORT_FILE = path.join(os.homedir(), ".x-code",
+  app.isPackaged ? "release-port" : "port");
+const DEFAULT_PORT = app.isPackaged ? 18080 : 8000;
 function readPort() {
   try {
     const p = parseInt(fs.readFileSync(PORT_FILE, "utf-8").trim(), 10);
     if (p > 0 && p < 65536) return p;
-  } catch (e) { /* 文件不存在: 默认 8000 */ }
-  return 8000;
+  } catch (e) { /* 文件不存在: 用缺省端口 */ }
+  return DEFAULT_PORT;
 }
 let basePort = readPort();
 const baseUrl = () => `http://127.0.0.1:${basePort}`;
@@ -75,7 +81,13 @@ function startServer() {
       process.platform === "win32" ? "x-code-server.exe" : "x-code-server");
     const dataDir = path.join(app.getPath("home"), ".x-code");
     fs.mkdirSync(dataDir, { recursive: true });
-    const proc = spawn(exe, ["--parent-pid", String(process.pid)], {
+    // --port/--port-file: 发布版固定用 18080 段（写 release-port 文件）,
+    // 不与开发/测试后端常占的 8000 撞车, 两种形态可同时存活
+    const proc = spawn(exe, [
+      "--port", String(DEFAULT_PORT),
+      "--port-file", PORT_FILE,
+      "--parent-pid", String(process.pid),
+    ], {
       cwd: dataDir,
       windowsHide: true,
       detached: process.platform !== "win32",   // posix: 独立进程组, 退出时整组杀
@@ -148,7 +160,7 @@ async function createWindow() {
     if (!(await waitServer(30000))) {
       dialog.showErrorBox(
         "x-code 启动失败",
-        "Python 后端在 30 秒内未能就绪。\n若 8000–8019 端口被其他程序占用, 请关闭后重试。"
+        `Python 后端在 30 秒内未能就绪。\n若 ${DEFAULT_PORT}–${DEFAULT_PORT + 19} 端口被其他程序占用, 请关闭后重试。`
       );
       app.quit();
       return;

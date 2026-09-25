@@ -1,6 +1,8 @@
 ﻿// x-code 桌面壳（Tauri 版）, 对齐 electron/main.js 的全部行为:
 //   1. 令牌: 与后端共享 ~/.x-code/token, 打开页面时经 ?token= 传入（index.html 里种成 cookie）
-//   2. 端口: 读 ~/.x-code/port（缺省 8000）; 后端被占端口自动避让 8010–8019 并回写该文件
+//   2. 端口: 开发态读 ~/.x-code/port（缺省 8000, 避让 8010–8019）; 发布态读
+//      ~/.x-code/release-port（缺省 18080, 避让 18090–18099, 以 --port/--port-file
+//      显式传给后端）——不与开发/测试后端常占的 8000 撞车, 两种形态可同时存活
 //   3. 探活: GET /api/ping 须 200 且 body 含 "x-code"（8000 被 C-Lodop 等抢占时不能误判为就绪）
 //   4. 复用: 已有 x-code 服务在跑 → 直接连, 不拉进程、退出时不杀
 //   5. 拉起: 打包态用冻结后端（resources/server/x-code-server.exe, cwd=~/.x-code）,
@@ -84,11 +86,34 @@ fn random_hex32() -> String {
     format!("{t:032x}{:016x}deadbeefdeadbeef", std::process::id() as u128,)[..64].to_string()
 }
 
+/// 发布态判定: 后端 sidecar 随包分发在 <exe>\resources\server\ 下。
+/// 发布态与开发态用不同的缺省端口/端口文件（见 port_file），互不抢占。
+fn sidecar_exe() -> Option<PathBuf> {
+    std::env::current_exe().ok().and_then(|exe| {
+        let p = exe
+            .parent()?
+            .join("resources/server/x-code-server.exe");
+        p.exists().then_some(p)
+    })
+}
+
+fn release_mode() -> bool {
+    sidecar_exe().is_some()
+}
+
+fn default_port() -> u16 {
+    if release_mode() { 18080 } else { 8000 }
+}
+
+fn port_file() -> PathBuf {
+    data_dir().join(if release_mode() { "release-port" } else { "port" })
+}
+
 fn read_port() -> u16 {
-    read_trim(&data_dir().join("port"))
+    read_trim(&port_file())
         .and_then(|s| s.parse::<u16>().ok())
         .filter(|p| *p > 0)
-        .unwrap_or(8000)
+        .unwrap_or_else(default_port)
 }
 
 // ---------- 探活 ----------
@@ -240,20 +265,23 @@ fn spawn_backend(program: PathBuf, args: Vec<String>, cwd: PathBuf) -> Result<Ch
 
 fn start_server() -> Result<Child, String> {
     // 打包态: 冻结后端随包分发在 <exe>\resources\server\; cwd 指向 ~/.x-code（.env/会话/配置在那里）
-    let sidecar = std::env::current_exe().ok().and_then(|exe| {
-        let p = exe
-            .parent()?
-            .join("resources/server/x-code-server.exe");
-        p.exists().then_some(p)
-    });
-    if let Some(exe_path) = sidecar {
+    if let Some(exe_path) = sidecar_exe() {
         let _ = std::fs::create_dir_all(data_dir());
         boot_log("shell", &format!("打包态: 拉起冻结后端 {}", exe_path.display()));
         // --parent-pid: 后端内置看门狗, 壳死亡(含崩溃/被强杀)时后端立刻退出,
-        // 端口随之释放——ExitRequested 清理只覆盖正常退出路径
+        // 端口随之释放——ExitRequested 清理只覆盖正常退出路径。
+        // --port/--port-file: 发布版固定用 18080 段（写 release-port 文件）,
+        // 不与开发/测试后端常占的 8000 撞车, 两种形态可同时存活
         return spawn_backend(
             exe_path,
-            vec!["--parent-pid".to_string(), std::process::id().to_string()],
+            vec![
+                "--port".to_string(),
+                default_port().to_string(),
+                "--port-file".to_string(),
+                port_file().to_string_lossy().to_string(),
+                "--parent-pid".to_string(),
+                std::process::id().to_string(),
+            ],
             data_dir(),
         );
     }
@@ -971,7 +999,9 @@ fn bootstrap(token: &str) -> Result<(), String> {
         std::thread::sleep(Duration::from_millis(300));
     }
     Err(format!(
-        "Python 后端在 60 秒内未能就绪。\n可能原因: ① 8000-8019 端口被其他程序占用; ② 杀毒软件拦截后端进程（请查杀软隔离区并加白名单）。\n后端完整输出已写入 {}, 反馈问题时请附上该文件。",
+        "Python 后端在 60 秒内未能就绪。\n可能原因: ① {}-{} 端口被其他程序占用; ② 杀毒软件拦截后端进程（请查杀软隔离区并加白名单）。\n后端完整输出已写入 {}",
+        default_port(),
+        default_port() + 19,
         log.display()
     ))
 }
