@@ -19,16 +19,21 @@
   const toastFn = window.xcodeToast || (msg => console.log("[music]", msg));
 
   const mstate = {
-    queue: [],            // 当前播放队列 [{id,name,artist,album,duration,fee,pic}]
+    queue: [],            // 当前播放队列 [{id,name,artist,album,duration,fee,pic,source}]
     qname: "",            // 队列来源名（「收藏」/「我的歌单: xx」/「搜索: xx」）
     index: -1,            // 当前歌在队列里的下标
     mode: "order",        // order | one | shuffle
     playing: false,
     failedStreak: 0,      // 连续跳过计数: 防"全队列不可播"死循环
+    src: "netease",       // 搜索来源: netease | bili
     library: { favorites: [], playlists: [] },   // 本地曲库, 写操作后整体刷新
     mineView: null,       // 我的歌单 Tab: null=歌单列表; 数字=正在看的歌单 id
   };
   let audio = null;
+
+  /* 曲库/队列项 id 是混合形态（网易云 int / B站 BV 号字符串）,
+     所有「同一首」判断都用复合键 source:id, 防止 BV 号撞数字 id */
+  const srcKey = s => (s.source || "netease") + ":" + String(s.id);
 
   const MKEY = "xc-music";
   const pref = (() => {
@@ -88,8 +93,25 @@
 
   function refreshBar() {
     const s = curSong();
-    $("music-title").textContent = s ? s.name : "未在播放";
+    const title = $("music-title");
+    const wrap = $("music-title-wrap");
+    const inner = $("music-title-inner");
+    const clone = $("music-title-clone");
+    title.textContent = s ? s.name : "未在播放";
     $("music-artist").textContent = s ? s.artist : "";
+    clone.textContent = title.textContent;
+    /* 标题自身超宽才滚动（marquee）: 不能用 wrap.scrollWidth —— 那会把
+       克隆副本的宽度算进去, 等效阈值变成"标题超过一半就滚", 放得下的
+       也转起来。停一帧等字体就绪再量宽。 */
+    requestAnimationFrame(() => {
+      const overflows = title.scrollWidth > wrap.clientWidth + 2;
+      if (s) {
+        const dist = title.scrollWidth + 40;   // 位移 = 一份标题 + 40px 间距
+        inner.dataset.dur = Math.max(6, Math.round(dist / 60));
+        inner.style.setProperty("--md-scroll-dur", (inner.dataset.dur || 10) + "s");
+      }
+      inner.classList.toggle("scroll", !!s && overflows);
+    });
     if (s) {
       document.title = s.name + " - " + s.artist;   // 摸鱼: 标题栏只显示歌名
       if (s.pic) {
@@ -117,6 +139,7 @@
     markPlayingRow();
     const a = getAudio();
     try {
+      if ((s.source || "netease") === "bili") return await playBili(a, s);
       const r = await fetch(`/api/music/url?id=${s.id}&br=128000`);
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
       const data = await r.json();
@@ -132,6 +155,22 @@
       toastFn("播放失败: " + (e && e.message || e));
       return skipFailed();
     }
+  }
+
+  /* B 站视频纯音频: 先拿本地代理 token, 再挂到 <audio> 出声。
+     带 Range 请求支持断点续传（快进 seek 会发第二次 Range 请求,
+     后端转发直链天然支持）。 */
+  async function playBili(a, s) {
+    const r = await fetch(`/api/bili/url?bvid=${encodeURIComponent(s.id)}`);
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const data = await r.json();
+    if (!data.url) {
+      toastFn(`「${s.name}」没有可播音频, 已跳过`);
+      return skipFailed();
+    }
+    a.src = `/api/bili/stream?token=${encodeURIComponent(data.token)}`;
+    await a.play();
+    mstate.failedStreak = 0;
   }
 
   /* 当前歌拿不到直链/播放出错: 自动下一首, 连续失败超限就停 */
@@ -164,6 +203,17 @@
   }
   function musicPrev() { playIndex(mstate.index - 1); }
 
+  /* 播放键共用入口。刷新恢复队列后 audio 还没挂音源（src 为空）, 裸 play()
+     是无声空拍（异常被吞, UI 也不动）——先走 playIndex 取 URL 挂源, 顺带
+     刷新已过期的直链; 已挂源才原地续播/暂停。 */
+  function togglePlay() {
+    if (!curSong()) { openMusicPanel(); return; }   // 还没选歌: 引导去面板
+    const a = getAudio();
+    if (!a.paused) { a.pause(); return; }
+    if (!a.src) { playIndex(mstate.index); return; }
+    a.play().catch(() => {});
+  }
+
   /* ---- 本地曲库 API（收藏 / 我的歌单）---- */
   async function libFetch(url, opts) {
     const r = await fetch(url, opts);
@@ -176,14 +226,17 @@
     mstate.library = await libFetch("/api/music/library");
   }
 
-  function isFav(songId) {
-    return mstate.library.favorites.some(s => s.id === songId);
+  function isFav(s) {
+    if (!s || typeof s === "number") return false;
+    return mstate.library.favorites.some(x => srcKey(x) === srcKey(s));
   }
 
   async function toggleFav(s) {
+    const key = srcKey(s);
     try {
-      if (isFav(s.id)) {
-        await libFetch(`/api/music/favorites/${s.id}`, { method: "DELETE" });
+      if (isFav(s)) {
+        await libFetch(`/api/music/favorites/${encodeURIComponent(s.id)}?source=${s.source || "netease"}`,
+                       { method: "DELETE" });
         toastFn(`已取消收藏「${s.name}」`);
       } else {
         await libFetch("/api/music/favorites", {
@@ -208,16 +261,19 @@
   function refreshFavHearts() {
     $$("#music-panel .mp-song").forEach(row => {
       const btn = row.querySelector(".mp-s-fav");
-      if (btn) btn.classList.toggle("on", isFav(Number(row.dataset.songId)));
+      if (!btn) return;
+      const key = (row.dataset.src || "netease") + ":" + row.dataset.songId;
+      btn.classList.toggle("on", mstate.library.favorites.some(s => srcKey(s) === key));
     });
   }
 
   /* 把歌追加进当前播放列表（不打断正在放的歌, 也不动当前下标） */
   function appendQueue(songs, label) {
-    const known = new Set(mstate.queue.map(s => s.id));
+    const known = new Set(mstate.queue.map(srcKey));
     let n = 0;
     songs.forEach(s => {
-      if (!known.has(s.id)) { mstate.queue.push(s); known.add(s.id); n++; }
+      const k = srcKey(s);
+      if (!known.has(k)) { mstate.queue.push(s); known.add(k); n++; }
     });
     savePref();
     if (!n) {
@@ -237,7 +293,7 @@
      队列是唯一的播放真相源 —— 搜索只浏览, 绝不整表替换队列
      （老行为把搜索结果整个灌进播放列表, 就是「点＋却加了一页」的根源）。 */
   function playFromBrowse(s) {
-    const at = mstate.queue.findIndex(q => q.id === s.id);
+    const at = mstate.queue.findIndex(q => srcKey(q) === srcKey(s));
     if (at >= 0) { playIndex(at); return; }
     const insertAt = mstate.index >= 0 ? mstate.index + 1 : mstate.queue.length;
     mstate.queue.splice(insertAt, 0, s);
@@ -334,6 +390,8 @@
     const row = document.createElement("div");
     row.className = "mp-song";
     row.dataset.songId = s.id;
+    row.dataset.src = s.source || "netease";
+    const fav = mstate.library.favorites.some(x => srcKey(x) === srcKey(s));
     const delBtn = opts.deletable
       ? '<button class="mp-s-del" data-tip="移出列表"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg></button>'
       : "";
@@ -342,10 +400,11 @@
       `<span class="mp-s-idx">${i + 1}</span>` +
       '<span class="mp-s-main"><span class="mp-s-name"></span>' +
       '<span class="mp-s-artist"></span></span>' +
-      (s.fee === 1 ? '<span class="mp-s-tag">VIP</span>' : "") +
+      (s.source === "bili" ? '<span class="mp-s-tag bili">B站</span>'
+         : (s.fee === 1 ? '<span class="mp-s-tag">VIP</span>' : "")) +
       `<span class="mp-s-dur">${fmtTime(s.duration)}</span>` +
       `<button class="mp-s-add" data-tip="添加到…"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg></button>` +
-      `<button class="mp-s-fav${isFav(s.id) ? " on" : ""}" data-tip="收藏"><svg width="13" height="13" viewBox="0 0 24 24"><path d="M12 21s-7.5-4.9-10-9.6C.4 8 2 4.5 5.5 4.2 7.7 4 9.5 5.3 12 7.8c2.5-2.5 4.3-3.8 6.5-3.6C22 4.5 23.6 8 22 11.4 19.5 16.1 12 21 12 21z" fill="${isFav(s.id) ? "currentColor" : "none"}" stroke="currentColor" stroke-width="1.8"/></svg></button>` +
+      `<button class="mp-s-fav${fav ? " on" : ""}" data-tip="收藏"><svg width="13" height="13" viewBox="0 0 24 24"><path d="M12 21s-7.5-4.9-10-9.6C.4 8 2 4.5 5.5 4.2 7.7 4 9.5 5.3 12 7.8c2.5-2.5 4.3-3.8 6.5-3.6C22 4.5 23.6 8 22 11.4 19.5 16.1 12 21 12 21z" fill="${fav ? "currentColor" : "none"}" stroke="currentColor" stroke-width="1.8"/></svg></button>` +
       delBtn;
     row.querySelector(".mp-s-name").textContent = s.name;
     row.querySelector(".mp-s-artist").textContent = s.artist;
@@ -397,10 +456,19 @@
     const body = $("music-search-results");
     body.innerHTML = '<div class="mp-empty">搜索中…</div>';
     try {
-      const r = await fetch(`/api/music/search?kw=${encodeURIComponent(kw)}`);
+      const endpoint = mstate.src === "bili"
+        ? `/api/bili/search?kw=${encodeURIComponent(kw)}&limit=30`
+        : `/api/music/search?kw=${encodeURIComponent(kw)}`;
+      const r = await fetch(endpoint);
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
       const data = await r.json();
-      renderSongList(body, data.songs);   // 纯浏览: 点行插播, 不动队列
+      const songs = mstate.src === "bili" ? (data.videos || []) : (data.songs || []);
+      if (!songs.length) {
+        body.innerHTML = `<div class="mp-empty">没搜到「${escapeText(kw)}」相关的${
+          mstate.src === "bili" ? "视频" : "歌曲"}</div>`;
+        return;
+      }
+      renderSongList(body, songs);   // 纯浏览: 点行插播, 不动队列
     } catch (e) {
       body.innerHTML = `<div class="mp-empty">搜索失败: ${escapeText(e.message)}</div>`;
     }
@@ -499,7 +567,8 @@
         deletable: true,
         onDelete: async (song) => {
           try {
-            await libFetch(`/api/music/favorites/${song.id}`, { method: "DELETE" });
+            await libFetch(`/api/music/favorites/${encodeURIComponent(song.id)}?source=${song.source || "netease"}`,
+                       { method: "DELETE" });
             await refreshLibrary();
             renderFavTab();
           } catch (e) {
@@ -566,7 +635,8 @@
         deletable: true,
         onDelete: async (song) => {
           try {
-            await libFetch(`/api/music/playlists/${pl.id}/songs/${song.id}`, { method: "DELETE" });
+            await libFetch(`/api/music/playlists/${pl.id}/songs/${encodeURIComponent(song.id)}?source=${song.source || "netease"}`,
+                       { method: "DELETE" });
             await refreshLibrary();
             renderMineTab();
           } catch (e) {
@@ -754,11 +824,7 @@
     showDock(allClosed);
   };
   $("music-hide").onclick = () => showDock(false);
-  $("music-toggle").onclick = () => {
-    if (!curSong()) { openMusicPanel(); return; }   // 还没选歌: 引导去面板
-    const a = getAudio();
-    if (a.paused) a.play().catch(() => {}); else a.pause();
-  };
+  $("music-toggle").onclick = togglePlay;
   $("music-next").onclick = () => musicNext(false);
   $("music-prev").onclick = musicPrev;
   $("music-list-btn").onclick = () => {
@@ -785,24 +851,44 @@
     ev.stopPropagation();
     if (ev.key === "Enter") doSearch();
   });
+  /* 搜索来源切换: 网易云 / B站。切来源时清空结果, 换 placeholder */
+  $$("#music-src-btns > button").forEach(b => {
+    b.onclick = () => {
+      $$("#music-src-btns > button").forEach(x => x.classList.remove("on"));
+      b.classList.add("on");
+      mstate.src = b.dataset.src;
+      $("music-src-btns").dataset.src = mstate.src;   // 驱动滑块位
+      const input = $("music-search-input");
+      input.placeholder = mstate.src === "bili"
+        ? "搜视频 / UP主，回车搜索"
+        : "搜歌名 / 歌手，回车搜索";
+      $("music-search-results").innerHTML =
+        `<div class="mp-empty">${mstate.src === "bili" ? "B站视频只取音轨, 画面不进电台" : "搜歌名 / 歌手"}</div>`;
+    };
+  });
   $("music-seek").onclick = (ev) => {
     if (!audio || !isFinite(audio.duration)) return;
     const rect = ev.currentTarget.getBoundingClientRect();
     audio.currentTime = (ev.clientX - rect.left) / rect.width * audio.duration;
   };
-  /* 窗口缩放时面板跟着 dock 重新锚定 */
+  /* 窗口缩放时面板跟着 dock 重新锚定; 标题是否超宽也随宽度重判 */
   window.addEventListener("resize", () => {
     if (!$("music-panel").hidden) anchorPanel();
+    refreshBar();
   });
-  /* 点面板外收起（播放条按钮除外） */
+  /* 点面板外收起（播放条按钮除外）;
+     添加菜单(#music-add-menu)挂在 body 上、不在 panel 内, 点它不算"面板外",
+     否则一点菜单按钮/菜单项面板就整个收起 —— 搜索页跟着消失。 */
   document.addEventListener("mousedown", (ev) => {
     if ($("music-panel").hidden) return;
     const panel = $("music-panel");
     const trigger = $("btn-music");
     const dock = $("music-dock");
+    const menu = $("music-add-menu");
     if (!panel.contains(ev.target)
         && !(trigger && trigger.contains(ev.target))
-        && !(dock && dock.contains(ev.target))) {
+        && !(dock && dock.contains(ev.target))
+        && !(menu && menu.contains(ev.target))) {
       closeMusicPanel();
     }
   });
@@ -810,7 +896,12 @@
   /* mediaSession 硬件键（耳机切歌等） */
   if ("mediaSession" in navigator) {
     try {
-      navigator.mediaSession.setActionHandler("play", () => getAudio().play().catch(() => {}));
+      navigator.mediaSession.setActionHandler("play", () => {
+        if (!curSong()) return;
+        const a = getAudio();
+        if (!a.src) { playIndex(mstate.index); return; }   // 刷新后首播: 先挂源
+        a.play().catch(() => {});
+      });
       navigator.mediaSession.setActionHandler("pause", () => getAudio().pause());
       navigator.mediaSession.setActionHandler("previoustrack", musicPrev);
       navigator.mediaSession.setActionHandler("nexttrack", () => musicNext(false));
@@ -834,10 +925,10 @@
   window.xcodeMusicPlay = function (cmd) {
     if (!DESKTOP_PAGE) return false;
     const songs = (cmd && Array.isArray(cmd.queue) ? cmd.queue : [])
-      .filter(s => s && Number.isInteger(Number(s.id)) && s.name);
+      .filter(s => s && s.name && String(s.id));
     if (!songs.length) return false;
-    const wantId = Number(cmd.song && cmd.song.id);
-    let at = songs.findIndex(s => Number(s.id) === wantId);
+    const wantKey = srcKey(cmd.song);              // 「source:id」复合键
+    let at = songs.findIndex(s => srcKey(s) === wantKey);
     if (at < 0) at = 0;
     mstate.queue = songs;
     mstate.qname = typeof cmd.qname === "string" && cmd.qname ? cmd.qname : "聊天点播";

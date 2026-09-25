@@ -39,7 +39,8 @@ PLAYLISTS_MAX = 50
 PLAYLIST_NAME_MAX = 40
 PLAYLIST_SONGS_MAX = 500
 
-_SONG_FIELDS = ("id", "name", "artist", "album", "duration", "fee", "pic")
+_SONG_FIELDS = ("id", "name", "artist", "album", "duration", "fee", "pic",
+                "source")
 
 
 class MusicApiError(Exception):
@@ -88,17 +89,37 @@ def _song_brief(s: dict) -> dict:
         "duration": round((s.get("duration") or s.get("dt") or 0) / 1000, 1),
         "fee": s.get("fee") or 0,
         "pic": _https(album.get("picUrl") or ""),
+        "source": "netease",   # 网易云搜索结果一律打标; B 站视频走 bilibili.py
     }
 
 
+def _song_key(s: dict) -> tuple:
+    """曲库去重/收藏判断用复合键: 网易云歌以整数 id 去重, B 站视频以 BV 号去重。
+    老收藏数据没有 source, 补成 ('netease', id) —— 向后兼容旧文件。"""
+    src = s.get("source") or "netease"
+    return (src, _norm_id(src, s.get("id")))
+
+
+def _norm_id(source: str, sid: Any) -> Any:
+    """URL/JSON 传参可能是字符串; 与库里存的 id 对齐再比（int vs '42' 不等）。
+    B 站 id 是 BV 号, 恒转字符串; 网易云尽量 int, 转不了就原样（防炸）。"""
+    if source == "bili":
+        return str(sid)
+    try:
+        return int(sid)
+    except (TypeError, ValueError):
+        return sid
+
+
 def _norm_song(raw: Any) -> Optional[dict]:
-    """把客户端传来的歌曲压成白名单字段。必须能对出 int id + 非空 name,
-    否则返回 None（拒收）——防止任意 JSON 原样落盘。"""
+    """把客户端传来的歌曲/视频压成白名单字段。必须能对出非空 id + 非空 name,
+    否则返回 None（拒收）——防止任意 JSON 原样落盘。
+    id 保留原样（网易云是 int, B 站是 BV 号字符串）; 与库内对齐在 add 时做。
+    source 只收 netease/bili 两个值, 其余一律按 netease 处理。"""
     if not isinstance(raw, dict):
         return None
-    try:
-        sid = int(raw.get("id"))
-    except (TypeError, ValueError):
+    sid = raw.get("id")
+    if sid is None or str(sid).strip() in ("", "None"):
         return None
     name = str(raw.get("name") or "").strip()
     if not name:
@@ -106,6 +127,7 @@ def _norm_song(raw: Any) -> Optional[dict]:
     out = {k: raw.get(k) for k in _SONG_FIELDS}
     out["id"] = sid
     out["name"] = name
+    out["source"] = "bili" if raw.get("source") == "bili" else "netease"
     return out
 
 
@@ -116,8 +138,8 @@ def _norm_songs(raw_songs: Any) -> list[dict]:
     songs, seen = [], set()
     for raw in raw_songs:
         s = _norm_song(raw)
-        if s and s["id"] not in seen:
-            seen.add(s["id"])
+        if s and _song_key(s) not in seen:
+            seen.add(_song_key(s))
             songs.append(s)
     return songs
 
@@ -165,28 +187,32 @@ def list_library() -> dict:
 
 
 def add_favorites(songs: Any) -> dict:
-    """收藏歌曲: 按 id 去重（已在收藏里的跳过）, 超上限裁掉多余的并提示数量。"""
+    """收藏歌曲/视频: 按「来源+id」复合键去重（已收藏的跳过）,
+    超上限裁掉多余的并提示数量。B 站视频 id 是 BV 号字符串, 或数字 id。"""
     lib = _load_library()
-    existing = {s["id"] for s in lib["favorites"]}
+    existing = {_song_key(s) for s in lib["favorites"]}
     added = 0
     for s in _norm_songs(songs):
-        if s["id"] in existing:
+        s["id"] = _norm_id(s.get("source") or "netease", s["id"])
+        if _song_key(s) in existing:
             continue
         if len(lib["favorites"]) >= FAVORITES_MAX:
             break
         lib["favorites"].append(s)
-        existing.add(s["id"])
+        existing.add(_song_key(s))
         added += 1
     if added:
         _save_library(lib)
     return {"added": added, "favorites": lib["favorites"]}
 
 
-def remove_favorite(song_id: int) -> dict:
-    song_id = int(song_id)
+def remove_favorite(song_id: Any, source: str = "netease") -> dict:
+    """取消收藏。收藏是「来源+id」复合键: 网易云按数字 id 删, B 站按 BV 号删。"""
+    song_id = _norm_id(source, song_id)
     lib = _load_library()
     before = len(lib["favorites"])
-    lib["favorites"] = [s for s in lib["favorites"] if s["id"] != song_id]
+    lib["favorites"] = [s for s in lib["favorites"]
+                        if _song_key(s) != (source, song_id)]
     if len(lib["favorites"]) == before:
         raise KeyError(song_id)
     _save_library(lib)
@@ -247,13 +273,15 @@ def delete_playlist(pid: int) -> dict:
 
 
 def add_to_playlist(pid: int, songs: Any) -> dict:
-    """往歌单追加歌曲: 按 id 去重（歌单里已有的跳过）, 超上限截断。"""
+    """往歌单追加歌曲/视频: 按「来源+id」复合键去重（已有的跳过）, 超上限截断。
+    与 add_favorites 一致先规范 id 形态（BV 号恒字符串, 网易云恒 int）。"""
     lib = _load_library()
     pl = _find_playlist(lib, int(pid))
-    existing = {s["id"] for s in pl["songs"]}
+    existing = {_song_key(s) for s in pl["songs"]}
     added = 0
     for s in _norm_songs(songs):
-        if s["id"] in existing:
+        s["id"] = _norm_id(s.get("source") or "netease", s["id"])
+        if _song_key(s) in existing:
             continue
         if len(pl["songs"]) >= PLAYLIST_SONGS_MAX:
             break
@@ -265,12 +293,15 @@ def add_to_playlist(pid: int, songs: Any) -> dict:
     return {"id": pl["id"], "name": pl["name"], "songs": pl["songs"], "added": added}
 
 
-def remove_from_playlist(pid: int, song_ids: Any) -> dict:
-    """从歌单移除歌曲（可一次多个 id）。歌单不存在抛 KeyError。"""
-    ids = {int(i) for i in song_ids} if isinstance(song_ids, (list, tuple)) else {int(song_ids)}
+def remove_from_playlist(pid: int, song_ids: Any, source: str = "netease") -> dict:
+    """从歌单移除歌曲/视频（可一次多个 id）。歌单不存在抛 KeyError。
+    source 指定删哪个来源的项; song_ids 的元素按 source 规范 id 再比。"""
+    ids = ({_norm_id(source, i) for i in song_ids}
+           if isinstance(song_ids, (list, tuple)) else {_norm_id(source, song_ids)})
     lib = _load_library()
     pl = _find_playlist(lib, int(pid))
-    pl["songs"] = [s for s in pl["songs"] if s["id"] not in ids]
+    pl["songs"] = [s for s in pl["songs"] if _song_key(s) != (source, s.get("id"))
+                   or s.get("id") not in ids]
     _save_library(lib)
     return {"id": pl["id"], "name": pl["name"], "songs": pl["songs"]}
 
@@ -323,8 +354,12 @@ def song_lyric(song_id: int) -> dict:
 # ["music"] 上, EmittingToolRegistry 镜像 tool_result 时带给 Web 端
 # music.js, 由它换队列并开播（write_file 的 diff 走的同一富展示通道）。
 # CLI 下没有前端, _meta 被自然忽略, 等价于纯搜索。
+# source 参数: netease（缺省）搜网易云; bili 搜 B 站视频（同队列机制,
+# id 是 BV 号, 前端按来源走不同直链通道）。
 
 from runtime import ToolOutput   # noqa: E402  (工具返回值附 _meta 用)
+
+import bilibili as _bili   # noqa: E402
 
 PLAY_QUEUE_LIMIT = 10
 PLAY_META_KEY = "music"
@@ -333,10 +368,12 @@ PLAY_META_KEY = "music"
 MUSIC_PLAY_SPEC = {
     "name": "music_play",
     "description": (
-        "摸鱼电台点歌: 按关键词(歌名/歌手)搜索网易云曲库并让前端播放器播放。"
-        "用户在聊天里说想听歌/换歌时调用。返回前 10 个候选并默认播放第一个"
-        "免费候选; 用户要指定某一版时把 index 传为候选序号(从 1 开始)。"
-        "VIP/无版权歌拿不到直链, 前端会自动跳下一首。仅桌面 Web 界面有效。"
+        "摸鱼电台点播: 按关键词(歌名/歌手)搜索曲库并让前端播放器播放。"
+        "用户在聊天里说想听歌/看视频时调用。默认搜网易云音乐, source=netease;"
+        "用户明确要 B 站视频(如「放个XX视频」)时传 source=bili。"
+        "返回前 10 个候选并默认播放第一个免费候选; 用户要指定某一版时把"
+        "index 传为候选序号(从 1 开始)。VIP/无版权歌, 或 B 站无音频流的视频,"
+        "前端会自动跳下一首。仅桌面 Web 界面有效。"
     ),
     "input_schema": {
         "type": "object",
@@ -344,6 +381,12 @@ MUSIC_PLAY_SPEC = {
             "kw": {
                 "type": "string",
                 "description": "搜索关键词, 如「晴天 周杰伦」或「Lemon」。",
+            },
+            "source": {
+                "type": "string",
+                "enum": ["netease", "bili"],
+                "description": "曲库来源: netease=网易云音乐(缺省), "
+                               "bili=B站视频。",
             },
             "index": {
                 "type": "integer",
@@ -357,27 +400,35 @@ MUSIC_PLAY_SPEC = {
 
 
 def _first_playable(songs: list) -> int:
-    """第一个免费候选的下标; 全是 VIP 就播第一首（前端会提示跳过）。"""
+    """第一个免费候选的下标; 全是 VIP 就播第一首（前端会提示跳过）。
+    B 站视频没有 fee 概念（fee=0）, 恒返回 0。"""
     for i, s in enumerate(songs):
-        if s.get("fee") != 1:
-            return i
+        if s.get("source") != "bili" and s.get("fee") == 1:
+            continue
+        return i
     return 0
 
 
 def music_play_tool(params: dict, workdir: Optional[str] = None) -> str:
     """聊天点播: 搜索 → 选歌 → 队列挂 _meta 给前端电台。模型拿到的是
-    可读 JSON 文本; 播放本身由前端收到镜像事件后执行。"""
+    可读 JSON 文本; 播放本身由前端收到镜像事件后执行。
+    source=bili 时搜 B 站视频（bilibili.py）, 其余一律网易云。"""
     params = params if isinstance(params, dict) else {}
     kw = str(params.get("kw") or "").strip()
     if not kw:
-        raise ValueError("kw 不能为空: 要告诉我想听什么(歌名或歌手)")
+        raise ValueError("kw 不能为空: 要告诉我想听什么(歌名/歌手/视频关键词)")
     try:
         idx = int(params.get("index") or 0)
     except (TypeError, ValueError):
         idx = 0
-    found = search_songs(kw, PLAY_QUEUE_LIMIT)["songs"]
+    source = str(params.get("source") or "netease").strip().lower()
+    if source == "bili":
+        found = _bili.search_videos(kw, PLAY_QUEUE_LIMIT)["videos"]
+    else:
+        found = search_songs(kw, PLAY_QUEUE_LIMIT)["songs"]
     if not found:
-        return f"没有搜到「{kw}」相关的歌曲, 换个关键词再试。"
+        return ("没有搜到「%s」相关的%s, 换个关键词再试。"
+                % (kw, "视频" if source == "bili" else "歌曲"))
     pick = (min(max(idx, 1), len(found)) - 1) if idx else _first_playable(found)
     song = found[pick]
     text = json.dumps({
@@ -391,5 +442,6 @@ def music_play_tool(params: dict, workdir: Optional[str] = None) -> str:
         ],
         "note": "已把整组候选作为队列交给前端播放; VIP/无版权歌自动跳下一首",
     }, ensure_ascii=False)
-    meta = {PLAY_META_KEY: {"song": song, "queue": found, "qname": "聊天点播"}}
+    meta = {PLAY_META_KEY: {"song": song, "queue": found,
+                            "qname": "B站点播" if source == "bili" else "聊天点播"}}
     return ToolOutput(text).with_meta(meta)

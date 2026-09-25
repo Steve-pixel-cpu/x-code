@@ -2304,9 +2304,35 @@ body.col-resizing, body.col-resizing * { cursor: col-resize !important; }
   flex: 1; min-width: 0; display: flex; flex-direction: column;
   font-size: calc(12px * var(--fs-ui)); line-height: 1.3;
 }
-.md-meta #music-title {
-  font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+.md-title-wrap {
+  position: relative; overflow: hidden; white-space: nowrap;
+  -webkit-mask-image: linear-gradient(90deg, transparent 0, #000 14px, #000 calc(100% - 18px), transparent 100%);
+  mask-image: linear-gradient(90deg, transparent 0, #000 14px, #000 calc(100% - 18px), transparent 100%);
+  scrollbar-width: none;
 }
+.md-title-wrap::-webkit-scrollbar { display: none; }
+.md-title-inner {
+  display: inline-flex; align-items: center; gap: 40px;
+  padding-right: 40px; will-change: transform;
+}
+.md-title-inner.scroll { animation: md-title-marquee var(--md-scroll-dur, 10s) linear infinite; }
+.md-title-inner.scroll:hover { animation-play-state: paused; }
+@keyframes md-title-marquee {
+  from { transform: translateX(0); }
+  /* inner = 标题 + 40px 间距 + 克隆标题 + 右内边距, -50% 恰好移过「一份标题+间距」,
+     克隆标题无缝接上原位 —— 循环不跳帧 */
+  to   { transform: translateX(-50%); }
+}
+#music-title {
+  font-weight: 600; white-space: nowrap;
+}
+/* 克隆副本默认隐藏（标题不超宽时不能露出来重复一遍）, 进入滚动后才显形:
+   原标题从左边滚出的同时副本从右边补位 —— 无缝循环, 没有空档 */
+.md-title-clone {
+  font-weight: 600; white-space: nowrap; opacity: 0;
+  pointer-events: none; user-select: none;
+}
+.md-title-inner.scroll .md-title-clone { opacity: 1; }
 .md-meta #music-artist {
   color: var(--text-3); font-size: calc(10.5px * var(--fs-ui));
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
@@ -2440,6 +2466,33 @@ body.col-resizing, body.col-resizing * { cursor: col-resize !important; }
 .mp-s-eq i:nth-child(3) { height: 8px; animation-delay: .5s; }
 @keyframes mb-eq { 0%, 100% { transform: scaleY(.5); } 50% { transform: scaleY(1); } }
 .mp-search-row { padding: 10px 14px 6px; flex: none; }
+.mp-src-btns {
+  position: relative; display: inline-flex; align-items: stretch;
+  flex: none; height: 30px;
+  border: 1px solid var(--border-strong); border-radius: 9px;
+  background: var(--surface-2); padding: 2px;
+}
+.mp-src-slider {
+  position: absolute; top: 2px; bottom: 2px; left: 2px; width: 50%;
+  border-radius: 7px; background: var(--accent-soft, color-mix(in srgb, var(--accent) 14%, transparent));
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 30%, transparent),
+              0 1px 3px color-mix(in srgb, var(--accent) 12%, transparent);
+  transition: transform .18s ease;
+}
+#music-src-btns[data-src="bili"] .mp-src-slider {
+  transform: translateX(100%);
+}
+.mp-src-btns button {
+  position: relative; z-index: 1; min-width: 80px; padding: 0 10px;
+  border: 0; background: none; color: var(--text-3); cursor: pointer;
+  font-size: calc(11.5px * var(--fs-ui)); font-family: inherit;
+  transition: color .15s;
+  display: inline-flex; align-items: center; justify-content: center; gap: 5px;
+}
+.mp-src-btns button svg { flex: none; opacity: .75; }
+.mp-src-btns button.on svg { opacity: 1; }
+.mp-src-btns button:hover { color: var(--text-2); }
+.mp-src-btns button.on { color: var(--accent); font-weight: 600; }
 .mp-search-results { flex: 1; overflow-y: auto; min-height: 0; }
 #music-search-input {
   width: 100%; height: 32px; border: 1px solid var(--border-strong);

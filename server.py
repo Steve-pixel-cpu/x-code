@@ -35,7 +35,7 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from fastapi import Body, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 import anthropic
@@ -106,6 +106,7 @@ from skills import (SkillError, delete_user_skill, discover_skills,
 from multi_agent import set_api_config_provider
 from agent_tools import get_orchestrator
 import music as _music
+import bilibili as _bili
 
 setup_console()  # Windows 控制台 UTF-8 兜底（服务器日志不乱码，与 CLI 同一入口）
 
@@ -1722,8 +1723,8 @@ async def api_music_fav_add(payload: Optional[dict] = Body(None)):
 
 
 @app.delete("/api/music/favorites/{song_id}")
-async def api_music_fav_remove(song_id: int):
-    return _library_call(_music.remove_favorite, song_id)
+async def api_music_fav_remove(song_id: str, source: str = "netease"):
+    return _library_call(_music.remove_favorite, song_id, source)
 
 
 # ---- 自定义播放列表 ----
@@ -1756,8 +1757,8 @@ async def api_music_pl_add_songs(pid: int, payload: Optional[dict] = Body(None))
 
 
 @app.delete("/api/music/playlists/{pid}/songs/{song_id}")
-async def api_music_pl_remove_song(pid: int, song_id: int):
-    return _library_call(_music.remove_from_playlist, pid, [song_id])
+async def api_music_pl_remove_song(pid: int, song_id: str, source: str = "netease"):
+    return _library_call(_music.remove_from_playlist, pid, [song_id], source)
 
 
 @app.get("/api/music/search")
@@ -1774,6 +1775,40 @@ async def api_music_url(id: int, br: int = 128000):
 @app.get("/api/music/lyric")
 async def api_music_lyric(id: int):
     return await _music_call(_music.song_lyric, id)
+
+
+# ============================================================================
+# REST: 摸鱼电台 · B站视频（纯音频, 搜索/直链/音频流本地代理）
+# ============================================================================
+# 同样复用 _music_call 的 502 包装; 顺序代理给 <audio> 用。
+# 前端 B 站播放与网易云共用一条播放条: 直链走本地 /api/bili/stream,
+# 不直连 B 站 CDN（防盗链只认 B 站 Referer, 浏览器从 localhost 会 403）。
+
+@app.get("/api/bili/search")
+async def api_bili_search(kw: str = "", limit: int = 30):
+    return await _music_call(_bili.search_videos, kw, limit)
+
+
+@app.get("/api/bili/url")
+async def api_bili_url(bvid: str = ""):
+    """拿音频直链信息; 前端不直接用它连 CDN, 而是拿 token 走 /stream。"""
+    token = _bili.make_stream_token(bvid)
+    url = await _music_call(_bili.get_audio_url, bvid)
+    return {"source": "bili", "id": bvid, "token": token, "url": url}
+
+
+@app.get("/api/bili/stream")
+async def api_bili_stream(request: Request, token: str = ""):
+    """音频流本地代理: 带 B 站 Referer 拉直链, 逐块转发给前端 <audio>。
+    Range 透传: 浏览器读流会带 Range, seek 也会发二次 Range(206), 透传给 CDN。"""
+    range_h = request.headers.get("range")
+    status, ctype, crange, chunks = await _music_call(
+        _bili.stream_audio, token, range_h)
+    headers = {"Content-Type": ctype}
+    if crange:
+        headers["Content-Range"] = crange
+        headers["Accept-Ranges"] = "bytes"
+    return StreamingResponse(chunks, status_code=status, headers=headers)
 
 
 # ============================================================================

@@ -35,7 +35,7 @@ def _song(sid=42, name="测试歌", **over):
     s = {
         "id": sid, "name": name, "artist": "张三 / 李四",
         "album": "测试专辑", "duration": 213.0, "fee": 8,
-        "pic": "https://p1.music.126.net/x.jpg",
+        "pic": "https://p1.music.126.net/x.jpg", "source": "netease",
     }
     s.update(over)
     return s
@@ -65,15 +65,30 @@ def test_song_brief_accepts_v3_shape():
 
 
 def test_norm_song_whitelist_and_reject():
-    """只留白名单字段; id 不齐/歌名空 → 拒收 None。"""
+    """只留白名单字段; id 不齐/歌名空 → 拒收 None。
+    id 保持原样返回（BV 号是字符串; 与库内对齐在 add 时做）;
+    没有 source 时按 netease 补。"""
     ok = _music_mod._norm_song({"id": "9", "name": " 歌 ", "hacker": "x",
                                 "artist": "A", "extra": 1})
-    assert ok == {"id": 9, "name": "歌", "artist": "A", "album": None,
-                  "duration": None, "fee": None, "pic": None}
-    assert _music_mod._norm_song({"id": "abc", "name": "x"}) is None
+    assert ok == {"id": "9", "name": "歌", "artist": "A", "album": None,
+                  "duration": None, "fee": None, "pic": None, "source": "netease"}
+    # id 保留原样; 拒收只针对「无 id / 空 id」和「空名」
+    assert _music_mod._norm_song({"id": "abc", "name": "x"})["id"] == "abc"
+    assert _music_mod._norm_song({"id": "", "name": "x"}) is None
+    assert _music_mod._norm_song({"id": None, "name": "x"}) is None
     assert _music_mod._norm_song({"id": 1, "name": "  "}) is None
     assert _music_mod._norm_song({"name": "没有id"}) is None
     assert _music_mod._norm_song("不是字典") is None
+
+
+def test_norm_song_accepts_bili_source():
+    """B 站视频: id 是 BV 号字符串, source=bili 保留。"""
+    ok = _music_mod._norm_song({"id": "BV1FHeE66Ew5", "name": "视频",
+                                "source": "bili", "fee": 0})
+    assert ok["source"] == "bili" and ok["id"] == "BV1FHeE66Ew5"
+    # 非白名单 source 一律归一为 netease
+    assert _music_mod._norm_song({"id": 1, "name": "x", "source": "other"}) \
+        ["source"] == "netease"
 
 
 def test_norm_songs_dedupes_by_id():
@@ -170,6 +185,53 @@ def test_playlist_cap_clamps(lib_file, monkeypatch):
 def test_library_corrupt_file_is_empty(lib_file):
     lib_file.write_text("{不是JSON", encoding="utf-8")
     assert _music_mod.list_library() == {"favorites": [], "playlists": []}
+
+
+# ------------------------------------------------------------
+# 复合键（source+id）: B 站视频与网易云歌可混库, 互不串键
+# ------------------------------------------------------------
+
+def _bili_video(bvid="BV1FHeE66Ew5", name="测试视频", **over):
+    return {"id": bvid, "name": name, "artist": "B站视频", "album": "",
+            "duration": 200.0, "fee": 0,
+            "pic": "https://i0.hdslb.com/bfs/archive/x.jpg", "source": "bili",
+            **over}
+
+
+def test_favorites_composite_key_mix_and_dedupe(lib_file):
+    """网易云歌与 B 站视频可同时收藏; 同 id 不同来源互不覆盖, 同来源去重。"""
+    _music_mod.add_favorites([_song(1, "网易A"), _bili_video()])
+    assert len(_music_mod.list_library()["favorites"]) == 2
+
+    # 同 BV 加重复 → 去重; 不同来源同名字 → 不冲突
+    _music_mod.add_favorites([_bili_video("BV1FHeE66Ew5", "重复视频"),
+                              _song(1, "同名歌")])
+    lib = _music_mod.list_library()
+    assert len(lib["favorites"]) == 2
+    assert {s["source"] for s in lib["favorites"]} == {"netease", "bili"}
+    assert lib["favorites"][0]["id"] == 1
+
+    # 取消收藏按来源删: BV 删掉不影响网易云 id 1
+    _music_mod.remove_favorite("BV1FHeE66Ew5", source="bili")
+    lib = _music_mod.list_library()
+    assert len(lib["favorites"]) == 1 and lib["favorites"][0]["source"] == "netease"
+    with pytest.raises(KeyError):
+        _music_mod.remove_favorite("BV1FHeE66Ew5", source="bili")
+
+
+def test_playlist_composite_key_mix(lib_file):
+    """歌单里 B 站视频与网易云歌并存, 移除按来源。"""
+    pl = _music_mod.create_playlist("混排", [_song(1), _bili_video()])
+    assert len(pl["songs"]) == 2
+
+    _music_mod.add_to_playlist(pl["id"], [_bili_video("BV1FHeE66Ew5", "再来"),
+                                          _song(1, "同名")])
+    pl = _music_mod.list_library()["playlists"][0]
+    assert len(pl["songs"]) == 2                       # 混排去重不误伤
+
+    _music_mod.remove_from_playlist(pl["id"], ["BV1FHeE66Ew5"], source="bili")
+    pl = _music_mod.list_library()["playlists"][0]
+    assert len(pl["songs"]) == 1 and pl["songs"][0]["id"] == 1
 
 
 # ------------------------------------------------------------
@@ -330,6 +392,37 @@ def test_music_play_bad_kw_raises(bad):
     """空关键词直接 ValueError, 由 registry 转 tool_result 报给模型。"""
     with pytest.raises(ValueError):
         _music_mod.music_play_tool(bad)
+
+
+def test_music_play_bili_source(monkeypatch):
+    """source=bili: 搜 B 站视频, 队列项带 bili 标记, qname 是 B站点播。"""
+    import bilibili as _bili_mod
+    videos = [_bili_mod_bili_video("BV1AAAA1111", "科幻短片"),
+              _bili_mod_bili_video("BV1BBBB2222", "纪录片")]
+    monkeypatch.setattr(_bili_mod, "search_videos",
+                        lambda kw, limit: {"kw": kw, "videos": videos})
+    out = _music_mod.music_play_tool({"kw": "科幻", "source": "bili"})
+    meta = out._meta["music"]
+    assert meta["song"]["id"] == "BV1AAAA1111"
+    assert meta["song"]["source"] == "bili"
+    assert meta["qname"] == "B站点播"
+    assert [s["id"] for s in meta["queue"]] == ["BV1AAAA1111", "BV1BBBB2222"]
+    assert "视频" in str(out)
+
+
+def _bili_mod_bili_video(bvid, name):
+    return {"id": bvid, "name": name, "artist": "B站视频", "album": "",
+            "duration": 1.0, "fee": 0, "pic": "", "source": "bili"}
+
+
+def test_music_play_bili_no_result(monkeypatch):
+    """B 站没搜到: 纯文本回话, 不带 meta。"""
+    import bilibili as _bili_mod
+    monkeypatch.setattr(_bili_mod, "search_videos",
+                        lambda kw, limit: {"kw": kw, "videos": []})
+    out = _music_mod.music_play_tool({"kw": "xxx", "source": "bili"})
+    assert "没有搜到" in str(out) and "视频" in str(out)
+    assert getattr(out, "_meta", {}) == {}
 
 
 def test_music_play_registered_and_read_only():
