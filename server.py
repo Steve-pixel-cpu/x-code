@@ -747,8 +747,9 @@ class WebSession:
         # 下拉框切换只影响本会话, 全局设置页改的是"新会话的默认值"
         persisted_mode = NAME_TO_MODE.get(store.get_permission_mode(session_id) or "")
         self.permission_mode = persisted_mode or app_state.permission_mode
-        # 会话级模型: 持久值优先（重启不丢）, 没有记录 (None, None) = 跟随
-        # 全局 active; 会话内切换只影响本会话（专属 client / 按轮 model）
+        # 会话级模型: 持久值优先（重启不丢）; 无记录的会话在首轮开跑时把
+        # 当时的全局 active 固化为自己的模型并落盘（见 _pin_session_model）
+        # ——不再"跟随全局", 全局切换只影响之后新建的会话
         self.model_provider, self.model_id = store.get_model(session_id)
         self.api_client = None          # 会话专属 client（跨 provider 模型时构建）
         self.prompter: Optional[WebPermissionPrompter] = None
@@ -828,6 +829,28 @@ def _emit_finalized_tool_result(tool_block, result_msg) -> None:
     if tool_block.name == "present_plan":
         payload["plan_rejected"] = True
     emit(payload)
+
+
+def _pin_session_model(web_session: WebSession) -> None:
+    """无显式模型记录的会话: 把当前全局 active 固化为该会话的模型并落盘。
+
+    全局 active 的改动（草稿态下拉 / 设置页）只应影响之后新建的会话; 此前
+    无记录的会话持续"跟随全局", 改一次全局会把所有存量会话的模型一起掀翻
+    （显示与执行同时变）。在首轮 runtime 组装前调用, 组装取的就是固化值。
+    已有显式记录的会话不动; 全局未配置或指向无效供应商/模型时不落垃圾
+    记录, 维持跟随语义。"""
+    if web_session.model_id is not None:
+        return
+    active = _provider_cfg.get("active") or {}
+    prov = next((p for p in _provider_cfg.get("providers", [])
+                 if p.get("id") == active.get("provider") and p.get("enabled")), None)
+    if prov is None or not any(m.get("id") == active.get("model")
+                               for m in (prov.get("models") or [])):
+        return
+    web_session.model_provider = str(active["provider"])
+    web_session.model_id = str(active["model"])
+    store.set_model(web_session.session_id,
+                    web_session.model_provider, web_session.model_id)
 
 
 def load_runtime_for(web_session: WebSession) -> None:
@@ -2665,6 +2688,8 @@ async def ws_endpoint(websocket: WebSocket, session_id: str):
                         continue
                     web_session.workdir = str(wd.resolve())
                     store.set_workdir(web_session.session_id, web_session.workdir)
+                # 首轮固化会话模型（在 runtime 组装前: 组装即取固化值）
+                _pin_session_model(web_session)
                 try:
                     load_runtime_for(web_session)
                 except Exception as e:

@@ -249,6 +249,57 @@ def test_web_session_model_none_when_no_record(isolated_store):
 
 
 # ------------------------------------------------------------
+# 首轮固化: 无记录的会话把当时的全局 active 定为自己的模型
+# ------------------------------------------------------------
+
+def test_pin_session_model_writes_global_active(isolated_store, monkeypatch):
+    """无记录的会话首轮固化: 全局 active 落为会话自己的模型（内存+持久）。"""
+    monkeypatch.setattr(server, "_provider_cfg", {
+        "providers": [{"id": "prov-a", "enabled": True,
+                       "models": [{"id": "model-1"}, {"id": "model-2"}]}],
+        "active": {"provider": "prov-a", "model": "model-2"},
+    })
+    ws = server.get_or_create_web_session("s-pin")
+    assert (ws.model_provider, ws.model_id) == (None, None)   # 开跑前仍跟随
+
+    server._pin_session_model(ws)
+
+    assert (ws.model_provider, ws.model_id) == ("prov-a", "model-2")
+    assert isolated_store.get_model("s-pin") == ("prov-a", "model-2")   # 已落盘
+
+
+def test_pin_session_model_keeps_explicit_record(isolated_store, monkeypatch):
+    """有显式记录的会话不固化（用户选过的模型不被全局覆盖）。"""
+    isolated_store.set_model("s-explicit", "prov-b", "model-9")
+    ws = server.get_or_create_web_session("s-explicit")
+    monkeypatch.setattr(server, "_provider_cfg", {
+        "providers": [{"id": "prov-a", "enabled": True,
+                       "models": [{"id": "model-1"}]}],
+        "active": {"provider": "prov-a", "model": "model-1"},
+    })
+
+    server._pin_session_model(ws)
+
+    assert (ws.model_provider, ws.model_id) == ("prov-b", "model-9")
+    assert isolated_store.get_model("s-explicit") == ("prov-b", "model-9")
+
+
+def test_pin_session_model_skips_invalid_active(isolated_store, monkeypatch):
+    """全局未配置/指向无效供应商时不落垃圾记录, 维持跟随语义。"""
+    ws = server.get_or_create_web_session("s-nopin")
+    monkeypatch.setattr(server, "_provider_cfg", {
+        "providers": [{"id": "prov-a", "enabled": False,
+                       "models": [{"id": "model-1"}]}],
+        "active": {"provider": "prov-gone", "model": "model-1"},
+    })
+
+    server._pin_session_model(ws)
+
+    assert (ws.model_provider, ws.model_id) == (None, None)
+    assert isolated_store.get_model("s-nopin") == (None, None)
+
+
+# ------------------------------------------------------------
 # server: WS set_thinking_level / set_model 只影响目标会话
 # ------------------------------------------------------------
 
