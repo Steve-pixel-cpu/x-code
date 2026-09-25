@@ -4213,7 +4213,13 @@ function makeDropdown(trigger, opts) {
 
   function syncLabel() {
     const it = items.find(i => i.value === value);
-    trigger.querySelector(".dd-label").textContent = it ? it.label : String(value ?? "");
+    // 未命中时显示键的 model 段而非原始 provider|model（值被改名/删除后
+    // 的过渡态）: 前半段是内部供应商 id, 整段铺出来用户看到的就是"乱码"
+    const text = it ? it.label
+      : (typeof value === "string" && value.includes("|")
+        ? value.slice(value.indexOf("|") + 1)
+        : String(value ?? ""));
+    trigger.querySelector(".dd-label").textContent = text;
   }
   function close() {
     if (!pop) return;
@@ -4874,10 +4880,39 @@ async function persistProviders() {
       lp.protocol = sp.protocol;
     }
     provStatus("已保存");
-    // 刷新 composer 模型下拉; 仅当当前选中项已不存在时才走全量 loadSettings 兜底
+    // 刷新 composer 模型下拉。模型改名/删除（防抖自动保存期间是常态）会让
+    // 当前显示的键从列表里消失, syncLabel 找不到就把原始 provider|model 键
+    // 铺在界面上（用户看到的"乱码"）。按会话显示链回填第一个仍存在的键,
+    // 全部失效才走 loadSettings（同步全局 active）; active 也可能刚被改名,
+    // 最后兜底选列表第一项——任何路径都不留裸键。
     const cur = modelDd.getValue();
     modelDd.setItems(modelItems(), cur);
-    if (cur && !modelItems().some(i => i.value === cur)) await loadSettings();
+    if (cur && !modelItems().some(i => i.value === cur)) {
+      const run = curRun();
+      const s = state.sessions.find(x => x.id === state.sessionId);
+      const gd = state.globalDefaults;
+      const candidates = [
+        run ? run.modelKey : null,
+        s && s.model_provider && s.model_id
+          ? s.model_provider + "|" + s.model_id : null,
+        gd.modelKey,
+      ].filter(Boolean);
+      const kept = candidates.find(k => modelItems().some(i => i.value === k));
+      if (kept) {
+        modelDd.setValue(kept);
+      } else {
+        await loadSettings();
+        if (!modelItems().some(i => i.value === modelDd.getValue())) {
+          const first = modelItems()[0];
+          if (first) modelDd.setValue(first.value);
+        }
+        // loadSettings 已把 state.providerCfg 换成新对象图: 开着未关的供应商
+        // 表单还握着旧图的闭包, 继续编辑会写进脱钩对象, 防抖保存发的是新图
+        // （改动静默丢失、状态栏却报"已保存"）。此刻防抖已结束、无输入在途,
+        // 重渲染表单对齐新配置, 焦点丢失可接受。
+        renderProviderSettings();
+      }
+    }
   } catch (e) {
     provStatus("保存失败: " + e.message, true);
     toast("保存失败: " + e.message);
