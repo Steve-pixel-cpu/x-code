@@ -69,6 +69,7 @@ function runOf(id) {
       loaded: false,          // 历史是否已加载过（首次切入必拉）
       loading: false,         // 历史加载进行中（防并发重复拉取）
       everConnected: false,   // 该会话 WS 是否成功连过（区分首次连接与断线重连）
+      reconnected: false,     // 当前连接是否重连（busy_sync 的 busy=false 校正只信重连）
       rlNote: null,           // 限流退避提示行（原地更新, 轮次有进展/收口即撤）
       awaiting: false,        // 忙碌中且正处于等待模型输出的空窗（await_output 起止）
       awaitT0: null,          // 空窗起点（客户端）: 底部转圈的已耗时计时
@@ -2113,6 +2114,11 @@ function connectWs(id) {
   ws.onopen = () => {
     if (id === state.sessionId) setConn("on", "已连接");
     run.reconnectAttempts = 0;
+    // 首连/重连标记: busy_sync 校正只信重连——首连的快照早于在途的乐观
+    // 发送（草稿首发先置忙碌再建连）, 快照 false 不能否掉本地忙碌
+    const reconnected = run.everConnected;
+    run.reconnected = reconnected;
+    run.everConnected = true;
     // 首条消息在 WS 建立期间入队，连接好了统一发出
     const pending = run.pendingSends;
     run.pendingSends = [];
@@ -2121,8 +2127,6 @@ function connectWs(id) {
     // 重拉历史替换整列, 丢配的卡片不会以"运行中"僵住。
     // 仅在重连时做——草稿首发是"先画乐观气泡再 connectWs",
     // 而 turn 落盘只在结束时, 首连就重拉会拿空历史把用户消息抹掉
-    const reconnected = run.everConnected;
-    run.everConnected = true;
     if (reconnected && run.loaded && !run.loading) loadSessionHistory(id);
   };
   ws.onclose = () => {
@@ -2197,10 +2201,12 @@ function handleServerMessage(msg, sid) {
   // WS 建连时的服务端 busy 快照校正（前台/后台都要）: 本地 busy 的唯一清除
   // 途径是 turn_done/error, 服务进程死亡丢掉收尾事件后本地永远忙碌——
   // 死轮次的悬空工具卡在历史回放里被 !busy 跳过收口, 永远停在"运行中"。
-  // 以服务端为准: 快照 false 而本地忙碌 → 按轮次终点收口; 快照 true 而本地
-  // 空闲 → 跟上忙碌（轮次在别的窗口活着, 保留"运行中"卡等 tool_result 配对）。
+  // busy=false 的校正只在重连时生效: 首连的快照不携带在途乐观发送的信息
+  // （草稿首发: 本地先置忙碌再建连, 服务端此刻还空闲, 且首轮没有
+  // turn_started 来恢复）, 误信会把整轮的忙碌 UI 杀掉。
+  // 快照 true 而本地空闲 → 跟上忙碌（别的窗口的轮次活着, 保留"运行中"卡）。
   if (msg.type === "busy_sync") {
-    if (!msg.busy && run && run.busy) {
+    if (!msg.busy && run && run.busy && run.reconnected) {
       if (sid === state.sessionId) endTurnUiReset();
       else settleBackgroundTurnEnd(run, sid);
     } else if (msg.busy && run && !run.busy) {
