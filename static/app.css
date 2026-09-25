@@ -859,9 +859,10 @@
   .tool-group .tg-sum.run { animation: pulse 1.2s infinite; color: var(--text-2); }
   .tool-group .tg-sum.bad { color: var(--warn); }
   .tool-group .tg-body .tool-row { margin: 2px 0 6px 9px; }
-  /* 折叠: 收起已结束的行与附属面板（diff/todo）, 运行中的行保持可见 */
+  /* 折叠: 收起已结束的行与附属面板（diff/输出/todo）, 运行中的行保持可见 */
   .tool-group.collapsed .tg-body .tool-row:not([data-state="run"]),
   .tool-group.collapsed .td-wrap,
+  .tool-group.collapsed .to-wrap,
   .tool-group.collapsed .todo-list { display: none; }
   .tool-row .t-ico { flex: none; display: inline-flex; }
   .tool-row .tname2 { flex: none; color: var(--text-2); }
@@ -894,6 +895,41 @@
   }
   /* 分组内: 面板对齐到组内行缩进, 而非独立行时的 38px 列缩进 */
   .tool-group .td-wrap { margin: -4px 0 6px 9px; }
+  /* 输出面板: 工具/命令输出, 与 diff 面板同构（错误时自动展开）。
+   * 分组折叠时随组一起收起——展开组才见输出, 否则折叠态下
+   * 几十条"输出"头会堆成一堵墙。 */
+  .to-wrap {
+    margin: -6px 0 10px 38px;
+    border: 1px solid var(--border);
+    border-radius: var(--r-sm);
+    overflow: hidden;
+    background: var(--code-bg);
+    animation: msg-in .22s ease;
+  }
+  .tool-group .to-wrap { margin: -4px 0 6px 9px; }
+  .to-head {
+    display: flex; align-items: center; gap: 8px;
+    width: 100%; padding: 5px 10px;
+    background: none; border: none; cursor: pointer;
+    font-size: calc(11.5px * var(--fs-ui));
+    color: var(--text-2);
+    text-align: left;
+  }
+  .to-head:hover { background: var(--hover); }
+  .to-caret { flex: none; font-size: 10px; color: var(--text-3); }
+  .to-body { border-top: 1px solid var(--border); }
+  .to-pre {
+    max-height: 260px; overflow: auto;
+    padding: 8px 10px;
+    font-family: var(--font-mono);
+    font-size: calc(11.5px * var(--fs-ui));
+    line-height: 1.5;
+    white-space: pre-wrap;
+    word-break: break-word;
+    color: var(--text-2);
+  }
+  .to-wrap.has-err .to-sum { color: var(--err); }
+  .to-wrap.has-err .to-pre { color: color-mix(in srgb, var(--err) 80%, var(--text-2)); }
   .td-head {
     display: flex; align-items: center; gap: 8px;
     width: 100%; padding: 5px 10px;
@@ -1330,6 +1366,12 @@
   }
   .sp-section-desc { font-size: calc(12px * var(--fs-ui)); color: var(--text-3); margin: -6px 2px 0; }
   .sp-section-body { display: flex; flex-direction: column; gap: 12px; }
+  /* 行为分区内的子节标题（命令白名单等并入行为后的分节） */
+  .al-sub {
+    font-size: calc(12px * var(--fs-ui)); color: var(--text-3); font-weight: 600;
+    letter-spacing: .04em; margin: 14px 2px 0; padding-top: 12px;
+    border-top: 1px solid var(--border);
+  }
 
   /* ============ 模型供应商: 左栏列表 + 右栏详情 ============ */
   .prov-layout {
@@ -1793,6 +1835,16 @@
   }
   #confirm-title svg { color: var(--err); flex: none; }
   #confirm-msg { color: var(--text-2); font-size: calc(13px * var(--fs-ui)); line-height: 1.7; }
+  #confirm-input {
+    width: 100%; height: 34px; margin-top: 12px;
+    border: 1px solid var(--border-strong); border-radius: var(--r-sm);
+    padding: 0 11px; font-size: calc(13px * var(--fs-ui)); font-family: inherit;
+    background: var(--bg); color: var(--text);
+  }
+  #confirm-input:focus {
+    outline: none; border-color: var(--accent-border);
+    box-shadow: 0 0 0 3px var(--accent-soft);
+  }
   #confirm-actions { display: flex; gap: 10px; justify-content: flex-end; margin-top: 18px; }
   #confirm-actions button {
     padding: 8px 22px; border-radius: var(--r-sm); font-size: calc(13.5px * var(--fs-ui)); font-weight: 600;
@@ -2141,6 +2193,24 @@ body.col-resizing, body.col-resizing * { cursor: col-resize !important; }
   width: 46px; height: 3px; accent-color: var(--accent); cursor: pointer;
 }
 
+/* 「添加到…」菜单（songRow 的 ＋ 弹出, z-index 高于 music-panel） */
+#music-add-menu {
+  position: fixed; z-index: 130; min-width: 170px; max-height: 260px; overflow-y: auto;
+  background: var(--pop-bg);
+  -webkit-backdrop-filter: blur(20px) saturate(1.5); backdrop-filter: blur(20px) saturate(1.5);
+  border: 1px solid var(--border); border-radius: var(--r-md);
+  box-shadow: var(--shadow-pop); padding: 4px;
+  animation: rise .15s cubic-bezier(.16, 1, .3, 1);
+}
+#music-add-menu button {
+  display: flex; align-items: center; gap: 8px; width: 100%;
+  border: none; background: none; cursor: pointer; text-align: left;
+  padding: 7px 10px; border-radius: var(--r-sm);
+  font-size: calc(12px * var(--fs-ui)); font-family: inherit; color: var(--text);
+}
+#music-add-menu button:hover { background: var(--hover); }
+#music-add-menu .mpam-name { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#music-add-menu .mpam-hint { flex: none; color: var(--text-3); font-size: calc(11px * var(--fs-ui)); }
 /* ---- 弹出面板: 锚在 dock 上方（left/bottom 由 JS 写入） ---- */
 #music-panel {
   position: fixed; z-index: 121; left: 276px; bottom: 120px;
@@ -2240,3 +2310,142 @@ body.col-resizing, body.col-resizing * { cursor: col-resize !important; }
   border-radius: 6px;
 }
 .mp-queue-head button:hover { color: var(--err); background: var(--err-soft); }
+/* 头部按钮组: 非破坏性操作（存为歌单/播放全部/并入）不红 */
+.mp-queue-ops { display: inline-flex; align-items: center; gap: 2px; flex: none; }
+.mp-queue-ops button:hover { color: var(--accent); background: var(--accent-soft); }
+.mp-queue-ops button:last-child:hover { color: var(--err); background: var(--err-soft); }
+.mp-queue-head > span:first-child {
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+/* 歌曲行上的 ❤ 与 ＋（默认隐藏, 悬停显出; 已收藏常显实心） */
+.mp-s-fav, .mp-s-add {
+  flex: none; width: 22px; height: 22px; border: none; background: none;
+  color: var(--text-3); cursor: pointer; border-radius: 6px;
+  display: inline-flex; align-items: center; justify-content: center;
+  opacity: 0; transition: opacity .12s, color .12s, background .12s, transform .12s;
+}
+.mp-song:hover .mp-s-fav, .mp-song:hover .mp-s-add { opacity: 1; }
+.mp-s-fav:hover, .mp-s-add:hover { color: var(--accent); background: var(--accent-soft); }
+.mp-s-add:active { transform: scale(.88); }
+.mp-s-fav.on { opacity: 1; color: var(--accent); }
+.mp-s-fav.on:hover { transform: scale(1.1); }
+/* 我的歌单: 新建行 + 歌单行 */
+.mp-pl-new { padding: 10px 14px 4px; }
+#music-pl-name {
+  width: 100%; height: 30px; border: 1px solid var(--border-strong);
+  border-radius: 8px; padding: 0 11px;
+  font-size: calc(12px * var(--fs-ui)); font-family: inherit;
+  background: var(--bg); color: var(--text);
+}
+#music-pl-name:focus {
+  outline: none; border-color: var(--accent-border);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+.mp-pl {
+  display: flex; align-items: center; gap: 9px;
+  padding: 8px 14px; cursor: pointer; font-size: calc(12.5px * var(--fs-ui));
+  transition: background .1s;
+}
+.mp-pl:hover { background: var(--hover); }
+.mp-pl-name { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.mp-pl-meta {
+  flex: none; color: var(--text-3); font-size: calc(11px * var(--fs-ui));
+  font-variant-numeric: tabular-nums;
+}
+.mp-pl .mp-queue-ops button {
+  width: 22px; height: 22px; padding: 0;
+  display: inline-flex; align-items: center; justify-content: center;
+  border: none; background: none; cursor: pointer; border-radius: 6px;
+  color: var(--text-3);
+}
+.mp-pl .mp-queue-ops button:hover { color: var(--accent); background: var(--accent-soft); }
+.mp-pl .mp-queue-ops .mp-pl-del:hover { color: var(--err); background: var(--err-soft); }
+.mp-pl-detail-head #music-pl-back {
+  flex: none; font-weight: 600;
+}
+.mp-pl-detail-head > span:nth-of-type(1) {
+  flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+
+/* ============================================================
+ * 设置页: 命令白名单
+ * ============================================================ */
+.al-add-row {
+  display: flex; gap: 8px; margin: 10px 0 12px;
+}
+.al-add-row .hex-input { flex: 1; }
+.al-rule-list {
+  display: flex; flex-direction: column; gap: 6px;
+}
+.al-rule-item {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 10px; padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--code-bg);
+}
+.al-rule-item code {
+  font-family: var(--font-mono);
+  font-size: calc(12px * var(--fs-ui));
+  color: var(--text-1);
+  word-break: break-all;
+}
+.al-rule-item .al-del { flex: none; }
+.al-empty {
+  padding: 8px 10px;
+  font-size: calc(12px * var(--fs-ui));
+  color: var(--text-3);
+}
+
+/* --- 设置页: Skills 分区 --- */
+.skill-install-row {
+  display: flex; gap: 8px; margin: 10px 0 6px; align-items: center;
+  flex-wrap: wrap;
+}
+.skill-install-row .hex-input { flex: 1; min-width: 180px; }
+.skill-install-row .skill-subpath { flex: 0 1 140px; min-width: 110px; }
+.skill-overwrite {
+  display: inline-flex; align-items: center; gap: 5px;
+  font-size: calc(12px * var(--fs-ui));
+  color: var(--text-2);
+  white-space: nowrap;
+  cursor: pointer;
+}
+.skill-item {
+  position: relative;
+  display: flex; flex-direction: column; gap: 3px;
+  padding: 8px 10px; padding-right: 64px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--code-bg);
+  margin-bottom: 6px;
+}
+.skill-item-head {
+  display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap;
+}
+.skill-name {
+  font-family: var(--font-mono);
+  font-size: calc(12px * var(--fs-ui));
+  font-weight: 600;
+  color: var(--text-1);
+}
+.skill-src {
+  flex: none;
+  font-size: calc(10px * var(--fs-ui));
+  padding: 1px 6px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  color: var(--text-3);
+}
+.skill-src-user { color: var(--accent, var(--text-2)); }
+.skill-desc {
+  font-size: calc(12px * var(--fs-ui));
+  color: var(--text-2);
+}
+.skill-dir {
+  font-family: var(--font-mono);
+  font-size: calc(11px * var(--fs-ui));
+  color: var(--text-3);
+  word-break: break-all;
+}
+.skill-del { position: absolute; right: 10px; top: 8px; }

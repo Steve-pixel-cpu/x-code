@@ -517,6 +517,17 @@ class ConversationRuntime:
         self._permission_policy.set_mode(mode)
         self._rebuild_effective_prompt()   # 计划模式段随模式增减
 
+    def set_system_prompt(self, sections: list[str]) -> None:
+        """整体替换基础系统提示（Web 端 skills 热装卸后重同步用）。
+        重建生效视图, 权限模式段照常联动。"""
+        self._system_prompt = list(sections)
+        self._rebuild_effective_prompt()
+
+    def set_command_allowlist(self, rules: list) -> None:
+        """用户命令前缀白名单（Web 设置页保存后热更新给所有活跃 runtime）。
+        策略对象与会话各持一份, 这里只更新本 runtime 的这份。"""
+        self._permission_policy.set_command_allowlist(rules)
+
     def thinking_level(self) -> str:
         return self._thinking_level
 

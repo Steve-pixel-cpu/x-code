@@ -18,7 +18,7 @@ from api_client import (
     DEFAULT_PROTOCOL,
     THINKING_LEVELS,
 )
-from config import RuntimeConfig, ConfigLoader, USER_DIR
+from config import RuntimeConfig, ConfigLoader, USER_DIR, load_command_allowlist
 from hooks import HookRunner
 from models import Message, Session, TextContentBlock, ToolContentBlock
 from permissions import (
@@ -41,6 +41,8 @@ from agent_tools import AGENT_TOOL_SPECS, get_orchestrator, register_agent_tools
 from browser_tools import BROWSER_TOOL_SPECS, register_browser_tools
 from mcp_client import (MCP_TOOL_PREFIX, get_mcp_manager, mcp_tool_name,
                         _safe_segment)
+from skills import (SkillError, discover_skills, render_skills_section,
+                    sync_skill_tools, register_skill_tools)
 
 DEFAULT_MODEL = "glm-5.3-flash"
 bash_spec = {
@@ -525,6 +527,7 @@ class SlashCommand(Enum):
     MODE = "mode"
     THINKING = "thinking"
     RENAME = "rename"
+    SKILLS = "skills"
     EXIT = "exit"
     UNKNOWN = "unknown"
 
@@ -625,10 +628,14 @@ def build_runtime(session: Session,
     )
     # 循环层预算接线: maxIterations / tokenBudget(=auto-compact 阈值) /
     # turnTokenBudget 此前只是被解析, 从未生效
-    return (running_time
-            .with_max_iterations(hooks_config.max_iterations())
-            .with_auto_compact_threshold(hooks_config.token_budget())
-            .with_turn_output_budget(hooks_config.turn_token_budget()))
+    running_time = (running_time
+                    .with_max_iterations(hooks_config.max_iterations())
+                    .with_auto_compact_threshold(hooks_config.token_budget())
+                    .with_turn_output_budget(hooks_config.turn_token_budget()))
+    # 用户命令白名单: settings.json 持久规则, 启动即生效（CLI 与 Web 同源）。
+    # setter 返回 None, 不能挂进上面的 builder 链尾。
+    running_time.set_command_allowlist(load_command_allowlist())
+    return running_time
 
 def resolve_permission_mode(runtime_config: RuntimeConfig) -> PermissionMode:
     """决定启动时的权限模式。
@@ -817,6 +824,46 @@ def repair_interrupted_turn(session: Session) -> None:
             ))
 
 
+def do_skills(runtime: "ConversationRuntime", name_arg: str) -> None:
+    """/skills: 列出已装技能; /skills <name>: 预览该技能的 SKILL.md 开头。
+    列表数据从系统提示词无法反解, 这里按同一套发现规则现扫——CLI 会话
+    期间装了新技能, 重启会话或直接看这里都能看到最新状态。"""
+    from skills import discover_skills as _discover, SKILL_FILE
+    name_arg = (name_arg or "").strip()
+    skills = _discover(Path.cwd(), USER_DIR)
+    if not skills:
+        print(c_dim("没有已安装的技能。把 SKILL.md 放进 "
+                    "~/.x-code/skills/<name>/ 或 <项目>/.claude/skills/<name>/, "
+                    "或用 Web 设置页从 GitHub 仓库安装。"))
+        return
+    if name_arg:
+        skill = next((s for s in skills if s.name == name_arg), None)
+        if skill is None:
+            print(c_red(f"✗ 找不到技能: {name_arg}"))
+            print("可用列表:")
+            for s in skills:
+                print(f"  {s.name}")
+            return
+        print(f"{skill.name}  ({skill.source})  {c_dim(str(skill.dir))}")
+        print(c_dim(f"描述: {skill.description or '(无)'}"))
+        print()
+        skill_file = skill.dir / SKILL_FILE
+        try:
+            lines = skill_file.read_text(encoding="utf-8").splitlines()
+        except (OSError, UnicodeDecodeError):
+            print(c_red(f"✗ 无法读取: {skill_file}"))
+            return
+        preview = lines[:40]
+        print("\n".join(preview))
+        if len(lines) > len(preview):
+            print(c_dim(f"…（共 {len(lines)} 行, 完整内容请看 {skill_file}）"))
+        return
+    print(f"已安装 {len(skills)} 个技能:")
+    for s in skills:
+        print(f"  {s.name:<24} {c_cyan(s.source):<20} "
+              f"{c_dim(s.description[:60] or '(无描述)')}")
+
+
 # --- REPL ---
 def run_repl(runtime: ConversationRuntime,
              prompter: PermissionPrompter,
@@ -883,6 +930,9 @@ def run_repl(runtime: ConversationRuntime,
             elif cmd == SlashCommand.RENAME:
                 rename_cmd_len = len(SlashCommand.RENAME.value) + 1
                 do_rename(runtime, store, session_id, text[rename_cmd_len:])
+            elif cmd == SlashCommand.SKILLS:
+                skills_cmd_len = len(SlashCommand.SKILLS.value) + 1
+                do_skills(runtime, text[skills_cmd_len:])
 
         else:
             # 每轮对话开始: 细分隔线；块与块之间靠各视觉块自带的空行隔开
@@ -931,6 +981,7 @@ TOOL_REQUIREMENTS = {
     "todo": READ_ONLY_MODE,             # 会话任务清单（只写 ~/.x-code/todos/ 元数据）
     "web_search": READ_ONLY_MODE,       # 免 key 网页搜索, 纯只读
     "web_fetch": READ_ONLY_MODE,        # 抓 URL 提取正文, 不落盘
+    "skill_read": READ_ONLY_MODE,       # 读已装技能目录内文件, 只读且限技能目录
     "browser_navigate": READ_ONLY_MODE,  # 打开页面（不写本地, 副作用在被测站）
     "browser_snapshot": READ_ONLY_MODE,  # 读页面结构/文本
     "browser_console": READ_ONLY_MODE,   # 读 console/JS 报错
@@ -948,7 +999,8 @@ TOOL_REQUIREMENTS = {
 }
 
 
-def build_registry(mcp_servers: Optional[list] = None) -> ToolRegistry:
+def build_registry(mcp_servers: Optional[list] = None,
+                   skills: Optional[list] = None) -> ToolRegistry:
     """CLI 与 Web 共用的工具注册表: 内置工具 + 后台任务两件套 + 多 agent
     三件套 + browser + MCP 外部工具一次注册到位。
 
@@ -974,6 +1026,9 @@ def build_registry(mcp_servers: Optional[list] = None) -> ToolRegistry:
 
     if mcp_servers:
         _attach_mcp_tools(registry, mcp_servers)
+    # skills 的 skill_read: 只读工具, MCP 之后挂（名字冲突时技能让位）
+    register_skill_tools(registry, skills or [])
+    sync_skill_tools(TOOLS, skills or [])
     return registry
 
 
@@ -1039,9 +1094,18 @@ def start(session_store:SessionStore,session_id:str):
         config_home=USER_DIR,   # x-code 自己的用户配置目录
     )
     runtime_config = config_loader.load()
-    registry = build_registry(mcp_servers=runtime_config.mcp_servers())
+    # 技能发现: 项目级覆盖用户级, 解析失败降级为警告行不挡启动
+    skill_warnings: list[str] = []
+    skills = discover_skills(Path.cwd(), USER_DIR,
+                             on_error=lambda msg: skill_warnings.append(msg))
+    for w in skill_warnings:
+        print(c_yellow(f"  ⚠ {w}"))
+    registry = build_registry(mcp_servers=runtime_config.mcp_servers(),
+                              skills=skills)
     for line in mcp_status_lines():
         print(line)
+    if skills:
+        print(c_dim(f"  ✓ Skills: {', '.join(s.name for s in skills)}"))
 
     session_load = session_store.load_session(session_id)
     session_msgs = session_load[0]
@@ -1055,6 +1119,12 @@ def start(session_store:SessionStore,session_id:str):
             Path.cwd(), datetime.now().strftime("%Y-%m-%d")))
         .build()
     )
+    # 技能清单挂在追加段（动态边界之后）: 只进 name+description, 静态
+    # 前缀不变, prompt caching 不受影响; 无技能时是空串, builder 会跳过
+    if skills:
+        skills_section = render_skills_section(skills)
+        if skills_section:
+            system_prompt.append(skills_section)
     # CLI 侧协议选择: XCODE_PROTOCOL 环境变量（anthropic 默认; openai 兼容
     # 端点可直接本地起 CLI 用）。非法值回退 anthropic, 不挡启动。
     try:

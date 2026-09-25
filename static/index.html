@@ -14,7 +14,7 @@
 <script src="/static/vendor/highlight.min.js"></script>
 <link rel="stylesheet" href="/static/vendor/katex.min.css">
 <script src="/static/vendor/katex.min.js"></script>
-<link rel="stylesheet" href="/static/app.css?v=20260924a"><link rel="stylesheet" href="/static/pet.css?v=20260925a">
+<link rel="stylesheet" href="/static/app.css?v=20260925c"><link rel="stylesheet" href="/static/pet.css?v=20260925c">
 </head>
 <body>
 
@@ -145,6 +145,10 @@
     <button class="menu-item nav-item" data-section="mcp">
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="6" rx="2"/><rect x="2" y="15" width="20" height="6" rx="2"/><path d="M6 9v3a1 1 0 001 1h10a1 1 0 001-1V9M6 18h.01M18 18h.01"/></svg>
       MCP 服务器
+    </button>
+    <button class="menu-item nav-item" data-section="skills">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2l2.4 4.9 5.4.8-3.9 3.8.9 5.4L12 14.4 7.2 16.9l.9-5.4L4.2 7.7l5.4-.8z"/></svg>
+      Skills
     </button>
     <button class="menu-item nav-item" data-section="config">
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><path d="M14 2v6h6M9 13h6M9 17h6"/></svg>
@@ -392,6 +396,14 @@
           </div>
           <button type="button" class="icon-act" id="btn-pet-summon">召唤桌宠</button>
         </div>
+        <div class="set-row">
+          <div class="set-info">
+            <div class="set-name">宠物大小</div>
+            <div class="set-desc">调整桌宠悬浮窗的整体缩放，50%–200%；召唤中的宠物立即生效，重开后保持</div>
+          </div>
+          <input type="range" id="pet-size" min="50" max="200" step="5" value="100" aria-label="宠物大小">
+          <span class="bg-bright-val" id="pet-size-val">100%</span>
+        </div>
         <div class="set-row pet-set-col">
           <div class="set-info">
             <div class="set-name">宠物列表</div>
@@ -418,7 +430,7 @@
       </div>
       <div class="sp-section-body" data-section="behavior" style="display:none">
         <div class="sp-section">行为</div>
-        <div class="sp-section-desc">控制单轮任务循环的运行参数</div>
+        <div class="sp-section-desc">控制单轮任务循环的运行参数与命令权限</div>
         <div class="set-row">
           <div class="set-info">
             <div class="set-name">每轮最大迭代次数</div>
@@ -426,6 +438,13 @@
           </div>
           <input id="set-max-iter" class="hex-input num-input" spellcheck="false" inputmode="numeric" placeholder="128" maxlength="5">
         </div>
+        <div class="al-sub">命令白名单</div>
+        <div class="sp-section-desc">匹配规则的 shell 命令不再弹权限确认，直接执行。规则按词序前缀匹配（如 "git push" 命中 "git push origin main"）；组合命令每一段都必须命中才会放行，带命令替换或写文件重定向的命令永远不命中。保存后立即对所有会话生效</div>
+        <div class="al-add-row">
+          <input id="al-rule-input" class="hex-input" spellcheck="false" placeholder="例如: uv run pytest" maxlength="200">
+          <button type="button" id="btn-al-add" class="icon-act">添加规则</button>
+        </div>
+        <div id="al-rule-list" class="al-rule-list"></div>
       </div>
       <div class="sp-section-body" data-section="mcp" style="display:none">
         <div class="sp-section">MCP 服务器</div>
@@ -441,6 +460,18 @@
           <span id="mcp-save-status" class="prov-save-status" aria-live="polite"></span>
           <button type="button" class="icon-act" id="btn-mcp-reload">重连全部</button>
         </div>
+      </div>
+      <div class="sp-section-body" data-section="skills" style="display:none">
+        <div class="sp-section">Skills</div>
+        <div class="sp-section-desc">技能包是一份 SKILL.md（可捆绑脚本/模板），任务匹配时模型自动读取并遵循。项目级技能放在 &lt;项目&gt;/.claude/skills/&lt;名称&gt;/，随仓库走；这里安装的是用户级技能（~/.x-code/skills/），装完即时生效，无需重启</div>
+        <div class="skill-install-row">
+          <input id="skill-repo-input" class="hex-input" spellcheck="false" placeholder="GitHub 仓库，如 anthropics/skills 或完整 URL" maxlength="300">
+          <input id="skill-subpath-input" class="hex-input skill-subpath" spellcheck="false" placeholder="子目录（可选）" maxlength="200">
+          <label class="skill-overwrite"><input type="checkbox" id="skill-overwrite-chk">覆盖同名</label>
+          <button type="button" id="btn-skill-install" class="icon-act">安装</button>
+        </div>
+        <div id="skill-install-status" class="prov-save-status" aria-live="polite"></div>
+        <div id="skill-list"></div>
       </div>
       <div class="sp-section-body" data-section="config" style="display:none">
         <div class="sp-section">配置文件</div>
@@ -463,16 +494,16 @@
 
 <div id="music-panel" hidden>
   <div class="mp-tabs">
-    <button data-tab="hot" class="on">热歌榜</button>
-    <button data-tab="new">新歌榜</button>
+    <button data-tab="fav" class="on">收藏</button>
+    <button data-tab="mine">我的歌单</button>
     <button data-tab="search">搜索</button>
     <button data-tab="queue">播放列表</button>
     <button id="music-close" data-tip="收起">
       <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>
     </button>
   </div>
-  <div class="mp-tab-body" data-tab-body="hot"></div>
-  <div class="mp-tab-body" data-tab-body="new" style="display:none"></div>
+  <div class="mp-tab-body" data-tab-body="fav"></div>
+  <div class="mp-tab-body" data-tab-body="mine" style="display:none"></div>
   <div class="mp-tab-body" data-tab-body="search" style="display:none">
     <div class="mp-search-row">
       <input id="music-search-input" type="text" placeholder="搜歌名 / 歌手，回车搜索" spellcheck="false" autocomplete="off">
@@ -504,8 +535,8 @@
   </div>
 </div>
 
-<script src="/static/app.js?v=20260924b" defer></script>
-<script src="/static/music.js?v=20260921c" defer></script>
-<script src="/static/pet.js?v=20260924f" defer></script>
+<script src="/static/app.js?v=20260925f" defer></script>
+<script src="/static/music.js?v=20260925c" defer></script>
+<script src="/static/pet.js?v=20260925h" defer></script>
 </body>
 </html>

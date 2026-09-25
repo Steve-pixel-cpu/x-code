@@ -10,6 +10,7 @@
 
 - **Agent 工具循环**：模型自主决定调用工具 → 执行 → 回传结果，循环往复直到完成；支持 SSE 流式输出、thinking 块、单轮/循环层 token 与迭代预算
 - **MCP 客户端**：配置文件里声明 MCP 服务器（stdio 子进程 / streamable HTTP / SSE），启动时自动连接，外部工具以 `mcp__<服务器>__<工具>` 注入工具循环，与内置工具同管线（权限审批、hooks、输出截断）；Web 端支持 `/api/mcp/reload` 热重载
+- **Skills 技能包**：Claude Code 兼容的 `SKILL.md`（YAML frontmatter + 正文指令，可捆绑脚本/模板），任务匹配时模型先用 `skill_read` 读正文再遵循（渐进式披露，只注入 name+description 清单省 token）；项目级 `.claude/skills/` 与用户级 `~/.x-code/skills/` 两级发现、同名覆盖；Web 设置页从 GitHub 仓库一键安装社区 skills（如 `anthropics/skills`），装完即时生效无需重启；CLI `/skills` 查看
 - **内置工具集**：`bash` / `powershell`（Windows 下走 Git Bash，UTF-8 无乱码）、`read_file` / `write_file`、`grep` / `glob`（纯 Python 实现，免 shell）、后台任务 `task_output` / `task_stop`、任务清单 `todo`、计划卡 `present_plan`、浏览器实测 `browser_navigate` / `browser_snapshot` / `browser_click` / `browser_type` / `browser_console` 等（Playwright 无头 Chromium，可实际操作 Web 系统做功能测试）
 - **三级权限体系**：`plan`（只读）→ `workspace-write`（工作目录内可写）→ `danger-full-access`（全放行）；每个工具登记权限档位，越权时 CLI 弹 y/N 面板、Web 端弹审批卡，plan 模式下可一键升级
 - **多 Agent 编排**：Leader 通过 `agent_tool` / `agent_status` / `agent_reap` / `agent_list` 派生 subagent 并行干活，白名单 + 规格过滤防递归失控，孤儿 agent 启动对账
@@ -17,7 +18,7 @@
 - **Hooks**：`PreToolUse` / `PostToolUse` 挂 shell 命令，工具执行前后触发
 - **配置分层**：用户全局 → 项目 → 本地三级 JSON 配置深度合并，环境变量可覆盖；模型、思考档位（low/medium/high/max）、超时、预算均可配
 - **限流重试**：连接抖动指数退避 + 429 专用长退避曲线（累计约 30s），重试进度实时上报界面
-- **摸鱼电台**：Web 端内置网易云音乐公开接口的在线电台（榜单 + 流式播放 + 歌词）
+- **摸鱼电台**：Web 端内置网易云音乐公开接口的在线电台（搜索 + 流式播放 + 歌词 + 本地收藏/自定义歌单，收藏与歌单存 `~/.x-code/music-library.json`，播放列表跨重启恢复）
 
 ## 架构总览
 
@@ -169,6 +170,37 @@ uv run python server.py --port 8020
 
 环境变量覆盖：`CLAUDE_MODEL`、`CLAUDE_TIMEOUT`、`CLAUDE_MAX_ITERATIONS`、
 `CLAUDE_TOKEN_BUDGET`、`CLAUDE_TURN_TOKEN_BUDGET`、`CLAUDE_THINKING_LEVEL`。
+
+### Skills 技能包
+
+一个技能 = 一个目录 + 一份 `SKILL.md`（YAML frontmatter + Markdown 正文
+指令），可捆绑任意辅助文件（脚本/模板/数据），目录即技能工作区：
+
+```markdown
+---
+name: pdf-tools
+description: 处理 PDF 拆分/合并/提取文本时的标准流程与脚本
+---
+# 步骤
+1. 先用 scripts/extract.py 提取文本……
+```
+
+- **两级发现**：用户级 `~/.x-code/skills/<名称>/SKILL.md`（跨项目可用）、
+  项目级 `<项目>/.claude/skills/<名称>/SKILL.md`（随仓库走，同名覆盖用户级）；
+  与 Claude Code 的技能目录兼容，已有的技能仓库可直接放进项目使用
+- **渐进式披露**：系统提示词只注入 name + description 清单（几百 token），
+  任务匹配时模型先用 `skill_read` 工具读 SKILL.md 全文再遵循——十个技能
+  也不会把上下文吃满；`skill_read` 限定只能读技能目录内的文件，
+  越界（含捆绑文件里的 `../` 穿越）一律拒绝
+- **CLI**：启动摘要显示已装技能；`/skills` 列出全部，
+  `/skills <名称>` 预览该技能的 SKILL.md
+- **Web 端「设置 → Skills」**：输入 GitHub 仓库一键安装社区 skills
+  （支持 `anthropics/skills` 短格式或完整 URL；仓库根目录、指定子目录、
+  `skills/*/<名称>/` 一仓多技能三种布局都识别），装完所有活跃会话
+  即时生效、无需重启；同名技能默认拒绝覆盖，勾选"覆盖同名"放行；
+  用户级技能可就地卸载，项目级技能请回项目仓库管理
+- 对应 REST 接口：`GET /api/skills`、`POST /api/skills/install`
+  （body: `repo` / `subpath` / `overwrite`）、`DELETE /api/skills/{name}`
 
 ## 权限模式
 

@@ -662,6 +662,54 @@ function confirmDialog(msg, { title = "确认操作", okText = "确定", danger 
     ov.querySelector("[data-act='ok']").focus();
   });
 }
+window.confirmDialog = confirmDialog;   // 摸鱼电台(music.js)复用
+
+/* ============================================================
+ * 输入弹窗 — 替代原生 prompt(): Tauri/WebView2 不支持 prompt
+ * （返回 null, 调用方当成"取消"静默退出, 功能看着就是"点了没反应"）。
+ * 用法: const name = await promptDialog("歌单名称", { title: "存为歌单", value: "默认值" });
+ * ============================================================ */
+function promptDialog(msg, { title = "输入", value = "", placeholder = "", okText = "确定" } = {}) {
+  return new Promise(resolve => {
+    const ov = document.createElement("div");
+    ov.id = "confirm-overlay";
+    ov.style.display = "flex";
+    ov.innerHTML =
+      '<div id="confirm-modal" role="dialog" aria-modal="true">' +
+        '<div id="confirm-title"><span>' + escapeHtml(title) + '</span></div>' +
+        '<div id="confirm-msg">' + escapeHtml(msg) + '</div>' +
+        '<input id="confirm-input" type="text" spellcheck="false" autocomplete="off">' +
+        '<div id="confirm-actions">' +
+          '<button type="button" data-act="cancel">取消</button>' +
+          '<button type="button" data-act="ok">' + escapeHtml(okText) + '</button>' +
+        '</div>' +
+      '</div>';
+    document.body.appendChild(ov);
+    const input = ov.querySelector("#confirm-input");
+    input.value = value;
+    input.placeholder = placeholder;
+    let done = false;
+    const finish = v => {
+      if (done) return;
+      done = true;
+      input.removeEventListener("keydown", onEnter);
+      document.removeEventListener("keydown", onEsc);
+      ov.remove();
+      resolve(v);
+    };
+    const onEnter = e => {
+      e.stopPropagation();            // 别漏进全局快捷键
+      if (e.key === "Enter") finish(input.value.trim());
+    };
+    const onEsc = e => { if (e.key === "Escape") finish(null); };
+    input.addEventListener("keydown", onEnter);
+    document.addEventListener("keydown", onEsc);
+    ov.querySelector("[data-act='ok']").onclick = () => finish(input.value.trim());
+    ov.querySelector("[data-act='ok']").onclick = () => finish(input.value.trim());
+    ov.querySelector("[data-act='cancel']").onclick = () => finish(null);
+    setTimeout(() => input.focus(), 0);
+  });
+}
 
 /* ============================================================
  * 桌面端右键菜单 — 复制/粘贴, 只显示当前可用的项:
@@ -1624,6 +1672,7 @@ async function selectSession(id) {
   renderSessionList();
   refreshWorkdirTag();
   setBusyUi(run.busy);
+  renderQueueCards();   // 待发送卡片跟随会话: 重绘为本会话的排队（无则清掉上个会话的残留）
   syncPlanPanelForActiveSession();   // 切回的会话若有未决计划: 恢复面板弹窗
   // 三设置回显: 会话运行值 → 会话列表缓存（/api/sessions 每项都带持久值/
   // 全局默认）→ 全局默认值。必须无条件 setValue: 否则下拉框残留上一个
@@ -1807,6 +1856,7 @@ function startDraft(draftDir = null) {
   showCol("__draft__");
   showEmptyState();
   setBusyUi(false);
+  renderQueueCards();   // 草稿态没有会话队列: 清掉上个会话残留的待发送卡片
   syncPlanPanelForActiveSession();   // 草稿态没有未决计划: 收起面板
   syncThinkingIndicator();     // 草稿态没有 run: 收掉从原会话带来的"思考中"转圈
                                  // （切走瞬间原会话正在 prefill 空窗, 否则没人再碰这个 DOM,
@@ -1954,13 +2004,23 @@ function scheduleReconnect(id) {
 /* ============================================================
  * 服务端消息分派
  * ============================================================ */
+/* 桌宠悬浮窗标注权限气泡的会话名: 只读查询, 不暴露 state 本体 */
+window.xcodeSessionTitle = (sid) => {
+  const s = state.sessions.find(x => x.id === sid);
+  return s ? (s.title || s.name || "") : "";
+};
+
 function handleServerMessage(msg, sid) {
   const run = runOf(sid);
-  // 桌宠悬浮窗(pet.js 转发): 前后台会话的运行事件都镜像一份给它做状态机
-  window.xcodePet?.onEvent?.(msg);
+  // 桌宠悬浮窗(pet.js 转发): 前后台会话的运行事件都镜像一份给它做状态机。
+  // 装饰性钩子必须隔离——它内部抛错不能拖垮消息主处理链(曾因 pet.js
+  // 引用未定义变量, turn_done 全部炸在中断, 界面永远转圈且无法中断)。
+  try { window.xcodePet?.onEvent?.(msg, sid); } catch (e) { console.warn("[pet]", e); }
   // 完成通知（提示音 + 桌面弹窗）: turn_done/error 是轮次终点, 前台/后台
   // 两条路径都从这里过, 单点挂钩全覆盖。内部自己判断"该不该响/该不该弹"。
-  if (msg.type === "turn_done" || msg.type === "error") notifyTurnEnd(msg, sid);
+  if (msg.type === "turn_done" || msg.type === "error") {
+    try { notifyTurnEnd(msg, sid); } catch (e) { console.warn("[notify]", e); }
+  }
   // 继续聊天 = 隐性否决未决计划: 服务端此时会把旧计划自动拒绝并叫停当前轮
   // （见 server 的 user 分支）, turn_interrupting/turn_started 到达即收口 UI——
   // 计划卡与右侧面板按钮定格"已过期", 正文淡化。前后台会话都要收口。
@@ -1990,32 +2050,13 @@ function handleServerMessage(msg, sid) {
     else if (msg.type === "model_changed") onModelChanged(msg, sid);
 
     else if (msg.type === "tool_result") bumpUnread(sid);
+    else if (msg.type === "permission_resolved") onPermissionResolved(msg, sid);
     else if (msg.type === "turn_done" || msg.type === "error") {
       bumpUnread(sid);
       run.busy = false;
       run.awaiting = false;
       run.queued = false;
-      // 未决审批卡定格: 服务端已收口（打断/断连都朝安全侧 DENY）
-      for (const rid of Object.keys(run.pendingPerms)) {
-        const card = colOf(sid).querySelector(
-          `.perm-row[data-req-id="${rid}"], .plan-card[data-req-id="${rid}"]`);
-        if (card && !card.classList.contains("allowed") && !card.classList.contains("denied")) {
-          card.classList.add("denied");
-          const choices = card.querySelector(".pr-choices");
-          if (choices) choices.remove();
-          card.appendChild(makePrMark("已拒绝", false));
-        }
-        // 右侧计划面板若正显示这份计划（且属于本会话）: 按钮区一并定格, 不留死按钮
-        if (run.pendingPerms[rid]?.tool_name === "present_plan"
-            && $("plan-actions").dataset.reqId === rid
-            && $("plan-actions").dataset.reqSession === sid) {
-          const pa = $("plan-actions");
-          pa.innerHTML = "";
-          pa.appendChild(makePrMark("已中断", false));
-          $("plan-body").classList.add("stale");
-        }
-      }
-      run.pendingPerms = {};
+      settlePendingPermsOnTurnEnd(run, sid);
       // 轮次收口: 悬空工具行标"已中断", 清掉流式指针
       sweepPendingToolCards(run);
       collapseFinishedToolGroups(colOf(sid));   // 后台会话同样收起已结束的大分组
@@ -2056,6 +2097,7 @@ function handleServerMessage(msg, sid) {
     case "rate_limited_retry": onRateLimitedRetry(msg, sid); break;
     case "turn_interrupting":  onTurnInterrupting(msg, sid); break;
     case "permission_request": onPermissionRequest(msg, sid); break;
+    case "permission_resolved": onPermissionResolved(msg, sid); break;
     case "mode_changed":       onModeChanged(msg, sid); break;
     case "thinking_changed":   onThinkingChanged(msg, sid); break;
     case "model_changed":      onModelChanged(msg, sid); break;
@@ -2400,7 +2442,7 @@ function setToolState(row, kind) {
   updateToolGroupHeader(row.closest(".tool-group"));
 }
 
-function completeToolCard(row, { is_error, denied, result_meta }) {
+function completeToolCard(row, { is_error, denied, result_meta, output }) {
   if (denied) {
     setToolState(row, "denied");
   } else if (is_error) {
@@ -2413,7 +2455,48 @@ function completeToolCard(row, { is_error, denied, result_meta }) {
   }
   if (row.dataset.tool === "todo") {
     renderTodoCard(row);
+  } else {
+    // 命令/工具输出面板: 输出非空即渲染（此前 output 只进历史, 界面上
+    // 无处可看——点卡片没有任何反应）。出错自动展开, 成功默认收起。
+    renderOutputPanel(row, output, !!is_error && !denied);
   }
+}
+
+/* ---------- 输出展示: 工具卡的统一输出面板 ----------
+ * tool_result 的 output（命令 stdout/stderr、工具摘要）此前只进模型历史,
+ * 界面无处可看。面板插在工具行下方（与 diff 面板同构）, 默认折叠;
+ * is_error 自动展开——出错时用户最关心的就是输出。纯 textContent,
+ * 不走 markdown 渲染, 超长截断（完整输出在会话历史里）。 */
+const OUTPUT_PANEL_MAX = 20000;
+function renderOutputPanel(row, outputText, autoOpen) {
+  if (!outputText || !String(outputText).trim()) return;
+  if (row.querySelector(".to-wrap")) return;
+  let text = String(outputText);
+  if (text.length > OUTPUT_PANEL_MAX) {
+    text = text.slice(0, OUTPUT_PANEL_MAX) +
+      "\n\n[... 已截断, 共 " + text.length + " 字符; 完整输出见上下文]";
+  }
+  const wrap = document.createElement("div");
+  wrap.className = "to-wrap" + (autoOpen ? " has-err" : "");
+  const head = document.createElement("button");
+  head.type = "button";
+  head.className = "to-head";
+  head.innerHTML = '<span class="to-caret">▸</span><span class="to-sum">输出</span>';
+  const body = document.createElement("div");
+  body.className = "to-body";
+  body.hidden = !autoOpen;
+  head.querySelector(".to-caret").textContent = body.hidden ? "▸" : "▾";
+  const pre = document.createElement("div");
+  pre.className = "to-pre";
+  pre.textContent = text;
+  body.appendChild(pre);
+  head.onclick = () => {
+    body.hidden = !body.hidden;
+    head.querySelector(".to-caret").textContent = body.hidden ? "▸" : "▾";
+  };
+  wrap.appendChild(head);
+  wrap.appendChild(body);
+  row.insertAdjacentElement("afterend", wrap);
 }
 
 /* todo 卡: 工具行下方渲染任务清单本体（取代裸文本结果）。数据取自
@@ -2573,6 +2656,56 @@ function makePrMark(text, approved) {
   return mark;
 }
 
+/* 命令前缀规则提取: 从入参 command 里取前 ≤2 个词（剥 VAR=val 前缀）,
+ * 作为"以 xx 开头"的白名单规则。UI 层示意即可, 服务端保存时会再清洗、
+ * 授权层按 shlex 词对齐匹配（比这里更严格）。取不出词返回 null。 */
+function allowlistRuleOf(input) {
+  let cmd = "";
+  try {
+    const data = JSON.parse(input || "{}");
+    if (typeof data.command === "string") cmd = data.command;
+  } catch (e) { /* not json */ }
+  let words = cmd.trim().split(/\s+/).filter(w => w && !/^[A-Za-z_][A-Za-z0-9_]*=$/.test(w));
+  words = words.slice(0, 2).map(w => w.replace(/["']/g, ""));
+  const rule = words.join(" ").trim().slice(0, 80);
+  return rule || null;
+}
+
+/* "总是允许"按钮: 把该命令的前缀规则加入白名单并批准本次请求。
+ * 只给 bash/powershell 审批卡渲染——白名单是 shell 语义。 */
+function buildAlwaysAllowBtn(requestId, sid, input) {
+  const rule = allowlistRuleOf(input);
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "pr-btn always";
+  btn.innerHTML = ICON_PRM_OK;
+  const txt = document.createElement("span");
+  txt.textContent = rule ? `总是允许"${rule} …"` : "总是允许";
+  btn.appendChild(txt);
+  btn.onclick = async function () {
+    btn.disabled = true;
+    try {
+      const r = await fetch("/api/settings/allowlist", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ rule: rule || (allowlistRuleOf(input) || "bash") }),
+      });
+      if (!r.ok) {
+        const err = await r.json().catch(() => ({}));
+        throw new Error(err.detail || r.status);
+      }
+      const data = await r.json();
+      respondPermission(requestId, true, sid);
+      toast(`已加白名单并允许: ${(data.rules || []).slice(-1)[0] || rule}`);
+      if (typeof renderAllowlistSettings === "function") renderAllowlistSettings();
+    } catch (e) {
+      btn.disabled = false;
+      toast("加白名单失败: " + e.message);
+    }
+  };
+  return btn;
+}
+
 function onPermissionRequest(msg, sid) {
   // sid 缺省 = 当前会话（旧事件流路径）: WS 分发处总是带 sid
   const sid2 = sid || state.sessionId;
@@ -2617,6 +2750,10 @@ function onPermissionRequest(msg, sid) {
   row.appendChild(cmd);
 
   row.appendChild(buildPermChoices(msg.request_id, sid2, "允许", "拒绝"));
+  // shell 命令审批卡追加"总是允许": 前缀入白名单, 之后同类命令不再弹问
+  if (msg.tool_name === "bash" || msg.tool_name === "powershell") {
+    row.appendChild(buildAlwaysAllowBtn(msg.request_id, sid2, msg.input));
+  }
 
   colOf(sid2).appendChild(row);
   if (sid2 === state.sessionId) scrollToBottom();
@@ -2733,14 +2870,12 @@ function expirePlanCard(run, sid, label) {
   }
 }
 
-function respondPermission(requestId, approved, sid) {
-  const run = runOf(sid);
-  if (!run || !run.pendingPerms[requestId]) return;
-  delete run.pendingPerms[requestId];
-  sendWs({ type: "permission_response", request_id: requestId, approved }, sid);
-  // 卡片定格: 撤按钮, 标记结果
+/* 审批卡定格: 撤按钮, 标记结果（本地批复与 permission_resolved 广播共用,
+ * "已定格"的卡跳过——两条路径可能先后到达同一 rid, 幂等） */
+function markPermResolved(sid, requestId, approved) {
   const markCard = card => {
     if (!card) return;
+    if (card.classList.contains("allowed") || card.classList.contains("denied")) return;
     card.classList.add(approved ? "allowed" : "denied");
     const choices = card.querySelector(".pr-choices");
     if (choices) choices.remove();
@@ -2762,6 +2897,51 @@ function respondPermission(requestId, approved, sid) {
   }
 }
 
+/* 桌宠/REST 批复的同步: 服务端广播 permission_resolved, 主窗据此清
+ * pendingPerms 登记并定格审批卡。不广播的话主窗永远不知道请求已被
+ * 悬浮窗处理——"等待授权…"指示与可点按钮全部滞留到轮次结束。 */
+function onPermissionResolved(msg, sid) {
+  const run = runOf(sid);
+  if (!run || !msg.request_id) return;
+  if (run.pendingPerms[msg.request_id]) delete run.pendingPerms[msg.request_id];
+  markPermResolved(sid, msg.request_id, !!msg.approved);
+  if (sid === state.sessionId) syncThinkingIndicator();   // "等待授权"标签即时纠偏
+}
+
+/* 轮次收口: 未决审批卡定格为已拒绝（服务端此刻已朝安全侧 DENY）,
+ * 并清空登记。前台后台两条收口路径共用——漏掉哪条, stale 登记都会
+ * 让"等待授权…"标签在该会话后续等待窗口里永久滞留。 */
+function settlePendingPermsOnTurnEnd(run, sid) {
+  for (const rid of Object.keys(run.pendingPerms)) {
+    const card = colOf(sid).querySelector(
+      `.perm-row[data-req-id="${rid}"], .plan-card[data-req-id="${rid}"]`);
+    if (card && !card.classList.contains("allowed") && !card.classList.contains("denied")) {
+      card.classList.add("denied");
+      const choices = card.querySelector(".pr-choices");
+      if (choices) choices.remove();
+      card.appendChild(makePrMark("已拒绝", false));
+    }
+    // 右侧计划面板若正显示这份计划（且属于本会话）: 按钮区一并定格, 不留死按钮
+    if (run.pendingPerms[rid]?.tool_name === "present_plan"
+        && $("plan-actions").dataset.reqId === rid
+        && $("plan-actions").dataset.reqSession === sid) {
+      const pa = $("plan-actions");
+      pa.innerHTML = "";
+      pa.appendChild(makePrMark("已中断", false));
+      $("plan-body").classList.add("stale");
+    }
+  }
+  run.pendingPerms = {};
+}
+
+function respondPermission(requestId, approved, sid) {
+  const run = runOf(sid);
+  if (!run || !run.pendingPerms[requestId]) return;
+  delete run.pendingPerms[requestId];
+  sendWs({ type: "permission_response", request_id: requestId, approved }, sid);
+  markPermResolved(sid, requestId, approved);
+}
+
 /* ---------- 轮次结束 / 错误 ---------- */
 function endTurnUiReset() {
   const run = curRun();
@@ -2772,6 +2952,9 @@ function endTurnUiReset() {
     run.unread = 0;             // 前台亲眼看完了, 未读清零
     clearRateLimitNote(run);    // 轮次收口: 限流退避提示一并撤下
     flushAssistantBubble(run);
+    // 未决审批登记一并收口（服务端已朝安全侧 DENY）: 不清的话 stale
+    // 条目会让下个"等待授权"标签永久滞留
+    settlePendingPermsOnTurnEnd(run, state.sessionId);
     // 轮次结束还有工具行停在"运行中"（被打断/异常, 结果永远来不了）: 收口
     sweepPendingToolCards(run);
     collapseFinishedToolGroups(colOf(state.sessionId));   // 大分组随轮次结束收起
@@ -3476,6 +3659,7 @@ async function sendCurrent() {
     state.draft = false;
     state.draftDir = null;   // 已转正: 预选项目用完即清
     myRun.loaded = true;   // 草稿列里的气泡就是全部内容, 无需再拉历史
+    renderQueueCards();   // 草稿转正: 现在挂在具体会话上（新会话队列必为空, 清掉草稿态可能的残留）
     // 草稿列转正为该会话的消息列（气泡不挪窝）
     colOf("__draft__").id = "msg-col-" + state.sessionId;
     // 列表此刻才出现新条目并选中；WS 建立期间消息会排队，onopen 后冲刷
@@ -5016,17 +5200,206 @@ $("btn-mcp-reload").onclick = async () => {
   }
 };
 
+/* ============================================================
+ * 设置页: 命令白名单（GET/POST/DELETE /api/settings/allowlist）
+ * ============================================================ */
+async function renderAllowlistSettings() {
+  const list = $("al-rule-list");
+  if (!list) return;
+  let rules = [];
+  try {
+    const r = await fetch("/api/settings/allowlist");
+    if (r.ok) rules = (await r.json()).rules || [];
+  } catch (e) { /* 服务不可达: 列表留空 */ }
+  list.innerHTML = "";
+  if (!rules.length) {
+    const empty = document.createElement("div");
+    empty.className = "al-empty";
+    empty.textContent = "还没有规则。审批弹窗里的“总是允许”会自动把命令前缀加进来。";
+    list.appendChild(empty);
+    return;
+  }
+  for (const rule of rules) {
+    const item = document.createElement("div");
+    item.className = "al-rule-item";
+    const code = document.createElement("code");
+    code.textContent = rule;
+    const del = document.createElement("button");
+    del.type = "button";
+    del.className = "icon-act al-del";
+    del.textContent = "删除";
+    del.onclick = async () => {
+      del.disabled = true;
+      try {
+        const r = await fetch("/api/settings/allowlist", {
+          method: "DELETE",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ rule }),
+        });
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        renderAllowlistSettings();
+      } catch (e) {
+        del.disabled = false;
+        toast("删除失败: " + e.message);
+      }
+    };
+    item.appendChild(code);
+    item.appendChild(del);
+    list.appendChild(item);
+  }
+}
+async function addAllowlistRuleFromInput() {
+  const inp = $("al-rule-input");
+  const rule = (inp.value || "").trim();
+  if (!rule) return;
+  try {
+    const r = await fetch("/api/settings/allowlist", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ rule }),
+    });
+    if (!r.ok) {
+      const err = await r.json().catch(() => ({}));
+      throw new Error(err.detail || `HTTP ${r.status}`);
+    }
+    inp.value = "";
+    renderAllowlistSettings();
+    toast("白名单已更新");
+  } catch (e) {
+    toast("添加失败: " + e.message);
+  }
+}
+$("btn-al-add").onclick = addAllowlistRuleFromInput;
+$("al-rule-input").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") addAllowlistRuleFromInput();
+});
+
+/* ============================================================
+ * 设置页: Skills（GET /api/skills, POST /api/skills/install,
+ * DELETE /api/skills/{name}）—— 安装/卸载后端即时热生效
+ * ============================================================ */
+function skillStatus(msg, isErr) {
+  const el = $("skill-install-status");
+  if (!el) return;
+  el.textContent = msg || "";
+  el.classList.toggle("err", Boolean(isErr));
+}
+
+async function loadSkills() {
+  const list = $("skill-list");
+  if (!list) return [];
+  let skills = [];
+  try {
+    const r = await fetch("/api/skills");
+    if (r.ok) skills = (await r.json()).skills || [];
+  } catch (e) { /* 服务不可达: 列表留空 */ }
+  list.innerHTML = "";
+  if (!skills.length) {
+    const empty = document.createElement("div");
+    empty.className = "al-empty";
+    empty.textContent = "还没有安装技能。上方输入 GitHub 仓库即可安装社区 skills。";
+    list.appendChild(empty);
+    return skills;
+  }
+  for (const s of skills) {
+    const item = document.createElement("div");
+    item.className = "skill-item";
+    const head = document.createElement("div");
+    head.className = "skill-item-head";
+    const name = document.createElement("span");
+    name.className = "skill-name";
+    name.textContent = s.name;
+    const badge = document.createElement("span");
+    badge.className = `skill-src skill-src-${s.source === "project" ? "project" : "user"}`;
+    badge.textContent = s.source === "project" ? "项目级" : "用户级";
+    head.appendChild(name);
+    head.appendChild(badge);
+    if (s.description) {
+      const desc = document.createElement("div");
+      desc.className = "skill-desc";
+      desc.textContent = s.description;
+      head.appendChild(desc);
+    }
+    const dir = document.createElement("div");
+    dir.className = "skill-dir";
+    dir.textContent = s.dir;
+    item.appendChild(head);
+    item.appendChild(dir);
+    if (s.source !== "project") {
+      const del = document.createElement("button");
+      del.type = "button";
+      del.className = "icon-act al-del skill-del";
+      del.textContent = "卸载";
+      del.onclick = async () => {
+        del.disabled = true;
+        try {
+          const r = await fetch(`/api/skills/${encodeURIComponent(s.name)}`,
+                               { method: "DELETE" });
+          if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `HTTP ${r.status}`);
+          toast("已卸载 " + s.name);
+          loadSkills();
+        } catch (e) {
+          del.disabled = false;
+          toast("卸载失败: " + e.message);
+        }
+      };
+      item.appendChild(del);
+    }
+    list.appendChild(item);
+  }
+  return skills;
+}
+
+async function installSkillFromInput() {
+  const inp = $("skill-repo-input");
+  const sub = $("skill-subpath-input");
+  const chk = $("skill-overwrite-chk");
+  const btn = $("btn-skill-install");
+  const repo = (inp.value || "").trim();
+  if (!repo) { skillStatus("请填写仓库地址", true); return; }
+  btn.disabled = true;
+  skillStatus("正在克隆并解析技能…");
+  try {
+    const r = await fetch("/api/skills/install", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        repo,
+        subpath: (sub.value || "").trim(),
+        overwrite: chk ? chk.checked : false,
+      }),
+    });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(data.detail || `HTTP ${r.status}`);
+    const names = (data.installed || []).map(s => s.name).join(", ");
+    skillStatus(`已安装: ${names}`);
+    inp.value = ""; sub.value = "";
+    loadSkills();
+    toast("技能已安装并生效");
+  } catch (e) {
+    skillStatus("安装失败: " + e.message, true);
+  } finally {
+    btn.disabled = false;
+  }
+}
+$("btn-skill-install").onclick = installSkillFromInput;
+$("skill-repo-input").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") installSkillFromInput();
+});
+
 function openSettings() {
   themeDd.setValue(themePref());   // 每次打开回显当前值
   $("fs-ui-input").value = String(fsUiPref());
   $("fs-code-input").value = String(fsCodePref());
   $("bg-bright").value = String(bgBrightPref());
   $("bg-bright-val").textContent = String(bgBrightPref());
-  syncAccentInput();
-  // 迭代次数: 未加载过(服务端值未知)时留空给 placeholder 兜底, 已知则回显
+  syncAccentInput();  // 迭代次数: 未加载过(服务端值未知)时留空给 placeholder 兜底, 已知则回显
   if (state.serverMaxIter != null) $("set-max-iter").value = String(state.serverMaxIter);
   loadProviders().then(renderProviderSettings);   // 拉取供应商配置并渲染
   loadMcpServers().then(renderMcpSettings);       // 拉取 MCP 配置与连接状态并渲染
+  renderAllowlistSettings();                      // 拉取命令白名单并渲染
+  loadSkills();                                   // 拉取已装技能并渲染
+  skillStatus("");                                // 清掉上次的安装状态
   $("sidebar").classList.add("settings-view");
   $("pane").dataset.view = "settings";
 }

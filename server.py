@@ -59,7 +59,8 @@ from api_client import (
     WireStop,
 )
 from config import (USER_DIR, SETTINGS_FILE, ConfigLoader, McpServerConfig,
-                    RuntimeConfig, load_providers, save_providers)
+                    RuntimeConfig, load_providers, save_providers,
+                    load_command_allowlist, save_command_allowlist)
 from main import (
     AUTO_TITLE_LEN,
     TOOLS,
@@ -95,6 +96,9 @@ from storage import SessionStore
 from tools import ToolRegistry, git_bash_unavailable_reason, TOOL_CANCEL_CHECK
 from runtime import result_meta
 from runtime import TurnInterrupted
+from skills import (SkillError, delete_user_skill, discover_skills,
+                    install_from_repo, render_skills_section, skill_info,
+                    sync_skill_tools)
 from multi_agent import set_api_config_provider
 from agent_tools import get_orchestrator
 import music as _music
@@ -153,15 +157,24 @@ def _session_system_prompt(workdir: Optional[str]) -> list:
     看到的 Working directory 是 unknown——正是它开局跑 pwd && ls 探路、
     用散弹枪 glob 乱扫的直接原因。"""
     if not workdir:
-        return system_prompt
-    ctx = ProjectContext.discover(
-        Path(workdir), datetime.now().strftime("%Y-%m-%d"))
-    return (
-        SystemPromptBuilder()
-        .with_os(platform.system(), platform.release())
-        .with_project_context(ctx)
-        .build()
-    )
+        base = list(system_prompt)
+    else:
+        ctx = ProjectContext.discover(
+            Path(workdir), datetime.now().strftime("%Y-%m-%d"))
+        base = (
+            SystemPromptBuilder()
+            .with_os(platform.system(), platform.release())
+            .with_project_context(ctx)
+            .build()
+        )
+    # 技能清单挂在尾部追加段: name+description 而已, 量级小且不碰静态前缀
+    skills_section = render_skills_section(
+        discover_skills(Path(workdir) if workdir else Path.cwd(), USER_DIR))
+    if skills_section:
+        base.append(skills_section)
+    return base
+
+
 def _mirror_rate_limit_retry(attempt: int, max_retries: int,
                              delay_s: float, error) -> None:
     """限流退避镜像: 长退避期间告知前端"还活着、正在重试", 不再静默卡住。
@@ -1622,8 +1635,11 @@ async def api_get_messages(session_id: str):
 # ============================================================================
 
 # ============================================================================
-# REST: 摸鱼电台（网易云公开接口的只读代理, 不碰会话/模型状态）
+# REST: 摸鱼电台（在线只读代理 + 本地曲库读写, 不碰会话/模型状态）
 # ============================================================================
+# 在线部分（搜索/直链/歌词）上游失败转 502; 本地曲库是文件读写:
+# KeyError→404（歌单/收藏不存在）, ValueError→400（参数非法）,
+# 不走 _music_call（那是给上游 502 用的包装）。
 
 async def _music_call(fn, *args, **kwargs):
     """统一的 502 包装: 上游失败不往客户端抛裸 500。"""
@@ -1633,16 +1649,67 @@ async def _music_call(fn, *args, **kwargs):
         raise HTTPException(status_code=502, detail=str(e))
 
 
-@app.get("/api/music/playlist/{pid}")
-async def api_music_playlist(pid: int):
-    """歌单/榜单详情（内置榜单带 10 分钟缓存）。"""
-    return await _music_call(_music.playlist_songs, pid)
+def _library_call(fn, *args, **kwargs):
+    try:
+        return fn(*args, **kwargs)
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=f"不存在: {e.args[0]}")
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 
-@app.get("/api/music/builtin")
-async def api_music_builtin():
-    """内置榜单入口: 前端 Tab 据此渲染, 不写死 id。"""
-    return {"playlists": [{"key": k, "id": v} for k, v in _music.BUILTIN_PLAYLISTS.items()]}
+@app.get("/api/music/library")
+async def api_music_library():
+    """整个本地曲库（收藏 + 自定义歌单）。"""
+    return _music.list_library()
+
+
+# ---- 收藏 ----
+
+@app.post("/api/music/favorites")
+async def api_music_fav_add(payload: Optional[dict] = Body(None)):
+    if not isinstance(payload, dict) or not isinstance(payload.get("songs"), list):
+        raise HTTPException(status_code=400, detail="需要 {\"songs\": [...]}")
+    return _music.add_favorites(payload["songs"])
+
+
+@app.delete("/api/music/favorites/{song_id}")
+async def api_music_fav_remove(song_id: int):
+    return _library_call(_music.remove_favorite, song_id)
+
+
+# ---- 自定义播放列表 ----
+
+@app.post("/api/music/playlists")
+async def api_music_pl_create(payload: Optional[dict] = Body(None)):
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="需要 JSON body")
+    return _library_call(_music.create_playlist,
+                         payload.get("name"), payload.get("songs"))
+
+
+@app.patch("/api/music/playlists/{pid}")
+async def api_music_pl_rename(pid: int, payload: Optional[dict] = Body(None)):
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="需要 JSON body")
+    return _library_call(_music.rename_playlist, pid, payload.get("name"))
+
+
+@app.delete("/api/music/playlists/{pid}")
+async def api_music_pl_delete(pid: int):
+    return _library_call(_music.delete_playlist, pid)
+
+
+@app.post("/api/music/playlists/{pid}/songs")
+async def api_music_pl_add_songs(pid: int, payload: Optional[dict] = Body(None)):
+    if not isinstance(payload, dict) or not isinstance(payload.get("songs"), list):
+        raise HTTPException(status_code=400, detail="需要 {\"songs\": [...]}")
+    return _library_call(_music.add_to_playlist, pid, payload["songs"])
+
+
+@app.delete("/api/music/playlists/{pid}/songs/{song_id}")
+async def api_music_pl_remove_song(pid: int, song_id: int):
+    return _library_call(_music.remove_from_playlist, pid, [song_id])
 
 
 @app.get("/api/music/search")
@@ -1846,6 +1913,71 @@ async def api_ping():
     """探测端点: 桌面壳用它确认"这是 x-code 后端"。
     8000 端口可能被 C-Lodop 打印服务等程序抢占, 不能只看 200 就当作就绪。"""
     return {"app": "x-code"}
+
+
+# --- Skills 管理: 清单查看 + 社区仓库安装 + 卸载（设置页"Skills"分区） ---
+# 安装/卸载都会 _resync_session_prompts: 已开 Web 会话的下一轮即生效,
+# 与 MCP 热重载同一体验。
+
+def _resync_session_prompts() -> None:
+    """skills 安装/卸载后热生效: 所有活跃会话按其工作目录重建系统提示。
+    runtime 持有的是 sections 列表副本, 必须显式整体替换（set_system_prompt）,
+    改外部变量不会被已组装的 runtime 看到。只认真正的 ConversationRuntime——
+    测试里会往 _sessions 塞鸭子类型的替身, 它们没有这套接口。"""
+    from runtime import ConversationRuntime
+    for ws in list(_sessions.values()):
+        if not isinstance(ws.runtime, ConversationRuntime):
+            continue
+        ws.runtime.set_system_prompt(_session_system_prompt(ws.workdir))
+
+
+@app.get("/api/skills")
+async def api_get_skills():
+    """已安装技能清单（设置页 Skills 分区; 含项目级, 标 source 供 UI 区分）。"""
+    skills = discover_skills(Path.cwd(), USER_DIR, on_error=lambda msg: None)
+    return {"skills": skill_info(skills)}
+
+
+@app.post("/api/skills/install")
+async def api_install_skills(request: dict):
+    """从 GitHub 仓库安装社区 skills: git clone → 解析 SKILL.md → 拷入
+    ~/.x-code/skills/。body: {repo, subpath?, overwrite?}。
+    仓库布局三种都认: 根目录即技能 / subpath 指向单个技能 / skills/*/ 一仓多技能。"""
+    repo = str(request.get("repo") or "").strip()
+    subpath = str(request.get("subpath") or "").strip()
+    overwrite = bool(request.get("overwrite", False))
+    if not repo:
+        raise HTTPException(status_code=400, detail="repo 不能为空")
+    try:
+        installed = install_from_repo(repo, USER_DIR,
+                                      subpath=subpath, overwrite=overwrite)
+    except SkillError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"安装失败: {e}")
+    sync_skill_tools(TOOLS, discover_skills(Path.cwd(), USER_DIR))
+    _resync_session_prompts()
+    return {"ok": True, "installed": skill_info(installed)}
+
+
+@app.delete("/api/skills/{name}")
+async def api_delete_skill(name: str):
+    """卸载用户级技能。项目级技能在仓库里, 这里不动——提示去仓库管理。"""
+    try:
+        delete_user_skill(name, USER_DIR)
+    except SkillError as e:
+        msg = str(e)
+        if "不存在" in msg:
+            project_dir = Path.cwd() / ".claude" / "skills" / name
+            if project_dir.is_dir():
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"{name} 是项目级技能（位于 {project_dir}）, "
+                           "请在项目仓库里管理")
+        raise HTTPException(status_code=400, detail=msg)
+    sync_skill_tools(TOOLS, discover_skills(Path.cwd(), USER_DIR))
+    _resync_session_prompts()
+    return {"ok": True}
 
 
 # --- MCP 管理: 状态查看 + 热重载 + 服务器 CRUD（设置页"MCP 服务器"分区） ---
@@ -2074,6 +2206,83 @@ def _save_permission_mode(mode: PermissionMode) -> None:
     读回; 不写 "allow"（同 POST 入口, 配置口径拒绝它）。
     """
     _save_setting("permissionMode", MODE_TO_NAME[mode])
+
+
+# ============================================================================
+# REST: 命令白名单（设置页"权限"分区 + 审批卡"总是允许"）
+# ============================================================================
+
+def _apply_allowlist_to_runtimes(rules: list) -> None:
+    """白名单热更新: 推给所有已组装的会话 runtime（含 CLI 共享的规则源,
+    各 runtime 的策略对象各持一份, 逐一 set）。"""
+    for ws in list(_sessions.values()):
+        if ws.runtime is not None:
+            try:
+                ws.runtime.set_command_allowlist(rules)
+            except Exception:
+                pass
+
+
+@app.get("/api/settings/allowlist")
+async def api_get_allowlist():
+    return {"rules": load_command_allowlist()}
+
+
+@app.post("/api/settings/allowlist")
+async def api_add_allowlist_rule(request: dict):
+    """新增一条前缀规则。规则清洗（压空白/去重/限长）在 save 层统一做;
+    重复添加幂等（返回现有列表）。成功后热更新所有活跃 runtime。"""
+    rule = request.get("rule")
+    if not isinstance(rule, str) or not rule.strip():
+        raise HTTPException(status_code=400, detail="rule 不能为空")
+    rules = load_command_allowlist() + [rule]
+    saved = save_command_allowlist(rules)
+    _apply_allowlist_to_runtimes(saved)
+    return {"ok": True, "rules": saved}
+
+
+@app.delete("/api/settings/allowlist")
+async def api_delete_allowlist_rule(request: dict):
+    """删除一条规则（按原文精确匹配; 前端从列表渲染而来, 原文可用）。"""
+    rule = request.get("rule")
+    if not isinstance(rule, str) or not rule:
+        raise HTTPException(status_code=400, detail="rule 不能为空")
+    rules = [r for r in load_command_allowlist() if r != rule]
+    saved = save_command_allowlist(rules)
+    _apply_allowlist_to_runtimes(saved)
+    return {"ok": True, "rules": saved}
+
+
+# ============================================================================
+# REST: 权限批复（桌宠悬浮窗"点菲比批条子"用; 主窗走 WS permission_response）
+# ============================================================================
+
+@app.post("/api/permissions/respond")
+async def api_permission_respond(request: dict):
+    """按 request_id 批复当前挂起的权限请求。与 WS permission_response
+    走同一 prompter.resolve 链路: 请求已被主窗批复/已过期时 resolve 静默
+    忽略 stale id（FIFO 消费侧丢弃）, 幂等安全。"""
+    web_session = _sessions.get(str(request.get("session_id") or ""))
+    if web_session is None:
+        raise HTTPException(status_code=404, detail="会话不存在或未打开")
+    prompter = web_session.prompter
+    if prompter is None:
+        raise HTTPException(status_code=409, detail="当前没有待审批的请求")
+    request_id = str(request.get("request_id") or "")
+    if not request_id:
+        raise HTTPException(status_code=400, detail="request_id 不能为空")
+    approved = bool(request.get("approved"))
+    prompter.resolve(request_id, approved)
+    # 广播批复结果: 走桌宠/REST 批复时主窗不知道请求已被处理, 其
+    # pendingPerms 登记与审批卡按钮会永久滞留（"等待授权…"指示不消失）。
+    # 事件对 WS 路径批复的重复到达无害——前端按"未定格才定格"幂等处理。
+    web_session.broadcast({
+        "type": "permission_resolved",
+        "session_id": web_session.session_id,
+        "request_id": request_id,
+        "approved": approved,
+    })
+    return {"ok": True}
 
 
 # ============================================================================
