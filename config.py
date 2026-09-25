@@ -566,3 +566,80 @@ def save_additional_directories(dirs: list) -> list:
     SETTINGS_FILE.write_text(
         json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
     return out
+
+
+def _load_string_list(key: str, max_items: int, max_len: int) -> list:
+    """按 allowlist 口径读字符串列表; 无文件/损坏/形状不对 = 空列表。"""
+    try:
+        data = json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    items = data.get(key) if isinstance(data, dict) else None
+    if not isinstance(items, list):
+        return []
+    return [x.strip() for x in items
+            if isinstance(x, str) and x.strip()][:max_items]
+
+
+def _save_string_list(key: str, items: list, max_items: int,
+                      max_len: int, *, normcase_dedupe: bool = False) -> list:
+    """按 allowlist 口径写字符串列表: 清洗/去重保序/限长, 读-改-写
+    保留 settings.json 其他 key。normcase_dedupe 用于路径类键。"""
+    out: list = []
+    seen: set = set()
+    for raw in (items or []):
+        if not isinstance(raw, str):
+            continue
+        cleaned = " ".join(raw.split())
+        if not cleaned or len(cleaned) > max_len:
+            continue
+        k = os.path.normcase(cleaned) if normcase_dedupe else cleaned.lower()
+        if k in seen:
+            continue
+        seen.add(k)
+        out.append(cleaned)
+        if len(out) >= max_items:
+            break
+    try:
+        data = json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            data = {}
+    except (OSError, ValueError):
+        data = {}
+    data[key] = out
+    SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    SETTINGS_FILE.write_text(
+        json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    return out
+
+
+# deny 规则(P3): 任一命令段命中前缀即整体拒绝, 优先于一切 allow。
+# 用于表达例外——"git push" 已加白但 "git push --force" 永不执行。
+DENYLIST_KEY = "commandDenylist"
+
+
+def load_command_denylist() -> list:
+    return _load_string_list(DENYLIST_KEY, ALLOWLIST_MAX_RULES,
+                             ALLOWLIST_MAX_RULE_LEN)
+
+
+def save_command_denylist(rules: list) -> list:
+    return _save_string_list(DENYLIST_KEY, rules, ALLOWLIST_MAX_RULES,
+                             ALLOWLIST_MAX_RULE_LEN)
+
+
+# 用户声明的敏感路径(P5): 绝对路径或相对 workspace 根的路径; 写入或被
+# 破坏族点名即 sensitive, 与内置清单(.git/~/.ssh/shell 配置)同一语义。
+SENSITIVE_PATHS_KEY = "sensitivePaths"
+SENSITIVE_PATHS_MAX = 50
+SENSITIVE_PATH_MAX_LEN = 400
+
+
+def load_sensitive_paths() -> list:
+    return _load_string_list(SENSITIVE_PATHS_KEY, SENSITIVE_PATHS_MAX,
+                             SENSITIVE_PATH_MAX_LEN)
+
+
+def save_sensitive_paths(paths: list) -> list:
+    return _save_string_list(SENSITIVE_PATHS_KEY, paths, SENSITIVE_PATHS_MAX,
+                             SENSITIVE_PATH_MAX_LEN, normcase_dedupe=True)

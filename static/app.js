@@ -2675,8 +2675,12 @@ function makePrMark(text, approved) {
 }
 
 /* 命令前缀规则提取: 从入参 command 里取前 ≤2 个词（剥 VAR=val 前缀）,
- * 作为"以 xx 开头"的白名单规则。UI 层示意即可, 服务端保存时会再清洗、
+ * 作为"以 xx 开头"的白名单规则。包管理器 run/exec/test 类取 3 词——
+ * "uv run pytest -q" 提 "uv run pytest" 而不是 "uv run"(那会连带放行
+ * "uv run python 任意脚本")。UI 层示意即可, 服务端保存时会再清洗、
  * 授权层按 shlex 词对齐匹配（比这里更严格）。取不出词返回 null。 */
+const RULE_RUNNER_FIRST = new Set(["uv", "npm", "pnpm", "yarn", "bun", "deno"]);
+const RULE_RUNNER_SECOND = new Set(["run", "exec", "test", "x"]);
 function allowlistRuleOf(input) {
   let cmd = "";
   try {
@@ -2684,7 +2688,9 @@ function allowlistRuleOf(input) {
     if (typeof data.command === "string") cmd = data.command;
   } catch (e) { /* not json */ }
   let words = cmd.trim().split(/\s+/).filter(w => w && !/^[A-Za-z_][A-Za-z0-9_]*=$/.test(w));
-  words = words.slice(0, 2).map(w => w.replace(/["']/g, ""));
+  const n = (words.length >= 3 && RULE_RUNNER_FIRST.has((words[0] || "").toLowerCase())
+    && RULE_RUNNER_SECOND.has((words[1] || "").toLowerCase())) ? 3 : 2;
+  words = words.slice(0, n).map(w => w.replace(/["']/g, ""));
   const rule = words.join(" ").trim().slice(0, 80);
   return rule || null;
 }
@@ -5344,26 +5350,47 @@ $("btn-mcp-reload").onclick = async () => {
  * 设置页: 命令白名单（GET/POST/DELETE /api/settings/allowlist）
  * ============================================================ */
 async function renderAllowlistSettings() {
-  const list = $("al-rule-list");
+  await renderRuleListSettings({
+    listEl: "al-rule-list", url: "/api/settings/allowlist",
+    key: "rules", emptyText: "还没有规则。审批弹窗里的“总是允许”会自动把命令前缀加进来。",
+  });
+}
+async function renderDenylistSettings() {
+  await renderRuleListSettings({
+    listEl: "dl-rule-list", url: "/api/settings/denylist",
+    key: "rules", emptyText: "还没有拒绝规则。白名单放行 \"git push\" 的同时, 可以在这里加 \"git push --force\" 拦住强推。",
+  });
+}
+async function renderSensitivePathsSettings() {
+  await renderRuleListSettings({
+    listEl: "sp-path-list", url: "/api/settings/sensitive-paths",
+    key: "paths", emptyText: "还没有自定义敏感路径。加项目里的 secrets/、.env.production 等, 写入时任何模式都强制确认。",
+  });
+}
+
+/* 通用清单管理器: 白名单/拒绝清单/敏感路径三个分区共用同一交互
+ * （GET 拉取渲染, DELETE 按原文移除）。 */
+async function renderRuleListSettings({ listEl, url, key, emptyText }) {
+  const list = $(listEl);
   if (!list) return;
-  let rules = [];
+  let items = [];
   try {
-    const r = await fetch("/api/settings/allowlist");
-    if (r.ok) rules = (await r.json()).rules || [];
+    const r = await fetch(url);
+    if (r.ok) items = (await r.json())[key] || [];
   } catch (e) { /* 服务不可达: 列表留空 */ }
   list.innerHTML = "";
-  if (!rules.length) {
+  if (!items.length) {
     const empty = document.createElement("div");
     empty.className = "al-empty";
-    empty.textContent = "还没有规则。审批弹窗里的“总是允许”会自动把命令前缀加进来。";
+    empty.textContent = emptyText;
     list.appendChild(empty);
     return;
   }
-  for (const rule of rules) {
-    const item = document.createElement("div");
-    item.className = "al-rule-item";
+  for (const item of items) {
+    const row = document.createElement("div");
+    row.className = "al-rule-item";
     const code = document.createElement("code");
-    code.textContent = rule;
+    code.textContent = item;
     const del = document.createElement("button");
     del.type = "button";
     del.className = "icon-act al-del";
@@ -5371,48 +5398,61 @@ async function renderAllowlistSettings() {
     del.onclick = async () => {
       del.disabled = true;
       try {
-        const r = await fetch("/api/settings/allowlist", {
+        const r = await fetch(url, {
           method: "DELETE",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ rule }),
+          body: JSON.stringify({ [key === "paths" ? "path" : "rule"]: item }),
         });
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
-        renderAllowlistSettings();
+        renderRuleListSettings({ listEl, url, key, emptyText });
       } catch (e) {
         del.disabled = false;
         toast("删除失败: " + e.message);
       }
     };
-    item.appendChild(code);
-    item.appendChild(del);
-    list.appendChild(item);
+    row.appendChild(code);
+    row.appendChild(del);
+    list.appendChild(row);
   }
 }
-async function addAllowlistRuleFromInput() {
-  const inp = $("al-rule-input");
-  const rule = (inp.value || "").trim();
-  if (!rule) return;
-  try {
-    const r = await fetch("/api/settings/allowlist", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ rule }),
-    });
-    if (!r.ok) {
-      const err = await r.json().catch(() => ({}));
-      throw new Error(err.detail || `HTTP ${r.status}`);
+
+/* 添加框的通用行为: POST 一条新规则/路径后重渲染本分区。 */
+function bindRuleListInput(inputId, btnId, url, bodyKey, listSpec, doneMsg) {
+  const submit = async () => {
+    const inp = $(inputId);
+    const value = (inp.value || "").trim();
+    if (!value) return;
+    try {
+      const r = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ [bodyKey]: value }),
+      });
+      if (!r.ok) {
+        const err = await r.json().catch(() => ({}));
+        throw new Error(err.detail || `HTTP ${r.status}`);
+      }
+      inp.value = "";
+      renderRuleListSettings(listSpec);
+      toast(doneMsg);
+    } catch (e) {
+      toast("添加失败: " + e.message);
     }
-    inp.value = "";
-    renderAllowlistSettings();
-    toast("白名单已更新");
-  } catch (e) {
-    toast("添加失败: " + e.message);
-  }
+  };
+  $(btnId).onclick = submit;
+  $(inputId).addEventListener("keydown", (e) => {
+    if (e.key === "Enter") submit();
+  });
 }
-$("btn-al-add").onclick = addAllowlistRuleFromInput;
-$("al-rule-input").addEventListener("keydown", (e) => {
-  if (e.key === "Enter") addAllowlistRuleFromInput();
-});
+bindRuleListInput("al-rule-input", "btn-al-add", "/api/settings/allowlist",
+  "rule", { listEl: "al-rule-list", url: "/api/settings/allowlist", key: "rules" },
+  "白名单已更新");
+bindRuleListInput("dl-rule-input", "btn-dl-add", "/api/settings/denylist",
+  "rule", { listEl: "dl-rule-list", url: "/api/settings/denylist", key: "rules" },
+  "拒绝清单已更新");
+bindRuleListInput("sp-path-input", "btn-sp-add", "/api/settings/sensitive-paths",
+  "path", { listEl: "sp-path-list", url: "/api/settings/sensitive-paths", key: "paths" },
+  "敏感路径已更新");
 
 /* ============================================================
  * 设置页: Skills（GET /api/skills, POST /api/skills/install,
@@ -5538,6 +5578,8 @@ function openSettings() {
   loadProviders().then(renderProviderSettings);   // 拉取供应商配置并渲染
   loadMcpServers().then(renderMcpSettings);       // 拉取 MCP 配置与连接状态并渲染
   renderAllowlistSettings();                      // 拉取命令白名单并渲染
+  renderDenylistSettings();                       // 拒绝清单
+  renderSensitivePathsSettings();                 // 用户敏感路径
   loadSkills();                                   // 拉取已装技能并渲染
   skillStatus("");                                // 清掉上次的安装状态
   $("sidebar").classList.add("settings-view");

@@ -538,6 +538,15 @@ class ConversationRuntime:
         只改本 runtime 策略对象的这份, 不落盘。"""
         self._permission_policy.add_session_allow_rule(rule)
 
+    def set_command_denylist(self, rules: list) -> None:
+        """deny 规则热更新（Web 设置页保存后推给所有活跃 runtime）。
+        任一命令段命中即整体拒绝, 优先于一切 allow。"""
+        self._permission_policy.set_command_denylist(rules)
+
+    def set_sensitive_paths(self, paths: list) -> None:
+        """用户敏感路径热更新（Web 设置页增删后推给所有活跃 runtime）。"""
+        self._permission_policy.set_sensitive_paths(paths)
+
     def thinking_level(self) -> str:
         return self._thinking_level
 

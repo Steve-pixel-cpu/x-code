@@ -61,7 +61,9 @@ from api_client import (
 from config import (USER_DIR, SETTINGS_FILE, ConfigLoader, McpServerConfig,
                     RuntimeConfig, load_providers, save_providers,
                     load_command_allowlist, save_command_allowlist,
-                    load_additional_directories, save_additional_directories)
+                    load_additional_directories, save_additional_directories,
+                    load_command_denylist, save_command_denylist,
+                    load_sensitive_paths, save_sensitive_paths)
 from main import (
     AUTO_TITLE_LEN,
     TOOLS,
@@ -846,6 +848,9 @@ def load_runtime_for(web_session: WebSession) -> None:
     # workspace 根: 会话工作目录 + 全局附加目录（写路径分级/敏感扫描基准）
     web_session.runtime.set_workspace_roots(
         _workspace_roots_for(web_session.workdir))
+    # deny 规则与用户敏感路径: 与 CLI 同源 settings.json, 组装即生效
+    web_session.runtime.set_command_denylist(load_command_denylist())
+    web_session.runtime.set_sensitive_paths(load_sensitive_paths())
     # 未经执行就被终局的工具（权限拒绝 / hook 拦截 / prompter 拒绝）:
     # 补发 tool_result 镜像, 前端工具卡才能闭合——否则永远"运行中"。
     # executed 路径不经此处（EmittingToolRegistry 已发）, 不会双发。
@@ -2260,6 +2265,18 @@ def _apply_workspace_roots_to_runtimes() -> None:
                 pass
 
 
+def _apply_policy_list(setter_name: str, value: list) -> None:
+    """把一份策略清单(deny 规则/敏感路径)热推给所有活跃 runtime。
+    setter 找不到(runtime 未组装等)逐个静默——设置保存已落盘,
+    新会话组装时自然带上。"""
+    for ws in list(_sessions.values()):
+        if ws.runtime is not None:
+            try:
+                getattr(ws.runtime, setter_name)(value)
+            except Exception:
+                pass
+
+
 @app.get("/api/settings/allowlist")
 async def api_get_allowlist():
     return {"rules": load_command_allowlist()}
@@ -2305,6 +2322,67 @@ async def api_add_session_allow_rule(session_id: str, request: dict):
         raise HTTPException(status_code=400, detail="rule 不能为空")
     web_session.runtime.add_session_allow_rule(rule)
     return {"ok": True, "rule": rule}
+
+
+# ============================================================================
+# REST: deny 规则（设置页"权限"分区）。任一命令段命中前缀即整体拒绝,
+# 优先于一切 allow——表达"git push 可以, git push --force 不行"这类例外。
+# ============================================================================
+
+@app.get("/api/settings/denylist")
+async def api_get_denylist():
+    return {"rules": load_command_denylist()}
+
+
+@app.post("/api/settings/denylist")
+async def api_add_denylist_rule(request: dict):
+    rule = request.get("rule")
+    if not isinstance(rule, str) or not rule.strip():
+        raise HTTPException(status_code=400, detail="rule 不能为空")
+    saved = save_command_denylist(load_command_denylist() + [rule])
+    _apply_policy_list("set_command_denylist", saved)
+    return {"ok": True, "rules": saved}
+
+
+@app.delete("/api/settings/denylist")
+async def api_delete_denylist_rule(request: dict):
+    rule = request.get("rule")
+    if not isinstance(rule, str) or not rule:
+        raise HTTPException(status_code=400, detail="rule 不能为空")
+    saved = save_command_denylist(
+        [r for r in load_command_denylist() if r != rule])
+    _apply_policy_list("set_command_denylist", saved)
+    return {"ok": True, "rules": saved}
+
+
+# ============================================================================
+# REST: 用户敏感路径（设置页"权限"分区）。命中(绝对或相对 workspace 根)
+# 的写入/破坏族命令按 sensitive 处理——任何模式强制裁决。
+# ============================================================================
+
+@app.get("/api/settings/sensitive-paths")
+async def api_get_sensitive_paths():
+    return {"paths": load_sensitive_paths()}
+
+
+@app.post("/api/settings/sensitive-paths")
+async def api_add_sensitive_path(request: dict):
+    p = str(request.get("path") or "").strip()
+    if not p:
+        raise HTTPException(status_code=400, detail="path 不能为空")
+    saved = save_sensitive_paths(load_sensitive_paths() + [p])
+    _apply_policy_list("set_sensitive_paths", saved)
+    return {"ok": True, "paths": saved}
+
+
+@app.delete("/api/settings/sensitive-paths")
+async def api_delete_sensitive_path(request: dict):
+    p = str(request.get("path") or "").strip()
+    if not p:
+        raise HTTPException(status_code=400, detail="path 不能为空")
+    saved = save_sensitive_paths([x for x in load_sensitive_paths() if x != p])
+    _apply_policy_list("set_sensitive_paths", saved)
+    return {"ok": True, "paths": saved}
 
 
 # ============================================================================

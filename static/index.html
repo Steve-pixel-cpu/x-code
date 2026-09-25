@@ -439,12 +439,26 @@
           <input id="set-max-iter" class="hex-input num-input" spellcheck="false" inputmode="numeric" placeholder="128" maxlength="5">
         </div>
         <div class="al-sub">命令白名单</div>
-        <div class="sp-section-desc">匹配规则的 shell 命令不再弹权限确认，直接执行。规则按词序前缀匹配（如 "git push" 命中 "git push origin main"）；组合命令每一段都必须命中才会放行，带命令替换或写文件重定向的命令永远不命中。保存后立即对所有会话生效</div>
+        <div class="sp-section-desc">匹配规则的 shell 命令不再弹权限确认，直接执行。规则按词序前缀匹配（如 "git push" 命中 "git push origin main"）；组合命令里每一段"命中规则或属于只读探查"即可放行，带命令替换或写文件重定向的段永远不命中。保存后立即对所有会话生效</div>
         <div class="al-add-row">
           <input id="al-rule-input" class="hex-input" spellcheck="false" placeholder="例如: uv run pytest" maxlength="200">
           <button type="button" id="btn-al-add" class="icon-act">添加规则</button>
         </div>
         <div id="al-rule-list" class="al-rule-list"></div>
+        <div class="al-sub">命令拒绝清单</div>
+        <div class="sp-section-desc">任一命令段命中这里的前缀即直接拒绝，优先于白名单与所有放行路径——用来表达例外：白名单放行 "git push" 的同时在这里加 "git push --force" 拦住强推。保存后立即对所有会话生效</div>
+        <div class="al-add-row">
+          <input id="dl-rule-input" class="hex-input" spellcheck="false" placeholder="例如: git push --force" maxlength="200">
+          <button type="button" id="btn-dl-add" class="icon-act">添加规则</button>
+        </div>
+        <div id="dl-rule-list" class="al-rule-list"></div>
+        <div class="al-sub">敏感路径</div>
+        <div class="sp-section-desc">写入这些路径（或被 rm/mv 等命令点名）时任何权限模式都会强制弹确认，白名单也不能豁免。内置已覆盖 .git、~/.ssh、shell 配置与本应用配置；这里可以加项目里的 secrets/、.env.production 等。相对路径按会话工作目录解析。保存后立即对所有会话生效</div>
+        <div class="al-add-row">
+          <input id="sp-path-input" class="hex-input" spellcheck="false" placeholder="例如: secrets 或 .env.production" maxlength="400">
+          <button type="button" id="btn-sp-add" class="icon-act">添加路径</button>
+        </div>
+        <div id="sp-path-list" class="al-rule-list"></div>
       </div>
       <div class="sp-section-body" data-section="mcp" style="display:none">
         <div class="sp-section">MCP 服务器</div>
@@ -535,8 +549,8 @@
   </div>
 </div>
 
-<script src="/static/app.js?v=20260925n" defer></script>
 <script src="/static/music.js?v=20260925c" defer></script>
+<script src="/static/app.js?v=20260925p" defer></script>
 <script src="/static/pet.js?v=20260925h" defer></script>
 </body>
 </html>

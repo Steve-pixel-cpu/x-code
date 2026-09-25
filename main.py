@@ -20,7 +20,8 @@ from api_client import (
     THINKING_LEVELS,
 )
 from config import (RuntimeConfig, ConfigLoader, USER_DIR, load_command_allowlist,
-                    load_additional_directories, save_command_allowlist)
+                    load_additional_directories, save_command_allowlist,
+                    load_command_denylist, load_sensitive_paths)
 from hooks import HookRunner
 from models import Message, Session, TextContentBlock, ToolContentBlock
 from permissions import (
@@ -550,10 +551,18 @@ def parse_slash_command(input: str) -> Optional[SlashCommand]:
     return command_map.get(name, SlashCommand.UNKNOWN)
 
 
+# 包管理器的 run/exec/test 子命令本身不是完整语义: "uv run pytest -q"
+# 若只取前 2 词得到 "uv run", 会连带放行 "uv run python 任意脚本"——
+# 比用户直觉宽。这类首词取 3 词更贴近所批准的东西。
+RUNNER_FIRST_WORDS = frozenset({"uv", "npm", "pnpm", "yarn", "bun", "deno"})
+RUNNER_SECOND_WORDS = frozenset({"run", "exec", "test", "x"})
+
+
 def command_allow_rule(tool_input: str) -> Optional[str]:
     """从 bash/powershell 入参提取前缀白名单规则: 命令前 ≤2 个词（剥
-    VAR=val 前缀、去引号）——与 Web 端 allowlistRuleOf 同口径, 服务端
-    保存时再清洗, 授权层按 shlex 词对齐匹配。取不出词返回 None。"""
+    VAR=val 前缀、去引号）; 包管理器 run/exec/test 类取 3 词——与 Web 端
+    allowlistRuleOf 同口径, 服务端保存时再清洗, 授权层按 shlex 词对齐
+    匹配。取不出词返回 None。"""
     try:
         params = json.loads(tool_input)
         cmd = str(params.get("command") or "")
@@ -561,7 +570,11 @@ def command_allow_rule(tool_input: str) -> Optional[str]:
         return None
     words = [w for w in cmd.split()
              if w and not re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", w)]
-    words = [w.strip("\"'") for w in words[:2]]
+    n = 2
+    if (len(words) >= 3 and words[0].lower() in RUNNER_FIRST_WORDS
+            and words[1].lower() in RUNNER_SECOND_WORDS):
+        n = 3
+    words = [w.strip("\"'") for w in words[:n]]
     return " ".join(words)[:80].strip() or None
 
 
@@ -692,6 +705,9 @@ def build_runtime(session: Session,
     # 用户命令白名单: settings.json 持久规则, 启动即生效（CLI 与 Web 同源）。
     # setter 返回 None, 不能挂进上面的 builder 链尾。
     running_time.set_command_allowlist(load_command_allowlist())
+    # deny 规则与用户敏感路径: 同源 settings.json, 启动即生效。
+    running_time.set_command_denylist(load_command_denylist())
+    running_time.set_sensitive_paths(load_sensitive_paths())
     # workspace 根初值: CLI 执行层不传 workdir（Popen 继承进程 cwd）,
     # 根 = 当前目录 + 全局附加目录。Web 端组装后按会话 workdir 重设。
     running_time.set_workspace_roots(

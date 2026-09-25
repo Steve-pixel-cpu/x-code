@@ -122,8 +122,9 @@ GIT_READONLY_SUBCOMMANDS = frozenset({
     "ls-tree", "cat-file", "worktree", "stash",
 })
 
-# powershell 白名单: Get-* 惯例只读 + 少数纯计算 cmdlet。别名(ls/cat 等)
-# 落到 bash 名单里天然覆盖。
+# powershell 白名单: Get-* 惯例只读 + 少数纯计算 cmdlet + 只读 cmdlet 的
+# 常用别名。别名必须逐个收录且只收"映射到只读 cmdlet"的——rm/del/ri/mv/
+# ni 这些别名映射的是 Remove/New 系, 绝不能进。
 PS_READONLY_CMDLETS = frozenset({
     "test-path", "get-item", "get-childitem", "get-content", "get-date",
     "get-location", "get-command", "get-help", "get-member", "get-process",
@@ -131,12 +132,31 @@ PS_READONLY_CMDLETS = frozenset({
     "measure-object", "measure-command", "select-object", "sort-object",
     "out-string", "write-output", "write-host", "select-string",
     "compare-object", "split-path", "resolve-path",
+    # 只读别名: cat/gc=Get-Content, ls/dir/gci=Get-ChildItem, gi=Get-Item,
+    # pwd=Get-Location, echo=Write-Output, gm=Get-Member, gps=Get-Process,
+    # sls=Select-String, measure=Measure-Object, sort=Sort-Object(PS 版
+    # 不落盘, 与 bash sort -o 不同), ft/fl 纯格式化
+    "ls", "dir", "gci", "cat", "gc", "gi", "pwd", "echo", "gm", "gps",
+    "sls", "measure", "ft", "fl", "sort", "where", "?",
 })
 
 _FIND_MUTATING_ACTIONS = frozenset({
     "-delete", "-exec", "-execdir", "-ok", "-okdir",
     "-fprint", "-fprintf", "-fls",
 })
+
+# 纯版本/帮助查询标志: 命令行只有这些标志(不带任何位置参数)时命令
+# "无事可做"——只打印版本或用法就退出。node --version / git --version /
+# rg --help / cargo -V 这类探查因此免弹窗。不含位置参数是关键:
+# `curl -v https://...`、`rm --version file` 这类带操作对象的构造不会命中。
+_INFO_FLAGS = frozenset({
+    "--version", "--help", "-h", "-v", "-?", "/?",
+})
+
+
+def _all_info_flags(tokens: list) -> bool:
+    """所有参数都是版本/帮助标志(至少要有一个参数, 空参数列表不算)。"""
+    return bool(tokens) and all(t.lower() in _INFO_FLAGS for t in tokens)
 
 
 def _split_shell_segments(cmd: str) -> list:
@@ -191,6 +211,8 @@ def _segment_is_read_only(seg: str, powershell: bool) -> bool:
     if not word or word == "sudo":
         return False
     if word == "cd":            # cd 不改文件内容; 相对读取按 workdir 解析
+        return True
+    if _all_info_flags(tokens[1:]):   # 纯版本/帮助查询, 命令无事可做
         return True
     if powershell:
         return word in PS_READONLY_CMDLETS
@@ -290,6 +312,85 @@ def shell_command_matches_allowlist(tool_name: str, tool_input: str,
     return matched
 
 
+def shell_command_covered_by_rules(tool_name: str, tool_input: str,
+                                   sources: list) -> Optional[tuple]:
+    """组合命令逐段并集判定(P1): 一段"确定性只读"或"命中某条规则"即视为
+    该段被覆盖, 全段覆盖且至少一段走了规则才放行。
+
+    背景: 只读降档要求每段都只读、规则匹配要求每段都命中, 二者是全称
+    判定——`git status && uv run pytest`(已有 pytest 规则)会因 status
+    段不命中规则而白弹一次。安全并集: 各自可信的段取并集仍可信。
+
+    返回 (label, 命中规则原文) 供授权理由展示; 未覆盖/无规则/解析失败
+    返回 None。纯只读命令不会走到这里(authorize 里只读降档先放行)。"""
+    compiled = []   # [(label, rule_text, rule_words)]
+    for label, rules in sources:
+        for r in (str(x).strip() for x in (rules or [])):
+            if not r:
+                continue
+            try:
+                words = [w.lower() for w in shlex.split(r, posix=True)]
+            except ValueError:
+                continue
+            if words:
+                compiled.append((label, r, words))
+    if not compiled:
+        return None
+    try:
+        params = json.loads(tool_input)
+        cmd = str(params.get("command") or "")
+    except Exception:
+        return None
+    if not cmd.strip():
+        return None
+    powershell = tool_name == "powershell"
+    first_hit: Optional[tuple] = None
+    for seg in _split_shell_segments(cmd):
+        if _segment_is_read_only(seg, powershell):
+            continue   # 只读段天然可信
+        seg_hit = next(((label, r) for label, r, words in compiled
+                        if _segment_matches_rule(seg, words, powershell)), None)
+        if seg_hit is None:
+            return None   # 有一段既不只读也无规则覆盖: 整体不放行
+        first_hit = first_hit or seg_hit
+    return first_hit
+
+
+def shell_command_hits_any_rule(tool_name: str, tool_input: str,
+                                rules: list) -> Optional[str]:
+    """deny 规则匹配(P3): **任一**命令段命中**任一**规则即命中——与
+    allowlist 的"每段全覆盖"相反, deny 取最小命中即整体拒绝
+    ("git push" deny 拦下 `git status && git push --force` 的第二段)。
+    返回命中的规则原文, 未命中返回 None。"""
+    valid = [r for r in (str(x).strip() for x in (rules or [])) if r]
+    if not valid:
+        return None
+    try:
+        params = json.loads(tool_input)
+        cmd = str(params.get("command") or "")
+    except Exception:
+        return None
+    if not cmd.strip():
+        return None
+    powershell = tool_name == "powershell"
+    compiled = []
+    for r in valid:
+        try:
+            words = [w.lower() for w in shlex.split(r, posix=True)]
+        except ValueError:
+            continue
+        if words:
+            compiled.append((r, words))
+    if not compiled:
+        return None
+    for seg in _split_shell_segments(cmd):
+        hit = next((r for r, words in compiled
+                    if _segment_matches_rule(seg, words, powershell)), None)
+        if hit is not None:
+            return hit
+    return None
+
+
 # ============================================================================
 # 写路径分级（应用层策略沙箱）。workspace-write 档从此名副其实:
 # write_file/edit_file 的目标路径 resolve 后与 workspace 根比对——
@@ -341,12 +442,31 @@ def _resolved_roots(workspace_roots: list) -> list:
     return out
 
 
-def classify_write_path(path: str, workspace_roots: list) -> str:
+def _entry_is_sensitive(entry: str, roots: list, target: Path) -> bool:
+    """一条用户声明的敏感路径是否覆盖 target: 绝对路径直接比对;
+    相对路径按第一个 workspace 根解析(与写目标同一基准)。条目是文件
+    时按精确匹配(_is_within 的相等分支), 是目录时整棵子树命中。"""
+    e = str(entry or "").strip()
+    if not e:
+        return False
+    try:
+        ep = Path(e).expanduser()
+        if not ep.is_absolute() and roots:
+            ep = roots[0] / ep
+        return _is_within(target, ep.resolve())
+    except (OSError, ValueError, RuntimeError):
+        return False
+
+
+def classify_write_path(path: str, workspace_roots: list,
+                        sensitive_paths: Optional[list] = None) -> str:
     """写工具目标路径分级: 'inside' | 'outside' | 'sensitive'。
     相对路径按第一个 workspace 根（会话工作目录）解析, 与执行层
     tools.resolve_path 同口径; 坏路径按越界处理（升级审批兜底）。
     未配置根时退为进程 cwd 作隐式根——对齐执行层 workdir=None 时
-    Popen/相对路径落到进程 cwd 的实际行为。"""
+    Popen/相对路径落到进程 cwd 的实际行为。
+    sensitive_paths: 用户声明的额外敏感路径(P5, 绝对或相对根), 与
+    内置敏感清单同一语义——命中即 sensitive, 任何模式强制裁决。"""
     raw = str(path or "").strip()
     if not raw:
         return "outside"
@@ -364,6 +484,8 @@ def classify_write_path(path: str, workspace_roots: list) -> str:
     except (OSError, ValueError, RuntimeError):
         return "outside"
     if _path_is_sensitive(p):
+        return "sensitive"
+    if any(_entry_is_sensitive(e, roots, p) for e in (sensitive_paths or [])):
         return "sensitive"
     if any(_is_within(p, r) for r in roots):
         return "inside"
@@ -407,17 +529,25 @@ def _redirect_targets(tokens: list) -> list:
     return out
 
 
-def _candidate_is_sensitive(token: str, base: Optional[Path]) -> bool:
+def _candidate_is_sensitive(token: str, base: Optional[Path],
+                            sensitive_paths: Optional[list] = None,
+                            roots: Optional[list] = None) -> bool:
     try:
         p = Path(token).expanduser()
         if not p.is_absolute():
             p = (base or Path.cwd()) / p
-        return _path_is_sensitive(p.resolve())
+        p = p.resolve()
     except (OSError, ValueError, RuntimeError):
         return False
+    if _path_is_sensitive(p):
+        return True
+    return any(_entry_is_sensitive(e, roots or ([base] if base else []), p)
+               for e in (sensitive_paths or []))
 
 
-def _segment_sensitive_hit(seg: str, base: Optional[Path]) -> Optional[str]:
+def _segment_sensitive_hit(seg: str, base: Optional[Path],
+                           sensitive_paths: Optional[list] = None,
+                           roots: Optional[list] = None) -> Optional[str]:
     """单段命令里提取破坏族参数/重定向目标做敏感比对, 命中返回路径词。"""
     if "$(" in seg or "`" in seg or "<(" in seg:
         return None   # 命令替换解析不了: 静态盲区, 靠审批兜底
@@ -437,12 +567,15 @@ def _segment_sensitive_hit(seg: str, base: Optional[Path]) -> Optional[str]:
     if _first_word(tokens) in DESTRUCTIVE_PATH_COMMANDS:
         candidates += [t for t in tokens[1:] if not t.startswith("-")]
     candidates += _redirect_targets(tokens)
-    return next((c for c in candidates if _candidate_is_sensitive(c, base)),
+    return next((c for c in candidates
+                 if _candidate_is_sensitive(c, base, sensitive_paths, roots)),
                 None)
 
 
 def shell_command_touches_sensitive_path(tool_name: str, tool_input: str,
-                                         workspace_roots: list) -> Optional[str]:
+                                         workspace_roots: list,
+                                         sensitive_paths: Optional[list] = None
+                                         ) -> Optional[str]:
     """bash/powershell 命令是否"点名破坏"敏感路径（破坏族参数或显式
     重定向目标落在敏感根内）。返回命中的路径词（供审批提示）, 否则 None。
 
@@ -456,7 +589,7 @@ def shell_command_touches_sensitive_path(tool_name: str, tool_input: str,
     roots = _resolved_roots(workspace_roots)
     base = roots[0] if roots else None
     for seg in _split_shell_segments(cmd):
-        hit = _segment_sensitive_hit(seg, base)
+        hit = _segment_sensitive_hit(seg, base, sensitive_paths, roots)
         if hit is not None:
             return hit
     return None
@@ -468,6 +601,8 @@ class PermissionPolicy:
         self._tool_requirements: Dict[str, PermissionMode] = {}
         self._command_allowlist: list = []
         self._session_allowlist: list = []
+        self._command_denylist: list = []
+        self._sensitive_paths: list = []
         self._workspace_roots: list = []
 
     def with_tool_requirement(self,tool_name: str, required_mode: PermissionMode) -> Self:
@@ -478,6 +613,20 @@ class PermissionPolicy:
         """用户自定义命令前缀白名单（保存的原始规则列表, 匹配时逐段对齐）。
         运行时可随时热更新（Web 设置页保存后推给所有活跃 runtime）。"""
         self._command_allowlist = list(rules or [])
+        return self
+
+    def set_command_denylist(self, rules: list) -> Self:
+        """deny 规则(P3): 任一命令段命中即整体拒绝, 优先级高于一切
+        allow(只读降档/白名单/会话规则)。用于表达例外——
+        "git push" 已加白但 "git push --force" 永远不许跑。"""
+        self._command_denylist = list(rules or [])
+        return self
+
+    def set_sensitive_paths(self, paths: list) -> Self:
+        """用户声明的敏感路径(P5, 绝对或相对 workspace 根): 写入或被
+        破坏族点名即 sensitive, 与内置敏感清单同一语义。热更新。"""
+        self._sensitive_paths = [str(p) for p in (paths or [])
+                                 if str(p).strip()]
         return self
 
     def set_workspace_roots(self, roots: list) -> Self:
@@ -537,6 +686,16 @@ class PermissionPolicy:
         detail: Optional[str] = None
         escalation: Optional[str] = None
 
+        # deny 规则(P3): 先于一切判定——只读降档/白名单/会话规则/敏感
+        # 路径弹问都不能越过显式拒绝。任一段命中即整体拒绝。
+        if (tool_name in MUTATING_SHELL_TOOLS and self._command_denylist):
+            hit = shell_command_hits_any_rule(tool_name, input,
+                                              self._command_denylist)
+            if hit is not None:
+                return PermissionResult(
+                    decision=PermissionDecision.DENY,
+                    reason=f"command matches denylist rule: {hit}")
+
         # 只读 shell 白名单: bash/powershell 未显式登记档位（走 DANGER
         # fallback）时, 命令经保守判定确为只读则按最低档评估——
         # plan/workspace-write 下 pwd/ls/tail/git log 等探查直接放行,
@@ -558,7 +717,8 @@ class PermissionPolicy:
         # 破坏族点名敏感路径的命令同样不可被白名单/只读判定短路。
         if tool_name in PATH_SCOPED_WRITE_TOOLS:
             kind = classify_write_path(_tool_param_path(input),
-                                       self._workspace_roots)
+                                       self._workspace_roots,
+                                       sensitive_paths=self._sensitive_paths)
             if kind == "sensitive":
                 return self._require_sensitive_approval(
                     tool_name, input, prompter, tool_use_id,
@@ -569,7 +729,8 @@ class PermissionPolicy:
                 escalation = "outside-write"
         elif tool_name in MUTATING_SHELL_TOOLS:
             hit = shell_command_touches_sensitive_path(
-                tool_name, input, self._workspace_roots)
+                tool_name, input, self._workspace_roots,
+                self._sensitive_paths)
             if hit is not None:
                 return self._require_sensitive_approval(
                     tool_name, input, prompter, tool_use_id,
@@ -581,19 +742,20 @@ class PermissionPolicy:
         # 形同虚设(所有工具默认 required=DANGER_FULL_ACCESS < 4, 全被放行)。
         if current == PermissionMode.ALLOW:
             return PermissionResult(decision= PermissionDecision.ALLOW, reason= "")
-        # 用户命令白名单: 全局持久规则 + 本会话临时规则, 命中前缀直接
-        # 放行（优先于一切弹问）。只对 bash/powershell 生效——
-        # "以 xx 开头的命令"是 shell 语义。
+        # 用户命令白名单(P1 并集口径): 全局持久规则 + 本会话临时规则
+        # 一起参与逐段判定——一段"确定性只读"或"命中任一规则"即覆盖,
+        # 全段覆盖才放行(git status && uv run pytest 不再因 status 段
+        # 无规则而白弹)。返回命中规则供理由展示。
         if tool_name in MUTATING_SHELL_TOOLS:
-            for rules, label in ((self._command_allowlist, "user"),
-                                 (self._session_allowlist, "session")):
-                if rules:
-                    hit = shell_command_matches_allowlist(tool_name, input,
-                                                          rules)
-                    if hit is not None:
-                        return PermissionResult(
-                            decision=PermissionDecision.ALLOW,
-                            reason=f"command matches {label} allowlist rule: {hit}")
+            hit = shell_command_covered_by_rules(tool_name, input, [
+                ("user", self._command_allowlist),
+                ("session", self._session_allowlist),
+            ])
+            if hit is not None:
+                label, rule = hit
+                return PermissionResult(
+                    decision=PermissionDecision.ALLOW,
+                    reason=f"command matches {label} allowlist rule: {rule}")
         if current == PermissionMode.PROMPT:
             request = PermissionRequest(tool_name = tool_name,
                                         input = input,

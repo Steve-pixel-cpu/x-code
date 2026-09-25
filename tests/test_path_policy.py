@@ -27,6 +27,7 @@ from permissions import (
     PermissionPolicy,
     PermissionResult,
     classify_write_path,
+    shell_command_is_read_only,
     shell_command_touches_sensitive_path,
 )
 
@@ -442,3 +443,114 @@ def test_store_append_survives_hostile_content(tmp_path):
     loaded = json.loads(lines[0])                      # 且是合法 JSON
     out = loaded["message"]["content"][0]["output"]
     assert "line1" in out and "line2" in out           # 内容保真(转义形态)
+
+
+# ------------------------------------------------------------
+# 白名单灵活性六项(P1-P6): 并集放行/版本启发式/deny/PS别名/敏感路径/规则提取
+# ------------------------------------------------------------
+
+def test_union_readonly_segment_plus_rule(tmp_path):
+    """P1: 组合命令逐段并集——git status 段被只读白名单信任,
+    pytest 段命中规则, 整体放行; 任一段两边都不沾则照旧拒绝。"""
+    policy = (PermissionPolicy(PermissionMode.WORKSPACE_WRITE)
+              .with_tool_requirement("bash", PermissionMode.DANGER_FULL_ACCESS)
+              .set_workspace_roots([str(tmp_path)])
+              .set_command_allowlist(["uv run pytest"]))
+    r = policy.authorize("bash", json.dumps(
+        {"command": "git status && uv run pytest -q"}))
+    assert r.decision == PermissionDecision.ALLOW
+    assert "uv run pytest" in r.reason
+    # 跨清单并集: 只读段 + 会话规则段(策略只带会话规则, 验证扫描序)
+    policy2 = (PermissionPolicy(PermissionMode.WORKSPACE_WRITE)
+               .with_tool_requirement("bash", PermissionMode.DANGER_FULL_ACCESS)
+               .set_workspace_roots([str(tmp_path)])
+               .add_session_allow_rule("uv run pytest"))
+    r2 = policy2.authorize("bash", json.dumps(
+        {"command": "git log --oneline && uv run pytest"}))
+    assert r2.decision == PermissionDecision.ALLOW
+    assert "session" in r2.reason
+    # 两边都不沾的段仍然拦
+    r3 = policy.authorize("bash", json.dumps(
+        {"command": "git status && python x.py"}))
+    assert r3.decision != PermissionDecision.ALLOW
+
+
+@pytest.mark.parametrize("command", [
+    "node --version", "git --version", "rg --help", "cargo -V",
+    "python -h", "uv --version",
+])
+def test_info_flag_queries_readonly(command):
+    """P2: 纯版本/帮助查询(无任何位置参数)视为只读免弹。"""
+    assert shell_command_is_read_only(
+        "bash", json.dumps({"command": command})) is True
+
+
+@pytest.mark.parametrize("command", [
+    "curl -v https://example.com",     # 带位置参数(URL): 不是纯查询
+    "rm --version file.txt",
+    "node --version x.js",
+    "python -c print(1)",              # -c 带脚本参数
+])
+def test_info_flags_with_positional_args_still_prompt(command):
+    assert shell_command_is_read_only(
+        "bash", json.dumps({"command": command})) is False
+
+
+def test_deny_rule_beats_everything(tmp_path):
+    """P3: deny 任一段命中即整体拒绝, 优先于白名单/会话规则/allow 模式。"""
+    policy = (PermissionPolicy(PermissionMode.ALLOW)
+              .with_tool_requirement("bash", PermissionMode.DANGER_FULL_ACCESS)
+              .set_workspace_roots([str(tmp_path)])
+              .set_command_allowlist(["git push"])
+              .add_session_allow_rule("git push")
+              .set_command_denylist(["git push --force"]))
+    for command in ("git push --force origin",
+                    "git status && git push --force"):
+        r = policy.authorize("bash", json.dumps({"command": command}))
+        assert r.decision == PermissionDecision.DENY, command
+        assert "denylist" in r.reason
+    # 不命中的命令不受 deny 影响
+    r = policy.authorize("bash", json.dumps({"command": "git push origin main"}))
+    assert r.decision == PermissionDecision.ALLOW
+
+
+def test_powershell_readonly_aliases():
+    """P4: PS 只读别名(gci/ls/cat/echo 等)在 powershell 工具下免弹;
+    变异别名(rm/del/mv)绝不进白名单。"""
+    ro = lambda c: shell_command_is_read_only(
+        "powershell", json.dumps({"command": c}))
+    for c in ("gci", "ls -Force", "cat a.txt", "echo hi", "Get-Content a.txt"):
+        assert ro(c) is True, c
+    for c in ("rm a.txt", "del a.txt", "mv a b"):
+        assert ro(c) is False, c
+
+
+def test_user_sensitive_paths(tmp_path):
+    """P5: 用户声明的敏感路径(相对根或绝对)与内置清单同一语义——
+    写入强制裁决, 破坏族点名弹问; 未命中照常分级。"""
+    policy = (PermissionPolicy(PermissionMode.WORKSPACE_WRITE)
+              .with_tool_requirement("write_file", PermissionMode.WORKSPACE_WRITE)
+              .set_workspace_roots([str(tmp_path)])
+              .set_sensitive_paths(["secrets", "prod.env"]))
+    r = policy.authorize("write_file", _w("secrets/key.pem"))
+    assert r.decision == PermissionDecision.DENY        # 无 prompter = 拒
+    r2 = policy.authorize("write_file", _w("prod.env"))
+    assert r2.decision == PermissionDecision.DENY
+    r3 = policy.authorize("write_file", _w("src/app.py"))
+    assert r3.decision == PermissionDecision.ALLOW      # 未命中照常放行
+    # shell 侧: 破坏族点名用户敏感路径也拦
+    assert shell_command_touches_sensitive_path(
+        "bash", json.dumps({"command": "rm -rf secrets"}),
+        [str(tmp_path)], ["secrets"]) is not None
+
+
+def test_rule_extraction_runner_takes_three_words():
+    """P6: 包管理器 run/exec/test 类规则取 3 词, 避免把 'uv run' 连带
+    放行成 'uv run python 任意脚本'; 普通命令维持 2 词。"""
+    from main import command_allow_rule
+    mk = lambda c: json.dumps({"command": c})
+    assert command_allow_rule(mk("uv run pytest -q")) == "uv run pytest"
+    assert command_allow_rule(mk("npm run dev --host")) == "npm run dev"
+    assert command_allow_rule(mk("yarn test watch")) == "yarn test watch"
+    assert command_allow_rule(mk("git push origin main")) == "git push"
+    assert command_allow_rule(mk("python x.py")) == "python x.py"
