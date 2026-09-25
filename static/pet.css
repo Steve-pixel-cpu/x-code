@@ -136,6 +136,12 @@
   flex-direction: column;
   gap: 8px;
   flex-basis: 100%;
+  /* 关键: 作为 flex-wrap 容器(.pet-set-col)的子项, 自动最小尺寸
+     (min-width:auto) 会被行内 white-space:nowrap 的长简介撑到内容宽,
+     整列连同行卡一起被顶出设置卡片右缘。0 = 允许收缩回容器宽,
+     行内省略号(text-overflow)才有机会生效。 */
+  min-width: 0;
+  max-width: 100%;
 }
 
 .pet-item {

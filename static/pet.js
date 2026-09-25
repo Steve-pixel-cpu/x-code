@@ -62,6 +62,16 @@
         this.el.style.backgroundSize = `${SHEET_W}px ${this.rows * CELL_H}px`;
         if (this.st) this.play(this.st.name, this.st);   // 加载前收到的状态补播
       };
+      // 图集加载失败不能静默: 旧表现是白屏一只不剩, 用户以为应用坏了。
+      // 常见于刚刷新进目录的新宠物被 HTTP 缓存 404 ——缓存层已有修复,
+      // 这里兜底给出可见提示。
+      img.onerror = () => {
+        this.el.style.background = "none";
+        this.el.textContent = ":( 图集加载失败";
+        this.el.style.cssText +=
+          ";display:flex;align-items:center;justify-content:center;" +
+          "font-size:11px;color:#f66;text-align:center;white-space:normal;";
+      };
       img.src = url;
     }
 
@@ -377,7 +387,11 @@
     // ---- 启动: 拉宠物列表 → 渲染 → 打招呼 ----
     (async () => {
       try {
-        const res = await fetch("/api/pets");
+        // cache-bust 必须带: WebView2 启发式缓存曾把 /api/pets 存成旧列表,
+        // 刷新进来的新宠物在这里"不存在", 选它唤醒就白屏(重启才恢复)。
+        // 服务端已加 no-store, 此处时间戳是双保险。
+        const res = await fetch(`/api/pets?_=${Date.now()}`);
+        if (!res.ok) throw new Error("HTTP " + res.status);
         const data = await res.json();
         const pets = data.pets || [];
         const chosen = pets.find(p => p.id === pref().petId) || pets[0];
@@ -386,7 +400,7 @@
           bubble("把宠物文件夹放进 pets 目录(设置里可查路径)", 0);
           return;
         }
-        sprite = new PetSprite(spriteEl, `/api/pets/${encodeURIComponent(chosen.id)}/sheet`, chosen.rows);
+        sprite = new PetSprite(spriteEl, `/api/pets/${encodeURIComponent(chosen.id)}/sheet?_=${Date.now()}`, chosen.rows);
         sprite.play("idle");
         overlayOnce("waving");
         bubble("你好呀");
