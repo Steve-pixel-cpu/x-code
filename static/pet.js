@@ -762,7 +762,8 @@
       row.querySelector(".pet-item-name").textContent = p.displayName || p.id;
       row.querySelector(".pet-item-desc").textContent =
         p.description || `${p.rows} 行标准动作图集`;
-      row.querySelector(".pet-item-badge").textContent = p.source === "codex" ? "Codex" : "本地";
+      row.querySelector(".pet-item-badge").textContent =
+        p.source === "codex" ? "Codex" : p.source === "user" ? "我的" : "内置";
       const mini = row.querySelector(".pet-sprite-mini");
       mini.style.backgroundImage = `url("/api/pets/${encodeURIComponent(p.id)}/sheet${bustArg}")`;
       mini.style.backgroundSize = `${SHEET_W}px ${p.rows * CELL_H}px`;

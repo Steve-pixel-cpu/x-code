@@ -1754,19 +1754,27 @@ _pet_sheets: dict[str, Path] = {}
 
 
 def _pets_dirs() -> list[tuple[Path, str]]:
-    """宠物目录候选（按优先级, id 冲突靠前者胜）: 安装目录 → Codex 目录。
-    冻结态后端在 <安装>/resources/server/ 下, 向上两级是安装根(Tauri 布局,
-    pets 装在 <安装>/pets); Electron 布局资源落在 resources/pets 一并兼容。
-    源码态安装目录即仓库根 pets/。Codex 目录支持 CODEX_HOME 覆盖, 只读。
+    """宠物目录候选（按优先级, id 冲突靠前者胜）: 用户目录 → 安装目录 → Codex。
+    用户目录 ~/.x-code/pets 是唯一可写目录, 「打开目录」开的就是它——
+    用户宠物不能往安装目录里放: 冻结态装在 Program Files 下不可写,
+    升级换目录还会被清掉; 源码态写仓库会污染源码树。
+    安装目录候选是安装包自带的只读样例（冻结态后端在 <安装>/resources/server/
+    下, 向上两级是安装根, Tauri 布局 pets 装在 <安装>/pets; Electron 布局
+    资源落在 resources/pets 一并兼容）; 源码态附带回仓库 pets/ 里的开发样例。
+    Codex 目录支持 CODEX_HOME 覆盖, 只读。
     返回 (目录, 来源标签) 对, 来源供前端区分 install/codex。"""
     codex_home = os.environ.get("CODEX_HOME") or str(Path.home() / ".codex")
     codex = (Path(codex_home) / "pets", "codex")
+    user = (USER_DIR / "pets", "user")
     if getattr(sys, "frozen", False):
         server_dir = Path(sys.executable).resolve().parent
-        return [(server_dir.parent.parent / "pets", "install"),   # Tauri: <安装>/pets
+        return [user,
+                (server_dir.parent.parent / "pets", "install"),   # Tauri: <安装>/pets
                 (server_dir.parent / "pets", "install"),          # Electron: resources/pets
                 codex]
-    return [(Path(__file__).resolve().parent / "pets", "install"), codex]
+    return [user,
+            (Path(__file__).resolve().parent / "pets", "install"),  # 开发样例
+            codex]
 
 
 def _image_size(path: Path) -> Optional[tuple[int, int]]:
@@ -1841,8 +1849,8 @@ def _scan_pet_folder(folder: Path, source: str) -> Optional[tuple[dict, Path]]:
 
 
 def _list_pets() -> dict:
-    """扫描全部宠物目录。首个候选(安装目录)顺手建出来——用户要往里放宠物;
-    其余目录(含 Codex 的)只读, 不存在就跳过。"""
+    """扫描全部宠物目录。首个候选(用户目录)顺手建出来——用户要往里放宠物;
+    其余目录(内置样例/ Codex 的)只读, 不存在就跳过。"""
     dirs = _pets_dirs()
     with suppress(OSError):
         dirs[0][0].mkdir(parents=True, exist_ok=True)

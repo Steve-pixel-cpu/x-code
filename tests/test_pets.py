@@ -88,7 +88,9 @@ def test_image_size_webp_vp8x():
 def test_pets_dirs_source_mode(monkeypatch):
     monkeypatch.delenv("CODEX_HOME", raising=False)
     dirs = server._pets_dirs()
-    assert dirs[0] == (Path(server.__file__).resolve().parent / "pets", "install")
+    # 首候选=用户目录(可写, 打开目录指向它), 其后是仓库开发样例与 Codex
+    assert dirs[0] == (Path.home() / ".x-code" / "pets", "user")
+    assert dirs[1] == (Path(server.__file__).resolve().parent / "pets", "install")
     assert dirs[-1][1] == "codex" and dirs[-1][0].name == "pets"
 
 
@@ -106,8 +108,9 @@ def test_pets_dirs_frozen_layouts(monkeypatch, tmp_path):
     monkeypatch.setattr(server.sys, "frozen", True, raising=False)
     monkeypatch.setattr(server.sys, "executable", str(exe))
     dirs = server._pets_dirs()
-    assert dirs[0][0] == tmp_path / "install" / "pets"
-    assert dirs[1][0] == tmp_path / "install" / "resources" / "pets"
+    assert dirs[0] == (Path.home() / ".x-code" / "pets", "user")
+    assert dirs[1][0] == tmp_path / "install" / "pets"
+    assert dirs[2][0] == tmp_path / "install" / "resources" / "pets"
 
 
 # ------------------------------------------------------------
