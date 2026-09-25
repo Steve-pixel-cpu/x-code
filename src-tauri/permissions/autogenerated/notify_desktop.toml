@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-notify-desktop"
+description = "Enables the notify_desktop command without any pre-configured scope."
+commands.allow = ["notify_desktop"]
+
+[[permission]]
+identifier = "deny-notify-desktop"
+description = "Denies the notify_desktop command without any pre-configured scope."
+commands.deny = ["notify_desktop"]

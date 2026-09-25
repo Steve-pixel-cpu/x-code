@@ -332,14 +332,14 @@
           <div class="set-name">界面字号</div>
           <div class="set-desc">整体界面文字大小，像素值 10–24，默认 14，清空恢复默认</div>
         </div>
-        <input id="fs-ui-input" class="hex-input num-input" spellcheck="false" inputmode="decimal" placeholder="14" maxlength="5">
+        <input id="fs-ui-input" data-fs-mirror class="hex-input num-input" spellcheck="false" inputmode="decimal" placeholder="14" maxlength="5">
       </div>
       <div class="set-row">
         <div class="set-info">
-          <div class="set-name">代码字号</div>
-          <div class="set-desc">消息中代码块与行内代码的文字大小，像素值 8–28，默认 12.5，清空恢复默认</div>
+          <div class="set-name">聊天内容字号</div>
+          <div class="set-desc">聊天消息（含代码块）的文字大小，像素值 10–24，默认 14，清空恢复默认，与界面字号联动</div>
         </div>
-        <input id="fs-code-input" class="hex-input num-input" spellcheck="false" inputmode="decimal" placeholder="12.5" maxlength="5">
+        <input id="fs-code-input" data-fs-mirror class="hex-input num-input" spellcheck="false" inputmode="decimal" placeholder="14" maxlength="5">
       </div>
       <div class="set-row">
         <div class="set-info">
@@ -535,7 +535,7 @@
   </div>
 </div>
 
-<script src="/static/app.js?v=20260925f" defer></script>
+<script src="/static/app.js?v=20260925j" defer></script>
 <script src="/static/music.js?v=20260925c" defer></script>
 <script src="/static/pet.js?v=20260925h" defer></script>
 </body>

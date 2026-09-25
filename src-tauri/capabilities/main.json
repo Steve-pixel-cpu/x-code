@@ -8,6 +8,7 @@
   "permissions": [
     "core:default",
     "allow-pick-folder",
+    "allow-notify-desktop",
     "allow-minimize-main",
     "allow-toggle-maximize-main",
     "allow-close-main",
@@ -17,6 +18,7 @@
     "allow-start-drag-pet",
     "allow-set-pet-click-through",
     "allow-move-pet-window",
+    "allow-resize-pet-window",
     "clipboard-manager:allow-read-text"
   ]
 }

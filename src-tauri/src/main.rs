@@ -353,6 +353,21 @@ const PICK_LOG: &str = "pick_folder";
 /// 对话框可能落在桌面层/被主窗口挡住——用户看来就是"点击无反应"。
 /// 返回 Result<Option<String>, String>: Ok(None)=用户取消, Err=真实失败。
 /// 此前所有失败路径（JoinError/窗口缺失/ACL/IPC）都被折叠成 null, 无从排查。
+/// 系统原生桌面通知。WebView2 未实现 Web Notification API——前端的
+/// new Notification() 在壳里静默失败, 桌面端的通知统一走这里代发。
+/// 不直接用插件自己的 JS 命令: 远程上下文(127.0.0.1 页面)调插件命令
+/// 会被 ACL 拒(实测过 plugin:app), 包成应用命令走 capabilities 白名单。
+#[tauri::command]
+fn notify_desktop(app: AppHandle, title: String, body: String) -> Result<(), String> {
+    use tauri_plugin_notification::NotificationExt;
+    app.notification()
+        .builder()
+        .title(title)
+        .body(body)
+        .show()
+        .map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 async fn pick_folder(app: AppHandle) -> Result<Option<String>, String> {
     boot_log(PICK_LOG, "called");
@@ -704,6 +719,7 @@ fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_clipboard_manager::init())
+        .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             // 单实例: 二次启动只把已有窗口带到前台
             if let Some(win) = app.get_webview_window("main") {
@@ -714,6 +730,7 @@ fn main() {
         .manage(())
         .invoke_handler(tauri::generate_handler![
             pick_folder,
+            notify_desktop,
             minimize_main,
             toggle_maximize_main,
             close_main,

@@ -1,6 +1,6 @@
 [package]
 name = "x-code"
-version = "3.2.6"
+version = "3.2.7"
 description = "x-code 桌面壳（Tauri 版）"
 edition = "2021"
 
@@ -15,6 +15,9 @@ tauri-plugin-single-instance = "2"
 tauri-plugin-clipboard-manager = "2"
 # 原生"选择文件夹"对话框（对应 Electron 版 preload 桥的 pick-folder）
 rfd = "0.15"
+# 系统原生桌面通知: WebView2 未实现 Web Notification API, 前端的
+# new Notification() 在壳里静默失败——由壳内 notify_desktop 命令代发
+tauri-plugin-notification = "2"
 
 # 关闭 WebView2 浏览器快捷键（F5/Ctrl+R 刷新等, tauri 未透传该设置）
 [target.'cfg(windows)'.dependencies]

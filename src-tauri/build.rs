@@ -12,10 +12,17 @@ fn main() {
         tauri_build::Attributes::new()
             .app_manifest(tauri_build::AppManifest::new().commands(&[
                 "pick_folder",
+                "notify_desktop",
                 "minimize_main",
                 "toggle_maximize_main",
                 "close_main",
                 "start_drag_main",
+                "open_pet_window",
+                "close_pet",
+                "start_drag_pet",
+                "set_pet_click_through",
+                "move_pet_window",
+                "resize_pet_window",
             ])),
     )
     .expect("failed to run tauri-build");

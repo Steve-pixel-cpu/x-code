@@ -424,21 +424,34 @@ function playChime() {
 }
 
 /* 桌面通知权限: 只在用户手势上下文（开关/测试按钮）里申请, 静默页面
- * 自动弹权限框会被浏览器拒掉。返回当前权限态。 */
+ * 自动弹权限框会被浏览器拒掉。返回当前权限态。
+ * 桌面壳形态恒为 "granted"——原生 toast 走壳内命令, 无 Web 权限一说。 */
 function ensureNotifyPermission() {
+  if (DESKTOP) return "granted";
   if (!("Notification" in window)) return "denied";
   if (Notification.permission === "default") Notification.requestPermission();
   return Notification.permission;
 }
 
+/* 桌面壳里的原生通知: WebView2 未实现 Web Notification API,
+ * new Notification() 在壳里静默失败——转发给壳内 notify_desktop 命令
+ * 发系统 toast。老壳没有该命令(或桥不在)时 invoke 被拒, 静默降级。 */
+function nativeNotify(title, body) {
+  try {
+    const inv = window.__TAURI_INTERNALS__ && window.__TAURI_INTERNALS__.invoke;
+    if (inv) inv("notify_desktop", { title, body }).catch(() => {});
+  } catch (e) { /* 桥不在(浏览器/老壳): 静默 */ }
+}
+
 /* 轮次收尾统一通知入口（turn_done / error, 前台后台会话都经过这里）:
  * 手动打断不提醒; 声音开关开了就播; 桌面弹窗只在窗口不可见或该会话
- * 在后台时弹——人正盯着这个会话时不打扰。 */
+ * 在后台时弹——人正盯着这个会话时不打扰。
+ * 桌面壳走原生 toast(无点击回调, 点通知不聚焦——只做告知); 浏览器形态
+ * 维持 Web Notification(带点击聚焦+切会话)。 */
 function notifyTurnEnd(msg, sid) {
   if (msg.type === "turn_done" && msg.interrupted) return;
   if (notifySoundPref()) playChime();
-  if (!notifyDesktopPref() || !("Notification" in window)) return;
-  if (Notification.permission !== "granted") return;
+  if (!notifyDesktopPref()) return;
   const visibleHere = sid === state.sessionId
     && document.visibilityState === "visible"
     && !document.hidden;
@@ -446,6 +459,11 @@ function notifyTurnEnd(msg, sid) {
   const s = state.sessions.find(x => x.id === sid);
   const title = (s?.name || s?.title || "会话") + " · 任务完成";
   const body = msg.type === "error" ? ("出错了: " + (msg.message || "未知错误")) : "本轮已结束, 回来看看结果";
+  if (DESKTOP) {
+    nativeNotify(title, body);
+    return;
+  }
+  if (!("Notification" in window) || Notification.permission !== "granted") return;
   try {
     const n = new Notification(title, { body, tag: "xcode-turn-" + sid, silent: true });
     n.onclick = () => {
@@ -4727,6 +4745,12 @@ const desktopDd = makeDropdown($("sel-notify-desktop"), {
 });
 $("btn-notify-test").onclick = () => {
   playChime();
+  // 桌面壳: 直接发一条原生 toast, 让用户当场验证系统通知链路通不通
+  if (DESKTOP) {
+    nativeNotify("x-code 桌面通知测试", "收到这条说明原生通知链路正常");
+    toast("已播放提示音并发送系统通知");
+    return;
+  }
   // 未授权时回落 toast, 让用户立刻知道桌面弹窗这条路通不通
   if ("Notification" in window && Notification.permission !== "granted") {
     ensureNotifyPermission();
@@ -4854,32 +4878,31 @@ mqDark.addEventListener("change", () => {
   syncAccentInput();
 });
 
-/* ---------- 界面 / 代码字号: 直接输入像素值, 换算成比例写入 --fs-ui / --fs-code ---------- */
+/* ---------- 界面 / 聊天内容字号: 直接输入像素值, 换算成比例写入 --fs-ui ---------- */
 const FS_UI_KEY = "xc-fs-ui";
-const FS_CODE_KEY = "xc-fs-code";
 const FS_UI_BASE = 14;      // CSS 基准: 正文/界面基础字号
-const FS_CODE_BASE = 12.5;  // CSS 基准: 代码块字号
 const FS_UI_RANGE = [10, 24];
-const FS_CODE_RANGE = [8, 28];
 function fsPref(key, base, range) {
   const v = parseFloat(localStorage.getItem(key));
   return Number.isFinite(v) && v >= range[0] && v <= range[1] ? v : base;
 }
 function fsUiPref()   { return fsPref(FS_UI_KEY, FS_UI_BASE, FS_UI_RANGE); }
-function fsCodePref() { return fsPref(FS_CODE_KEY, FS_CODE_BASE, FS_CODE_RANGE); }
 function applyFontSize() {
   const st = document.documentElement.style;
   st.setProperty("--fs-ui", (fsUiPref() / FS_UI_BASE).toFixed(4));
-  st.setProperty("--fs-code", (fsCodePref() / FS_CODE_BASE).toFixed(4));
 }
-/* 输入即时生效; 清空或非法值在失焦时回退默认并回显 */
+/* 输入即时生效; 清空或非法值在失焦时回退默认并回显。
+   两个设置项都改同一个 --fs-ui（聊天内容字号）, 任一处修改另一处回显同步。 */
 function bindFsInput(inpId, key, base, range) {
   const inp = $(inpId);
+  const mirrors = () => {
+    $$("input[data-fs-mirror]").forEach(m => { if (m !== inp) m.value = inp.value; });
+  };
   inp.addEventListener("input", () => {
     const v = parseFloat(inp.value.trim());
     const ok = Number.isFinite(v) && v >= range[0] && v <= range[1];
     inp.classList.toggle("invalid", !ok);
-    if (ok) { localStorage.setItem(key, String(v)); applyFontSize(); }
+    if (ok) { localStorage.setItem(key, String(v)); applyFontSize(); mirrors(); }
   });
   inp.addEventListener("keydown", ev => {
     ev.stopPropagation();   // 别让 Enter/Esc 冒泡成全局快捷键
@@ -4891,10 +4914,11 @@ function bindFsInput(inpId, key, base, range) {
     inp.value = String(fsPref(key, base, range));
     inp.classList.remove("invalid");
     applyFontSize();
+    mirrors();
   });
 }
 bindFsInput("fs-ui-input", FS_UI_KEY, FS_UI_BASE, FS_UI_RANGE);
-bindFsInput("fs-code-input", FS_CODE_KEY, FS_CODE_BASE, FS_CODE_RANGE);
+bindFsInput("fs-code-input", FS_UI_KEY, FS_UI_BASE, FS_UI_RANGE);
 applyFontSize();
 
 /* ---------- 壁纸亮度: 0-100 滑块, 50=默认观感, 持久化 localStorage ----------
@@ -5489,7 +5513,7 @@ $("skill-repo-input").addEventListener("keydown", (e) => {
 function openSettings() {
   themeDd.setValue(themePref());   // 每次打开回显当前值
   $("fs-ui-input").value = String(fsUiPref());
-  $("fs-code-input").value = String(fsCodePref());
+  $("fs-code-input").value = String(fsUiPref());   // 两项同源, 都回显聊天内容字号
   $("bg-bright").value = String(bgBrightPref());
   $("bg-bright-val").textContent = String(bgBrightPref());
   syncAccentInput();  // 迭代次数: 未加载过(服务端值未知)时留空给 placeholder 兜底, 已知则回显
