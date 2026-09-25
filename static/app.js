@@ -2689,6 +2689,14 @@ function allowlistRuleOf(input) {
   return rule || null;
 }
 
+/* 请求是否仍挂起: 记忆类按钮的副作用(写白名单/附加目录)只在请求真正
+ * 待批时才允许发生。批复可能在按钮 POST 的竞态窗口里经别的路径
+ * (主按钮/桌宠/REST)完成——已处理就不再落任何副作用。 */
+function permRequestPending(requestId, sid) {
+  const run = runOf(sid);
+  return !!(run && run.pendingPerms[requestId]);
+}
+
 /* "总是允许"按钮: 把该命令的前缀规则加入白名单并批准本次请求。
  * 只给 bash/powershell 审批卡渲染——白名单是 shell 语义。 */
 function buildAlwaysAllowBtn(requestId, sid, input) {
@@ -2701,6 +2709,7 @@ function buildAlwaysAllowBtn(requestId, sid, input) {
   txt.textContent = rule ? `总是允许"${rule} …"` : "总是允许";
   btn.appendChild(txt);
   btn.onclick = async function () {
+    if (!permRequestPending(requestId, sid)) return;
     btn.disabled = true;
     try {
       const r = await fetch("/api/settings/allowlist", {
@@ -2736,6 +2745,7 @@ function buildSessionAllowBtn(requestId, sid, input) {
   txt.textContent = rule ? `本会话允许"${rule} …"` : "本会话允许";
   btn.appendChild(txt);
   btn.onclick = async function () {
+    if (!permRequestPending(requestId, sid)) return;
     btn.disabled = true;
     try {
       const r = await fetch(`/api/sessions/${encodeURIComponent(sid)}/allow-rules`, {
@@ -2785,6 +2795,7 @@ function buildRememberDirBtn(requestId, sid, input) {
   txt.textContent = dir ? `允许并记住 ${dir}` : "允许并记住该目录";
   btn.appendChild(txt);
   btn.onclick = async function () {
+    if (!permRequestPending(requestId, sid)) return;
     if (!dir) { respondPermission(requestId, true, sid); return; }
     btn.disabled = true;
     try {
@@ -2996,6 +3007,10 @@ function markPermResolved(sid, requestId, approved) {
     card.classList.add(approved ? "allowed" : "denied");
     const choices = card.querySelector(".pr-choices");
     if (choices) choices.remove();
+    // 记忆类按钮(总是允许/本会话允许/记住目录)直接挂在卡上, 不在
+    // .pr-choices 里——不摘掉的话定格后仍可点击, 且副作用(写白名单/
+    // 附加目录)照常发生。在途请求不受影响(用户已表达的意图保留)。
+    card.querySelectorAll(".pr-btn").forEach(b => b.remove());
     card.appendChild(makePrMark(
       approved
         ? (card.classList.contains("plan-card") ? "已批准 · 开始实施" : "已允许")
@@ -3036,6 +3051,8 @@ function settlePendingPermsOnTurnEnd(run, sid) {
       card.classList.add("denied");
       const choices = card.querySelector(".pr-choices");
       if (choices) choices.remove();
+      // 同 markPermResolved: 记忆类按钮一并摘除, 防定格后仍可点出副作用
+      card.querySelectorAll(".pr-btn").forEach(b => b.remove());
       card.appendChild(makePrMark("已拒绝", false));
     }
     // 右侧计划面板若正显示这份计划（且属于本会话）: 按钮区一并定格, 不留死按钮
