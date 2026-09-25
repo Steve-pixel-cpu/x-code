@@ -5389,7 +5389,7 @@ dependencies = [
 
 [[package]]
 name = "x-code"
-version = "3.2.7"
+version = "3.3.0"
 dependencies = [
  "rfd",
  "tauri",
