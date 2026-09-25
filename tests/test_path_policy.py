@@ -326,3 +326,84 @@ def test_session_allow_rules_api_not_found(isolated_settings):
     tc = TestClient(server.app)
     r = tc.post("/api/sessions/nope/allow-rules", json={"rule": "git push"})
     assert r.status_code == 404
+
+
+# ------------------------------------------------------------
+# 端到端金丝雀: 危险命令在授权层被拦, 永远到不了执行层
+# ------------------------------------------------------------
+
+def _e2e_workspace(root: Path) -> Path:
+    root.mkdir(parents=True)
+    (root / ".git").mkdir()
+    (root / ".git" / "config").write_text("[core] canary\n", encoding="utf-8")
+    (root / "notes.txt").write_text("canary\n", encoding="utf-8")
+    return root
+
+
+def _e2e_call(policy, tool_name, tool_input, ws, handlers, prompter=None):
+    """复刻 runtime._authorize_tool_use 的真实顺序: 先授权, 放行才执行。"""
+    from tools import bash_tool
+    r = policy.authorize(tool_name, tool_input, prompter=prompter)
+    if r.decision == PermissionDecision.DENY:
+        return "DENIED", r.reason
+    handler = bash_tool if tool_name == "bash" else handlers["write"]
+    return "EXECUTED", handler(json.loads(tool_input), str(ws))
+
+
+def test_dangerous_commands_never_execute_without_approval(tmp_path, monkeypatch):
+    """金丝雀证明: 各种权限档位下, 危险命令全部止步于授权层。
+    任何一条真的执行了, 金丝雀文件就会变——这个测试直接断言文件内容。"""
+    from tools import bash_tool, write_tool
+
+    handlers = {"write": write_tool}
+    monkeypatch.chdir(tmp_path)   # 根外目录断言不受 cwd 漂移影响
+
+    ws = _e2e_workspace(tmp_path / "ws")
+    policy = PermissionPolicy(PermissionMode.WORKSPACE_WRITE)
+    for name, required in TOOL_REQUIREMENTS_FIXTURE().items():
+        policy.with_tool_requirement(name, required)
+    policy.set_workspace_roots([str(ws)])
+
+    # 无人批准(无 prompter = 自动化/subagent 场景): 危险命令全拒
+    for command in ("rm -rf .git", "mv .git /tmp/stolen",
+                    "echo evil > .git/hooks/pre-commit",
+                    "git push --force && rm -rf .git"):
+        verdict, reason = _e2e_call(policy, "bash",
+                                    json.dumps({"command": command}), ws, handlers)
+        assert verdict == "DENIED", command
+    # 根外写拒 + 敏感路径写拒
+    verdict, _ = _e2e_call(policy, "write_file", _w(str(tmp_path / "outside" / "x.txt")), ws, handlers)
+    assert verdict == "DENIED"
+    verdict, _ = _e2e_call(policy, "write_file", _w(".git/config", "hacked"), ws, handlers)
+    assert verdict == "DENIED"
+    # 金丝雀完好 = 命令真的没被执行, 而不只是"声称拒绝"
+    assert (ws / ".git" / "config").read_text(encoding="utf-8") == "[core] canary\n"
+    assert (ws / "notes.txt").read_text(encoding="utf-8") == "canary\n"
+    assert not (tmp_path / "outside" / "x.txt").exists()
+
+
+def test_allowlist_cannot_exempt_sensitive_targets(tmp_path):
+    """用户把 rm 加进白名单 + allow 模式: rm .git 仍被 bypass-immune 拦下;
+    白名单内且目标不敏感的命令照常放行(不误伤)。"""
+    from tools import bash_tool
+
+    ws = _e2e_workspace(tmp_path / "ws")
+    policy = (PermissionPolicy(PermissionMode.ALLOW)
+              .with_tool_requirement("bash", PermissionMode.DANGER_FULL_ACCESS)
+              .set_workspace_roots([str(ws)])
+              .set_command_allowlist(["rm"]))
+    verdict, _ = _e2e_call(policy, "bash", json.dumps({"command": "rm -rf .git"}),
+                           ws, {"write": None})
+    assert verdict == "DENIED"
+    verdict, _ = _e2e_call(policy, "bash", json.dumps({"command": "rm notes.txt"}),
+                           ws, {"write": None})
+    assert verdict == "EXECUTED"           # 白名单内的合法删除放行
+    assert (ws / ".git" / "config").read_text(encoding="utf-8") == "[core] canary\n"
+    assert not (ws / "notes.txt").exists()
+
+
+def TOOL_REQUIREMENTS_FIXTURE():
+    """与 main.TOOL_REQUIREMENTS 同源的最小档位登记(避免测试依赖 main 导入)。"""
+    return {"write_file": PermissionMode.WORKSPACE_WRITE,
+            "edit_file": PermissionMode.WORKSPACE_WRITE,
+            "read_file": PermissionMode.PLAN}
