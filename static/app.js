@@ -2594,6 +2594,13 @@ function onToolUse(msg, sid) {
 
 function onToolResult(msg, sid) {
   const run = runOf(sid);
+  // 聊天点播: music_play 的结果镜像带 result_meta.music, 转交电台开播。
+  // 只在实时事件里播——历史回放（completeToolCard 的 result_meta 只渲染 diff）
+  // 不重播旧歌, 刷新页面不会凭空响起来。
+  if (msg.result_meta && msg.result_meta.music && !msg.is_error) {
+    const ok = window.xcodeMusicPlay && window.xcodeMusicPlay(msg.result_meta.music);
+    if (!ok) toast("电台没接住点播指令, 点侧栏 ♫ 手动播吧");
+  }
   if (msg.plan_rejected) {
     // 计划被拒: 计划卡已渲染拒绝态, 不补失败工具卡。但 tool_use_started
     // 可能已提前建了占位卡（present_plan 也会先镜像）, 就地移除, 不留悬卡

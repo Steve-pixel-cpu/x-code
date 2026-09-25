@@ -314,3 +314,82 @@ def song_lyric(song_id: int) -> dict:
     song_id = int(song_id)
     data = _http_json("/api/song/lyric", {"id": song_id, "lv": 1, "kv": 1, "tv": -1})
     return {"id": song_id, "lrc": (data.get("lrc") or {}).get("lyric") or ""}
+
+
+# ============================================================
+# 聊天点播工具: music_play（spec + handler, main.build_registry 注册）
+# ============================================================
+# 后端只做搜索 + 选歌; 播放动作在前端 —— 候选队列挂在 ToolOutput._meta
+# ["music"] 上, EmittingToolRegistry 镜像 tool_result 时带给 Web 端
+# music.js, 由它换队列并开播（write_file 的 diff 走的同一富展示通道）。
+# CLI 下没有前端, _meta 被自然忽略, 等价于纯搜索。
+
+from runtime import ToolOutput   # noqa: E402  (工具返回值附 _meta 用)
+
+PLAY_QUEUE_LIMIT = 10
+PLAY_META_KEY = "music"
+
+
+MUSIC_PLAY_SPEC = {
+    "name": "music_play",
+    "description": (
+        "摸鱼电台点歌: 按关键词(歌名/歌手)搜索网易云曲库并让前端播放器播放。"
+        "用户在聊天里说想听歌/换歌时调用。返回前 10 个候选并默认播放第一个"
+        "免费候选; 用户要指定某一版时把 index 传为候选序号(从 1 开始)。"
+        "VIP/无版权歌拿不到直链, 前端会自动跳下一首。仅桌面 Web 界面有效。"
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "kw": {
+                "type": "string",
+                "description": "搜索关键词, 如「晴天 周杰伦」或「Lemon」。",
+            },
+            "index": {
+                "type": "integer",
+                "description": "播放候选列表中的第几个(从 1 开始); 缺省播"
+                               "第一个免费候选, 越界自动钳制到最后一首。",
+            },
+        },
+        "required": ["kw"],
+    },
+}
+
+
+def _first_playable(songs: list) -> int:
+    """第一个免费候选的下标; 全是 VIP 就播第一首（前端会提示跳过）。"""
+    for i, s in enumerate(songs):
+        if s.get("fee") != 1:
+            return i
+    return 0
+
+
+def music_play_tool(params: dict, workdir: Optional[str] = None) -> str:
+    """聊天点播: 搜索 → 选歌 → 队列挂 _meta 给前端电台。模型拿到的是
+    可读 JSON 文本; 播放本身由前端收到镜像事件后执行。"""
+    params = params if isinstance(params, dict) else {}
+    kw = str(params.get("kw") or "").strip()
+    if not kw:
+        raise ValueError("kw 不能为空: 要告诉我想听什么(歌名或歌手)")
+    try:
+        idx = int(params.get("index") or 0)
+    except (TypeError, ValueError):
+        idx = 0
+    found = search_songs(kw, PLAY_QUEUE_LIMIT)["songs"]
+    if not found:
+        return f"没有搜到「{kw}」相关的歌曲, 换个关键词再试。"
+    pick = (min(max(idx, 1), len(found)) - 1) if idx else _first_playable(found)
+    song = found[pick]
+    text = json.dumps({
+        "playing": f"{song['name']} - {song['artist']}",
+        "picked": pick + 1,
+        "total": len(found),
+        "candidates": [
+            f"{i + 1}. {s['name']} - {s['artist']}"
+            + ("（VIP）" if s.get("fee") == 1 else "")
+            for i, s in enumerate(found)
+        ],
+        "note": "已把整组候选作为队列交给前端播放; VIP/无版权歌自动跳下一首",
+    }, ensure_ascii=False)
+    meta = {PLAY_META_KEY: {"song": song, "queue": found, "qname": "聊天点播"}}
+    return ToolOutput(text).with_meta(meta)

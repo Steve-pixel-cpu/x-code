@@ -42,6 +42,7 @@ from tools import (ToolRegistry, bash_tool, edit_file_tool, glob_tool,
                    git_bash_unavailable_reason)
 from agent_tools import AGENT_TOOL_SPECS, get_orchestrator, register_agent_tools
 from browser_tools import BROWSER_TOOL_SPECS, register_browser_tools
+from music import MUSIC_PLAY_SPEC, music_play_tool
 from mcp_client import (MCP_TOOL_PREFIX, get_mcp_manager, mcp_tool_name,
                         _safe_segment)
 from skills import (SkillError, discover_skills, render_skills_section,
@@ -407,7 +408,7 @@ from tools import (todo_spec as _todo_spec,     # noqa: E402  (spec 与实现同
 TOOLS = [bash_spec, powershell_spec, read_file_spec, write_file_spec,
          edit_file_spec, grep_spec, glob_spec, task_output_spec, task_stop_spec,
          present_plan_spec, _todo_spec,
-         web_search_spec, web_fetch_spec] + BROWSER_TOOL_SPECS \
+         web_search_spec, web_fetch_spec, MUSIC_PLAY_SPEC] + BROWSER_TOOL_SPECS \
         + AGENT_TOOL_SPECS
 
 
@@ -1073,6 +1074,9 @@ TOOL_REQUIREMENTS = {
     # present_plan 走 WORKSPACE_WRITE 档: plan 模式下它触发"可升级弹问"
     # （Web 端渲染成计划卡）, 其余模式下直接放行
     "present_plan": WORKSPACE_WRITE_MODE,
+    # 聊天点歌: 上游搜索纯只读, 播放动作在前端电台（副作用不出本机 UI）,
+    # 与 browser_navigate 同一档位——只读模式也能点歌
+    "music_play": READ_ONLY_MODE,
 }
 
 
@@ -1097,7 +1101,8 @@ def build_registry(mcp_servers: Optional[list] = None,
         name="grep", handler=grep_tool).register(
         name="glob", handler=glob_tool).register(
         name="web_search", handler=web_search_tool).register(
-        name="web_fetch", handler=web_fetch_tool)
+        name="web_fetch", handler=web_fetch_tool).register(
+        name="music_play", handler=music_play_tool)
     registry = register_agent_tools(registry)
     registry = register_browser_tools(registry)
 

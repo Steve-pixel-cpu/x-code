@@ -6,6 +6,8 @@
  * 找歌只有搜索; 收藏与自定义歌单存服务端 ~/.x-code/music-library.json,
  * 当前播放列表（队列）存 localStorage —— 重启后接着听。
  * 在线流式播放免费曲库; VIP/无版权歌（后端 url=null）自动跳下一首。
+ * 聊天点播: 模型调 music_play 工具后, app.js 把 result_meta.music 转给
+ * window.xcodeMusicPlay —— 整队换队列 + 亮播放条 + 开播（见文件底部）。
  * ============================================================ */
 (function () {
   if (window.__xcodeMusic) return;      // 防重复初始化
@@ -823,4 +825,28 @@
     btn.querySelector(".ic-one").style.display = mstate.mode === "one" ? "" : "none";
     btn.querySelector(".ic-shuffle").style.display = mstate.mode === "shuffle" ? "" : "none";
   }
+
+  /* ---- 聊天点播入口 ----
+   * app.js 收到 music_play 工具结果时转交 {song, queue, qname}:
+   * 整队替换当前队列（点播是新意图, 不与旧队列混排）, 直接开播。
+   * 摸鱼原则: 不自动弹播放条/面板 —— 播放条收着就继续收着, 照样出声;
+   * 想看队列再点侧栏 ♫。面板若已开着, 顺手刷新播放列表 Tab。 */
+  window.xcodeMusicPlay = function (cmd) {
+    if (!DESKTOP_PAGE) return false;
+    const songs = (cmd && Array.isArray(cmd.queue) ? cmd.queue : [])
+      .filter(s => s && Number.isInteger(Number(s.id)) && s.name);
+    if (!songs.length) return false;
+    const wantId = Number(cmd.song && cmd.song.id);
+    let at = songs.findIndex(s => Number(s.id) === wantId);
+    if (at < 0) at = 0;
+    mstate.queue = songs;
+    mstate.qname = typeof cmd.qname === "string" && cmd.qname ? cmd.qname : "聊天点播";
+    mstate.failedStreak = 0;
+    if (!$("music-panel").hidden) {
+      const onTab = document.querySelector("#music-panel .mp-tabs > button.on");
+      if (onTab && onTab.dataset.tab === "queue") renderQueue();
+    }
+    playIndex(at);           // 内部 savePref + 刷条 + 拉直链播放
+    return true;
+  };
 })();

@@ -277,3 +277,64 @@ def test_api_playlists_error_mapping(client, lib_file):
     assert client.post("/api/music/playlists/42/songs",
                        json={"songs": [_song(1)]}).status_code == 404
     assert client.delete("/api/music/playlists/42/songs/1").status_code == 404
+
+
+# ------------------------------------------------------------
+# music_play 工具: 聊天点播（搜索 + 选歌 + _meta 交给前端电台）
+# ------------------------------------------------------------
+
+def test_music_play_defaults_to_first_free(monkeypatch):
+    """默认播第一个非 VIP 候选; meta 带 song/queue/qname 三件套。"""
+    songs = [_song(1, "VIP版", fee=1), _song(2, "免费版"), _song(3, "也是VIP", fee=1)]
+    monkeypatch.setattr(_music_mod, "search_songs", lambda kw, limit: {"kw": kw, "songs": songs})
+    out = _music_mod.music_play_tool({"kw": "测试"})
+    assert out._meta["music"]["song"]["id"] == 2    # 跳过 VIP 挑免费
+    assert [s["id"] for s in out._meta["music"]["queue"]] == [1, 2, 3]
+    assert out._meta["music"]["qname"] == "聊天点播"
+    payload = json.loads(str(out))
+    assert payload["picked"] == 2
+    assert payload["playing"] == "免费版 - 张三 / 李四"
+    assert len(payload["candidates"]) == 3
+
+
+def test_music_play_explicit_index_clamped(monkeypatch):
+    """指定 index 播那一版; 越界钳到最后一首, 非法值回落默认选歌。"""
+    songs = [_song(1), _song(2), _song(3)]
+    monkeypatch.setattr(_music_mod, "search_songs", lambda kw, limit: {"kw": kw, "songs": songs})
+    out = _music_mod.music_play_tool({"kw": "x", "index": 3})
+    assert out._meta["music"]["song"]["id"] == 3
+    out = _music_mod.music_play_tool({"kw": "x", "index": 99})
+    assert out._meta["music"]["song"]["id"] == 3
+    out = _music_mod.music_play_tool({"kw": "x", "index": "垃圾"})
+    assert out._meta["music"]["song"]["id"] == 1    # 落回第一个免费候选
+
+
+def test_music_play_all_vip_still_picks_first(monkeypatch):
+    """全 VIP: 照播第一首, 由前端拿不到直链时自动跳。"""
+    songs = [_song(1, fee=1), _song(2, fee=1)]
+    monkeypatch.setattr(_music_mod, "search_songs", lambda kw, limit: {"kw": kw, "songs": songs})
+    out = _music_mod.music_play_tool({"kw": "x"})
+    assert out._meta["music"]["song"]["id"] == 1
+
+
+def test_music_play_empty_result_no_meta(monkeypatch):
+    """没搜到: 纯文本回话, 不带 _meta（前端不该被触发）。"""
+    monkeypatch.setattr(_music_mod, "search_songs", lambda kw, limit: {"kw": kw, "songs": []})
+    out = _music_mod.music_play_tool({"kw": "不存在的歌"})
+    assert "没有搜到" in str(out)
+    assert getattr(out, "_meta", {}) == {}
+
+
+@pytest.mark.parametrize("bad", [None, {}, {"kw": ""}, {"kw": "   "}])
+def test_music_play_bad_kw_raises(bad):
+    """空关键词直接 ValueError, 由 registry 转 tool_result 报给模型。"""
+    with pytest.raises(ValueError):
+        _music_mod.music_play_tool(bad)
+
+
+def test_music_play_registered_and_read_only():
+    """TOOLS 有声明; 权限档登记为 READ_ONLY（= PermissionMode.PLAN, 值 1）。"""
+    import main
+    from permissions import READ_ONLY_MODE
+    assert main.TOOL_REQUIREMENTS.get("music_play") == READ_ONLY_MODE
+    assert any(t["name"] == "music_play" for t in main.TOOLS)
