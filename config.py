@@ -280,6 +280,10 @@ class ConfigLoader:
                 "acceptEdits": "workspace-write", "auto": "workspace-write",
                 "workspace-write": "workspace-write",
                 "dontAsk": "danger-full-access", "danger-full-access": "danger-full-access",
+                # Web 设置页的"每次询问"是可持久化的全局默认（server 的
+                # MODE_TO_NAME 会把 PROMPT_MODE 写成这个名）; 漏了它的话,
+                # 设置页一选, 下次启动就直接 ConfigError
+                "prompt": "prompt",
             }
             if raw_mode not in mode_map:
                 raise ConfigError(f"permissionMode: unsupported mode '{raw_mode}'", kind="parse")
@@ -456,3 +460,57 @@ def save_providers(cfg: dict) -> None:
     SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
     SETTINGS_FILE.write_text(
         json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+# 命令前缀白名单: 与供应商配置同文件（commandAllowlist 键）, 读-改-写
+# 保留其他 key。规则是 shell 词序前缀（如 "git push"、"uv run pytest"）,
+# 授权层按词对齐匹配——见 permissions.shell_command_matches_allowlist。
+ALLOWLIST_KEY = "commandAllowlist"
+ALLOWLIST_MAX_RULES = 100
+ALLOWLIST_MAX_RULE_LEN = 200
+
+
+def load_command_allowlist() -> list:
+    """读命令白名单规则; 无文件/损坏/形状不对 = 空列表。"""
+    try:
+        data = json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    rules = data.get(ALLOWLIST_KEY) if isinstance(data, dict) else None
+    if not isinstance(rules, list):
+        return []
+    out: list = []
+    for r in rules:
+        if isinstance(r, str) and r.strip():
+            out.append(r.strip())
+    return out[:ALLOWLIST_MAX_RULES]
+
+
+def save_command_allowlist(rules: list) -> list:
+    """写命令白名单: 去重保序、逐条清洗, 返回清洗后的生效列表。
+    读-改-写保留 settings.json 里其他 key。"""
+    out: list = []
+    seen: set = set()
+    for r in (rules or []):
+        if not isinstance(r, str):
+            continue
+        cleaned = " ".join(r.split())   # 压掉内部多余空白
+        if not cleaned or len(cleaned) > ALLOWLIST_MAX_RULE_LEN:
+            continue
+        if cleaned.lower() in seen:
+            continue
+        seen.add(cleaned.lower())
+        out.append(cleaned)
+        if len(out) >= ALLOWLIST_MAX_RULES:
+            break
+    try:
+        data = json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            data = {}
+    except (OSError, ValueError):
+        data = {}
+    data[ALLOWLIST_KEY] = out
+    SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    SETTINGS_FILE.write_text(
+        json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    return out

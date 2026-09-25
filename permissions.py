@@ -219,13 +219,83 @@ def shell_command_is_read_only(tool_name: str, tool_input: str) -> bool:
                for s in _split_shell_segments(cmd))
 
 
+def _segment_matches_rule(seg: str, rule_words: list, powershell: bool) -> bool:
+    """单段命令是否命中单条规则: 按词对齐前缀匹配（大小写不敏感）。
+    规则 "git push" 命中 "git push origin main"; "git" 不命中 "gitpush"。"""
+    if "$(" in seg or "`" in seg or "<(" in seg:
+        return False   # 命令替换可内嵌任意命令: 一票否决
+    # 重定向口径与只读判定一致: 2>&1 / >/dev/null 无害剔除, 之余有 > 即写文件
+    cleaned = re.sub(r"\d?[<>]&\d", "", seg)
+    cleaned = re.sub(r"\d*>>?\s*/dev/null", "", cleaned)
+    if ">" in cleaned:
+        return False
+    try:
+        tokens = shlex.split(cleaned, posix=True)
+    except ValueError:
+        return False
+    while tokens and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", tokens[0]):
+        tokens = tokens[1:]   # 剥前缀环境变量赋值, 与规则词对齐
+    if len(tokens) < len(rule_words):
+        return False
+    return all(t.lower() == w for t, w in zip(tokens, rule_words))
+
+
+def shell_command_matches_allowlist(tool_name: str, tool_input: str,
+                                    rules: list) -> Optional[str]:
+    """bash/powershell 命令是否命中用户白名单。返回命中的规则原文（供
+    授权理由/toast 展示）, 未命中返回 None。
+
+    保守口径（与只读白名单同一方向）:
+    - 规则按词对齐前缀匹配, 规则取分词后前缀, 命令须以相同词序开头;
+    - 组合命令 && || ; | 换行切成段, **每一段**都必须命中某条规则——
+      "git push && rm -rf /" 只要有一段没被覆盖就不放行;
+    - 命令替换/写文件重定向的段一律不命中。
+    解析失败/空命令/空规则列表返回 None。"""
+    valid = [r for r in (str(x).strip() for x in (rules or [])) if r]
+    if not valid:
+        return None
+    try:
+        params = json.loads(tool_input)
+        cmd = str(params.get("command") or "")
+    except Exception:
+        return None
+    if not cmd.strip():
+        return None
+    powershell = tool_name == "powershell"
+    compiled = []
+    for r in valid:
+        try:
+            words = [w.lower() for w in shlex.split(r, posix=True)]
+        except ValueError:
+            continue
+        if words:
+            compiled.append((r, words))
+    if not compiled:
+        return None
+    matched: Optional[str] = None
+    for seg in _split_shell_segments(cmd):
+        hit = next((r for r, words in compiled
+                    if _segment_matches_rule(seg, words, powershell)), None)
+        if hit is None:
+            return None   # 有一段没被覆盖: 整条命令不放行
+        matched = matched or hit
+    return matched
+
+
 class PermissionPolicy:
     def __init__(self, active_mode: PermissionMode):
         self._active_mode = active_mode
         self._tool_requirements: Dict[str, PermissionMode] = {}
+        self._command_allowlist: list = []
 
     def with_tool_requirement(self,tool_name: str, required_mode: PermissionMode) -> Self:
         self._tool_requirements[tool_name] = required_mode
+        return self
+
+    def set_command_allowlist(self, rules: list) -> Self:
+        """用户自定义命令前缀白名单（保存的原始规则列表, 匹配时逐段对齐）。
+        运行时可随时热更新（Web 设置页保存后推给所有活跃 runtime）。"""
+        self._command_allowlist = list(rules or [])
         return self
 
     def required_mode_for(self, tool_name: str) -> PermissionMode:
@@ -262,6 +332,15 @@ class PermissionPolicy:
         # 形同虚设(所有工具默认 required=DANGER_FULL_ACCESS < 4, 全被放行)。
         if current == PermissionMode.ALLOW:
             return PermissionResult(decision= PermissionDecision.ALLOW, reason= "")
+        # 用户命令白名单: 显式授权过的命令前缀直接放行（优先于一切弹问）。
+        # 只对 bash/powershell 生效——"以 xx 开头的命令"是 shell 语义。
+        if (tool_name in MUTATING_SHELL_TOOLS and self._command_allowlist):
+            hit = shell_command_matches_allowlist(tool_name, input,
+                                                  self._command_allowlist)
+            if hit is not None:
+                return PermissionResult(
+                    decision=PermissionDecision.ALLOW,
+                    reason=f"command matches user allowlist rule: {hit}")
         if current == PermissionMode.PROMPT:
             request = PermissionRequest(tool_name = tool_name,
                                         input = input,
