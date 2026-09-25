@@ -5,7 +5,10 @@
 <title>x-code 桌宠</title>
 <!-- 令牌从 ?token= 种成 cookie, WS/API 鉴权与 index 同一套(Tauri pet 窗口加载本页) -->
 <script>(function(){try{var t=new URLSearchParams(location.search).get("token");if(t)document.cookie="xcode_token="+encodeURIComponent(t)+"; path=/; max-age=31536000; SameSite=Strict";}catch(e){}})();</script>
-<link rel="stylesheet" href="/static/pet.css?v=20260925a">
+<!-- 宠物大小在绘制前应用, 防止按默认 100% 先渲染一帧再跳变。
+     与 pet.js clampScale 同一范围 [0.5,2], 非法值回退 1 -->
+<script>(function(){try{var p=JSON.parse(localStorage.getItem("xc-pet")||"{}");var s=Number(p.scale);if(!isFinite(s)||s<0.5||s>2)s=1;document.documentElement.style.setProperty("--pet-scale",String(s));}catch(e){}})();</script>
+<link rel="stylesheet" href="/static/pet.css?v=20260925c">
 <style>
   /* 悬浮窗不加载 app.css(那是整套主界面样式), 这里给一份固定深色令牌:
      桌宠浮在任意桌面壁纸上, 玻璃深色底可读性最好, 不跟主题切换。
@@ -27,6 +30,6 @@
   </div>
   <div id="pet-sprite" title="按住拖动 · 点击互动"></div>
 </div>
-<script src="/static/pet.js?v=20260925a" defer></script>
+<script src="/static/pet.js?v=20260925h" defer></script>
 </body>
 </html>

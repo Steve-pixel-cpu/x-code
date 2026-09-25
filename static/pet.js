@@ -14,7 +14,7 @@
 
   const $ = (id) => document.getElementById(id);
   const PKEY = "xc-pet";
-  const BUBBLE_MAX = 26;
+  const BUBBLE_MAX = 80;   // 权限气泡要装下命令摘要; CSS 限宽自动折行
 
   // Codex 官方逐帧行为: 行号、每帧毫秒; once = 播完回落到 fallback
   // (与 scripts/gen_default_pet.py 的 SPEC 同一张表)
@@ -47,6 +47,13 @@
   function savePref(p) {
     try { localStorage.setItem(PKEY, JSON.stringify(p)); } catch { }
   }
+  // 宠物大小缩放区间: 主窗滑杆/悬浮窗 applyScale/召唤建窗共用一份口径
+  const SCALE_RANGE = [0.5, 2];
+  const clampScale = (v) => {
+    const n = Number(v);
+    if (!Number.isFinite(n)) return 1;
+    return Math.min(SCALE_RANGE[1], Math.max(SCALE_RANGE[0], n));
+  };
   const toast = window.xcodeToast || (msg => console.log("[pet]", msg));
 
   // ---------- 精灵图渲染器 ----------
@@ -118,6 +125,31 @@
     const bubbleEl = $("pet-bubble");
     const statusEl = $("pet-status");
     let sprite = null;
+
+    // ---- 大小缩放: pref().scale ∈ [0.5, 2]（主窗设置页滑杆写入）。
+    //      CSS 变量驱动 #pet-text/#pet-sprite 的 zoom, 窗口尺寸经
+    //      resizePet 同步放大——两处都幂等, 重复应用无副作用。
+    //      clampScale 在共用作用域（initMain 召唤建窗也要用同一口径）。
+    // 窗口创建时就按保存的缩放开好了尺寸(main.rs inner_size), 启动这轮
+    // applyScale 只同步 CSS 变量、不再 set_size——对透明悬浮窗做无谓的
+    // 等值 resize 会触发 WebView2 重排, 有把透明底打回白色"框"的风险
+    let appliedScale = clampScale(pref().scale);
+    function applyScale() {
+      const s = clampScale(pref().scale);
+      $("pet-float").style.setProperty("--pet-scale", String(s));
+      if (s === appliedScale) return s;
+      appliedScale = s;
+      // 窗口还没就绪/无桥(浏览器直开 pet.html)时静默跳过; resizePet 幂等
+      try { bridge()?.resizePet?.(s); } catch { }
+      return s;
+    }
+    // 主窗调滑杆 → pref 落 localStorage → 本窗 storage 事件实时跟随
+    window.addEventListener("storage", (e) => {
+      if (e.key !== PKEY || !e.newValue) return;
+      applyScale();
+    });
+    applyScale();
+
     const pet = {
       base: "idle",          // 循环态
       overlay: null,         // 一次性态(jumping/waving/review), 播完回 base
@@ -184,59 +216,179 @@
       setBase("failed");
       bubble(text || "出事了…");
       pet.failTimer = setTimeout(() => {
-        if (pet.base === "failed") setBase("idle");
+        // 回落时按聚合状态重算: 别的会话还在跑就继续"打工", 别装闲
+        if (pet.base === "failed") recomputeBase();
       }, 3500);
+    }
+
+    /* ---- 多会话聚合: 桌宠跟的是全局, 不是某个会话 ----
+     * 每个会话记一个 phase: run=轮次进行中 / await=等模型输出空窗 / idle=空闲。
+     * 姿态优先级: 待批权限 > 任一会话打工 > 任一会话等输出 > 摸鱼。
+     * 只有最后一个活跃会话收工那一刻才播"收工", 单个会话结束不打扰。 */
+    const sessionPhase = new Map();   // sid -> "run" | "await" | "idle"
+    const pendingPerms = new Map();   // sid -> {request_id, tool_name, title}
+
+    const permKey = (sid) => String(sid != null ? sid : "?");
+    const anyPhase = (...phases) =>
+      [...sessionPhase.values()].some(v => phases.includes(v));
+    const othersActive = (sid) =>
+      [...sessionPhase].some(([k, v]) => k !== sid && (v === "run" || v === "await"));
+
+    function recomputeBase() {
+      if (pendingPerms.size) {
+        if (pet.base !== "waiting") setBase("waiting");
+        return;
+      }
+      if (anyPhase("run")) { setBase(pet.runDir || "running"); return; }
+      if (anyPhase("await")) {
+        if (pet.base !== "waiting") setBase("waiting");
+        return;
+      }
+      if (pet.base !== "idle") setBase("idle");
+    }
+
+    /* 展示最近一个待批请求（多个会话同时等批时显示最新的那个）。
+     * 气泡说清楚"谁想跑什么命令", 命令比会话名优先保住不截断 */
+    function showLatestPerm() {
+      let sid = null, p = null;
+      for (const [k, v] of pendingPerms) { sid = k; p = v; }
+      if (!p) { pet.pendingPerm = null; return; }
+      pet.pendingPerm = { session_id: sid, request_id: p.request_id };
+      setBase("waiting");
+      const cta = "（点我同意）";
+      const body = (p.title ? `「${p.title}」` : "")
+        + (p.cmd ? `想运行: ${p.cmd}` : `想用 ${p.tool_name || "工具"}`);
+      const max = BUBBLE_MAX - cta.length;
+      bubble((body.length > max ? body.slice(0, max - 1) + "…" : body) + cta, 0);
+    }
+
+    function forgetPerm(sid) {
+      if (!pendingPerms.delete(permKey(sid))) return;
+      if (pendingPerms.size) { showLatestPerm(); return; }
+      pet.pendingPerm = null;
+      recomputeBase();
+    }
+
+    /* 临时气泡播完把权限气泡找回来: 等批期间别的会话的工具/接单气泡
+     * 不该把"点我同意"顶没 */
+    function transientBubble(text, ms) {
+      bubble(text, ms);
+      if (pendingPerms.size) {
+        clearTimeout(pet.permTimer);
+        pet.permTimer = setTimeout(() => {
+          if (pendingPerms.size && pet.base === "waiting") showLatestPerm();
+        }, (ms || 2400) + 200);
+      }
     }
 
     function onEvent(msg) {
       if (!msg || !msg.type) return;
+      const sid = permKey(msg.session_id);
       switch (msg.type) {
         case "turn_started":
           clearTimeout(pet.failTimer);
-          setBase("running");
-          bubble("接单！");
+          sessionPhase.set(sid, "run");
+          recomputeBase();
+          transientBubble("接单！");
           break;
         case "tool_use_started": {
+          sessionPhase.set(sid, "run");
           // 每次工具换一个跑动方向, 桌面上看得到"在忙"
           pet.alt = (pet.alt + 1) % 3;
-          const dir = pet.alt === 0 ? "running" : pet.alt === 1 ? "running-right" : "running-left";
-          setBase(dir);
+          pet.runDir = pet.alt === 0 ? "running"
+            : pet.alt === 1 ? "running-right" : "running-left";
+          recomputeBase();
           const now = Date.now();
           if (now - pet.lastToolBubble > 900) {
             pet.lastToolBubble = now;
-            bubble((msg.tool_name || "工具") + "…");
+            transientBubble((msg.tool_name || "工具") + "…");
           }
           break;
         }
         case "tool_result":
           if (/^running/.test(pet.base)) overlayOnce("review");   // 瞄一眼结果
+          forgetPerm(sid);   // 出结果 = 该会话的待批请求已有去向
           break;
         case "permission_request":
-          setBase("waiting");
-          bubble("等你批条子" + (msg.tool_name ? `: ${msg.tool_name}` : ""), 0);
+          pendingPerms.set(sid, {
+            request_id: msg.request_id || null,
+            tool_name: msg.tool_name || "",
+            title: msg.session_title || "",
+            cmd: msg.command_summary || "",
+          });
+          showLatestPerm();
+          break;
+        case "permission_resolved":
+          // 请求已有去向（主窗批的/桌宠批的/已过期）: 立刻撤下待批展示
+          forgetPerm(sid);
           break;
         case "await_output":
-          setBase("waiting");
-          bubble("等你补充…", 0);
+          sessionPhase.set(sid, "await");
+          recomputeBase();
+          if (!pendingPerms.size && pet.base === "waiting") bubble("等你补充…", 0);
           break;
-        case "turn_done":
+        case "turn_done": {
+          sessionPhase.set(sid, "idle");
+          forgetPerm(sid);
           clearTimeout(pet.failTimer);
-          if (msg.interrupted) fail("停了…");
-          else {
+          if (othersActive(sid) || pendingPerms.size) {
+            recomputeBase();   // 还有别的会话在忙: 不播收工, 继续打工
+          } else if (msg.interrupted) {
+            fail("停了…");
+          } else {
             pet.base = "idle";
+            setStatus("idle");
             overlayOnce("jumping");
             bubble("收工！");
           }
           break;
-        case "error":
-          fail(msg.message ? String(msg.message) : "出事了…");
+        }
+        case "error": {
+          sessionPhase.set(sid, "idle");
+          forgetPerm(sid);
+          const text = msg.message ? String(msg.message) : "出事了…";
+          if (othersActive(sid) || pendingPerms.size) {
+            transientBubble("出错: " + text, 3000);
+            recomputeBase();
+          } else {
+            fail(text);
+          }
           break;
+        }
         case "rate_limited_retry":
-          bubble(`限流了, ${msg.delay_s}s 后重试…`);
+          transientBubble(`限流了, ${msg.delay_s}s 后重试…`);
           break;
         case "turn_interrupting":
-          bubble("等等, 我停——");
+          forgetPerm(sid);   // 叫停会连着把该会话的待批请求按拒绝收走
+          transientBubble("等等, 我停——");
           break;
+      }
+    }
+
+    /* 点宠物批条子: waiting 态 + 有未决请求时, 单击(非拖拽) = 批准。
+     * 走 REST /api/permissions/respond, 与主窗 WS 批复同一条 prompter
+     * 链路——请求已被主窗处理时 resolve 静默忽略 stale id, 幂等。 */
+    async function approvePendingPerm() {
+      const p = pet.pendingPerm;
+      if (!p || !p.request_id) return false;
+      const sid = p.session_id || new URLSearchParams(location.search).get("session") || "";
+      pet.pendingPerm = null;   // 先清: 防双击重复提交
+      try {
+        const r = await fetch("/api/permissions/respond", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ session_id: sid, request_id: p.request_id, approved: true }),
+        });
+        if (!r.ok) throw new Error("HTTP " + r.status);
+        pendingPerms.delete(permKey(sid));
+        if (pendingPerms.size) showLatestPerm();
+        else recomputeBase();   // 别的会话还在跑就继续打工, 全闲才回 idle
+        overlayOnce("jumping");
+        transientBubble("好, 批了！");
+        return true;
+      } catch (e) {
+        bubble("没批成…去主窗口看看");
+        return false;
       }
     }
 
@@ -381,8 +533,43 @@
     window.addEventListener("pointerup", endDrag);
     window.addEventListener("pointercancel", endDrag);
     spriteEl.addEventListener("click", () => {
-      if (!wasDrag && pet.base === "idle") overlayOnce("waving");
+      if (wasDrag) return;
+      if (pet.base === "waiting" && pet.pendingPerm) {
+        approvePendingPerm();
+        return;
+      }
+      if (pet.base === "idle") overlayOnce("waving");
     });
+
+    // 量图集里"角色最高点距格顶"的最小像素数（所有行所有帧取最小）。
+    // 不同宠物的头顶留白差异很大: 菲比有宽檐帽、头顶留白 ~30px,
+    // Hoops 的头发几乎顶格。文字栈的下沉量据此自适应, 别把气泡压头上。
+    function measureHeadroom(img, rows) {
+      try {
+        const w = img.naturalWidth, h = img.naturalHeight;
+        if (!w || !h) return null;
+        const cellH = Math.max(1, Math.floor(h / rows));
+        const c = document.createElement("canvas");
+        c.width = w; c.height = h;
+        const ctx = c.getContext("2d");
+        ctx.drawImage(img, 0, 0);
+        const data = ctx.getImageData(0, 0, w, h).data;
+        let headroom = cellH;
+        for (let row = 0; row < rows; row++) {
+          const top = row * cellH;
+          for (let dy = 0; dy < headroom; dy++) {
+            let hit = false;
+            for (let x = 0; x < w; x++) {
+              if (data[((top + dy) * w + x) * 4 + 3] > 16) { hit = true; break; }
+            }
+            if (hit) { headroom = dy; break; }
+          }
+        }
+        return headroom;
+      } catch {
+        return null;   // canvas 被污染等意外: 回落 CSS 默认下沉量
+      }
+    }
 
     // ---- 启动: 拉宠物列表 → 渲染 → 打招呼 ----
     (async () => {
@@ -400,7 +587,19 @@
           bubble("把宠物文件夹放进 pets 目录(设置里可查路径)", 0);
           return;
         }
-        sprite = new PetSprite(spriteEl, `/api/pets/${encodeURIComponent(chosen.id)}/sheet?_=${Date.now()}`, chosen.rows);
+        const sheetUrl = `/api/pets/${encodeURIComponent(chosen.id)}/sheet?_=${Date.now()}`;
+        sprite = new PetSprite(spriteEl, sheetUrl, chosen.rows);
+        // 气泡下沉量自适应: 量出头顶留白, 下沉 ≤ 留白-6px 视觉间隙,
+        // 至多 22px（Codex 契约格顶留白量级）; 头顶顶格的宠物就不下沉。
+        const mimg = new Image();
+        mimg.onload = () => {
+          const headroom = measureHeadroom(mimg, chosen.rows);
+          if (headroom != null) {
+            const sink = Math.max(0, Math.min(22, headroom - 6));
+            $("pet-text").style.marginBottom = `-${sink}px`;
+          }
+        };
+        mimg.src = sheetUrl;   // 同一 URL, 走 PetSprite 已建的 HTTP 缓存
         sprite.play("idle");
         overlayOnce("waving");
         bubble("你好呀");
@@ -420,22 +619,48 @@
     let ch = null;
     try { ch = new BroadcastChannel("xcode-pet"); } catch { }
     const PET_EVT = new Set(["turn_started", "tool_use_started", "tool_result",
-      "permission_request", "await_output", "turn_done", "error",
-      "rate_limited_retry", "turn_interrupting"]);
+      "permission_request", "permission_resolved", "await_output", "turn_done",
+      "error", "rate_limited_retry", "turn_interrupting"]);
     let seq = 0;
+    /* 权限气泡要展示具体命令: 从工具入参里取主字段压成一行 */
+    function permCmdSummary(input) {
+      try {
+        const d = JSON.parse(input || "{}");
+        const raw = String(d.command || d.file_path || d.path || d.pattern || d.url || "");
+        return raw.replace(/\s+/g, " ").trim().slice(0, 80);
+      } catch { return ""; }
+    }
     window.xcodePet = {
-      onEvent(msg) {
+      // sid 由 app.js handleServerMessage 调用时传入（本 IIFE 里没有这个变量,
+      // 早期版本在这里读裸名 sid —— 每条无 session_id 的服务端事件都抛
+      // ReferenceError, 把 turn_done/tool_result 的处理一起炸掉, 表现为
+      // 正文照常流出但永远转圈、工具卡停在"运行中"、点停止无反应）
+      onEvent(msg, sid) {
         if (!msg || !PET_EVT.has(msg.type)) return;
-        try { ch && ch.postMessage(msg); } catch { }
+        // 补会话 id: 桌宠"点宠物批准"要按 session_id 定位批复端点
+        let withSid = (msg.session_id != null) ? msg
+          : { ...msg, session_id: sid != null ? sid : null };
+        // 权限请求要标注会话名 + 具体命令（多会话聚合后宠物说得出"谁想跑什么"）
+        if (withSid.type === "permission_request") {
+          let title = "";
+          try { title = window.xcodeSessionTitle?.(withSid.session_id) || ""; } catch { }
+          withSid = {
+            ...withSid,
+            session_title: title,
+            command_summary: permCmdSummary(withSid.input),
+          };
+        }
+        try { ch && ch.postMessage(withSid); } catch { }
         try {
-          localStorage.setItem("xc-pet-evt", JSON.stringify({ ...msg, __n: ++seq }));
+          localStorage.setItem("xc-pet-evt", JSON.stringify({ ...withSid, __n: ++seq }));
         } catch { }
       },
     };
 
     // 召唤入口: 底栏按钮 + 设置页按钮。悬浮窗是 Tauri 命令开的,
-    // 其他环境(Electron/浏览器)没有桥——底栏按钮藏掉, 设置按钮置灰提示
-    const petFloat = () => window.xcodeDesktopPet.petFloat().catch(e => console.error("[pet]", e));
+    // 其他环境(Electron/浏览器)没有桥——底栏按钮藏掉, 设置按钮置灰提示。
+    // scale 传当前缩放, 开窗即按用户设置定尺寸。
+    const petFloat = () => window.xcodeDesktopPet.petFloat(pref().scale).catch(e => console.error("[pet]", e));
     const btn = $("btn-pet");
     if (btn) {
       if (!window.xcodeDesktopPet) btn.hidden = true;
@@ -461,6 +686,29 @@
           const r = await fetch("/api/pets/open-dir", { method: "POST" });
           if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || "HTTP " + r.status);
         } catch (e) { toast("打开失败: " + e.message); }
+      });
+    }
+
+    // ---- 大小滑杆: 50%–200% 写 pref().scale 并持久化。有桌面桥时
+    //      即时 resize 悬浮窗（storage 事件也会通知已开的悬浮窗,
+    //      这里直接调是双保险: 桥可能在 storage 事件送达前尚未就绪）。
+    const PET_SCALE_RANGE = [0.5, 2];
+    const clampScale = (v) => {
+      const n = Number(v);
+      if (!Number.isFinite(n)) return 1;
+      return Math.min(PET_SCALE_RANGE[1], Math.max(PET_SCALE_RANGE[0], n));
+    };
+    const sizeInput = $("pet-size");
+    if (sizeInput) {
+      const cur = clampScale(pref().scale);
+      sizeInput.value = String(Math.round(cur * 100));
+      $("pet-size-val").textContent = `${Math.round(cur * 100)}%`;
+      sizeInput.addEventListener("input", () => {
+        const pct = parseInt(sizeInput.value, 10) || 100;
+        $("pet-size-val").textContent = `${pct}%`;
+        const s = clampScale(pct / 100);
+        savePref({ ...pref(), scale: s });
+        try { window.xcodeDesktopPet?.resizePet?.(s); } catch { }
       });
     }
     // 刷新: 重扫宠物目录并重绘列表(带 cache-bust, 刚替换的精灵图也能立即生效)

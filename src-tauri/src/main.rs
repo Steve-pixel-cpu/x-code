@@ -424,6 +424,42 @@ fn start_drag_main(app: AppHandle) {
 
 // ---------- 桌宠悬浮窗（pet） ----------
 
+/// 桌宠悬浮窗基准尺寸（逻辑像素, ×"宠物大小"滑杆倍率）。内容自底向上:
+/// 精灵格 208 + 状态行/气泡 ~150(权限气泡带命令, 最坏 4-5 行) - 下沉
+/// 重叠 22 + 间距 6 ≈ 342, 留余量取 360——窗口必须装得下最坏内容,
+/// 否则长气泡/大倍率时贴边被裁(用户观感即"放大到最大会截断")。
+const PET_BASE_W: f64 = 280.0;
+const PET_BASE_H: f64 = 360.0;
+
+/// 宠物大小滑杆合法区间（pet.js clampScale 同值）
+fn clamp_pet_scale(scale: Option<f64>) -> f64 {
+    match scale {
+        Some(s) if s.is_finite() => s.clamp(0.5, 2.0),
+        _ => 1.0,
+    }
+}
+
+/// 把窗口整体夹回它所在的显示器。桌宠是无边框透明小窗, 用户可拖到
+/// 任意位置, 但创建/改尺寸后必须保证整窗在屏——默认位置(1200,600)
+/// 在小屏/高缩放下会把一半窗口开出屏幕外。
+fn clamp_pet_into_monitor(win: &tauri::WebviewWindow) {
+    let Ok(Some(mon)) = win.current_monitor() else {
+        return;
+    };
+    let (Ok(pos), Ok(size)) = (win.outer_position(), win.inner_size()) else {
+        return;
+    };
+    let sf = win.scale_factor().unwrap_or(1.0);
+    let p = pos.to_logical::<f64>(sf);
+    let s = size.to_logical::<f64>(sf);
+    let msf = mon.scale_factor();
+    let mo = mon.position().to_logical::<f64>(msf);
+    let ms = mon.size().to_logical::<f64>(msf);
+    let x = (p.x.max(mo.x)).min(mo.x + ms.width - s.width).max(mo.x);
+    let y = (p.y.max(mo.y)).min(mo.y + ms.height - s.height).max(mo.y);
+    let _ = win.set_position(tauri::LogicalPosition::new(x, y));
+}
+
 /// pet.html 的完整地址: 后端端口 + token。cb 时间戳与主窗同理,
 /// 绕开 WebView2 对同 URL 的启发式缓存（否则改版后可能加载旧页面）。
 fn pet_url(token: &str) -> String {
@@ -442,15 +478,21 @@ fn pet_url(token: &str) -> String {
 /// 开关桌宠悬浮窗: 没开着则创建——透明 + 无边框 + 置顶 + 不进任务栏,
 /// 尺寸只够放下 192x208 的精灵图与其上方的状态行/两行气泡; 已开着则关闭
 /// (再点一次桌宠按钮 = 收起)。
+/// scale: 宠物大小(0.5–2.0), 主窗设置页滑杆的当前值, 决定开窗尺寸。
 /// 必须 async: 同步命令在主线程执行, 而 WebviewWindowBuilder::build()
 /// 内部要向主线程派发创建——同步形态自己等自己, 实测整个应用卡死
 /// (点了按钮页面无响应)。async 命令跑在异步线程池, 创建正常派发。
 #[tauri::command]
-async fn open_pet_window(app: AppHandle, token: String) -> Result<(), String> {
+async fn open_pet_window(
+    app: AppHandle,
+    token: String,
+    scale: Option<f64>,
+) -> Result<(), String> {
     if let Some(win) = app.get_webview_window("pet") {
         let _ = win.close();
         return Ok(());
     }
+    let s = clamp_pet_scale(scale);
     let url = pet_url(&token);
     WebviewWindowBuilder::new(
         &app,
@@ -464,7 +506,7 @@ async fn open_pet_window(app: AppHandle, token: String) -> Result<(), String> {
     .skip_taskbar(true)
     .resizable(false)
     .shadow(false)
-    .inner_size(236.0, 300.0)   // 6 顶距 + 状态行 19 + gap 4 + 两行气泡 49 + 尾巴 6 + 精灵 208 + 6 底距 ≈ 298
+    .inner_size(PET_BASE_W * s, PET_BASE_H * s)   // 基准尺寸 × 宠物大小
     // 右下角附近出生, 用户可拖到任意位置
     .position(1200.0, 600.0)
     .visible(true)
@@ -473,6 +515,10 @@ async fn open_pet_window(app: AppHandle, token: String) -> Result<(), String> {
     .initialization_script(BRIDGE_JS)
     .build()
     .map_err(|e| format!("创建桌宠窗口失败: {e}"))?;
+    // 默认出生点(1200,600)在大尺寸/小屏组合下可能开出屏幕外, 夹回来
+    if let Some(w) = app.get_webview_window("pet") {
+        clamp_pet_into_monitor(&w);
+    }
     Ok(())
 }
 
@@ -507,6 +553,43 @@ fn set_pet_click_through(app: AppHandle, ignore: bool) {
 async fn move_pet_window(app: AppHandle, x: f64, y: f64) {
     if let Some(win) = app.get_webview_window("pet") {
         let _ = win.set_position(tauri::LogicalPosition::new(x, y));
+    }
+}
+
+/// 宠物大小热调: 主窗滑杆 / pet 页启动时把缩放同步到窗口尺寸。
+/// async 形态理由同 move_pet_window——set_size 要向主线程派发。
+/// 等值跳过: 窗口创建时已按目标尺寸建好, 无谓的 set_size 会触发
+/// WebView2 重排, 有把透明底打回白色"框"的风险。
+#[tauri::command]
+async fn resize_pet_window(app: AppHandle, scale: f64) {
+    let s = clamp_pet_scale(Some(scale));
+    if let Some(win) = app.get_webview_window("pet") {
+        let target = tauri::LogicalSize::new(PET_BASE_W * s, PET_BASE_H * s);
+        let sf = win.scale_factor().unwrap_or(1.0);
+        let cur = win.inner_size().ok().map(|p| p.to_logical::<f64>(sf));
+        if let Some(cur) = &cur {
+            if (cur.width - target.width).abs() < 0.5
+                && (cur.height - target.height).abs() < 0.5
+            {
+                return;
+            }
+        }
+        // 底边锚定: 宠物站在窗口底部, 高度变化必须朝上伸缩——保持左上角
+        // 不动的话, 变大后底锚内容整体沉进屏幕外, 只剩头顶露在旧窗口里。
+        let old = win.outer_position().ok().map(|p| p.to_logical::<f64>(sf));
+        let mut new_x = old.as_ref().map(|p| p.x).unwrap_or(0.0);
+        let mut new_y = old.as_ref().map(|p| p.y).unwrap_or(0.0)
+            + cur.map(|c| c.height - target.height).unwrap_or(0.0);
+        // 再夹回所在显示器, 别缩放完一半在屏幕外
+        if let Ok(Some(mon)) = win.current_monitor() {
+            let msf = mon.scale_factor();
+            let mo = mon.position().to_logical::<f64>(msf);
+            let ms = mon.size().to_logical::<f64>(msf);
+            new_x = (new_x.max(mo.x)).min(mo.x + ms.width - target.width);
+            new_y = (new_y.max(mo.y)).min(mo.y + ms.height - target.height);
+        }
+        let _ = win.set_size(target);
+        let _ = win.set_position(tauri::LogicalPosition::new(new_x, new_y));
     }
 }
 
@@ -576,15 +659,17 @@ const BRIDGE_JS: &str = r#"
       }
     };
     window.xcodeDesktopPet = {
-      petFloat: () => petInvoke('open_pet_window', {
+      petFloat: (scale) => petInvoke('open_pet_window', {
         token: (document.cookie.match(/(?:^|;\s*)xcode_token=([^;]*)/) || [])[1]
           ? decodeURIComponent((document.cookie.match(/(?:^|;\s*)xcode_token=([^;]*)/) || [])[1])
-          : ''
+          : '',
+        scale: Number(scale) || 1
       }),
       petClose: () => petInvoke('close_pet'),
       startDragPet: () => petInvoke('start_drag_pet'),
       setClickThrough: (ignore) => petInvoke('set_pet_click_through', { ignore: !!ignore }),
       movePet: (x, y) => petInvoke('move_pet_window', { x: Number(x), y: Number(y) }),
+      resizePet: (scale) => petInvoke('resize_pet_window', { scale: Number(scale) || 1 }),
     };
   }
   // 2) DOM 相关: 注入时机 documentElement 可能尚未创建 → 空值安全 + 就绪后补挂
@@ -637,7 +722,8 @@ fn main() {
             close_pet,
             start_drag_pet,
             set_pet_click_through,
-            move_pet_window
+            move_pet_window,
+            resize_pet_window
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

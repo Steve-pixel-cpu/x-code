@@ -26,7 +26,9 @@
    margin-bottom 负值 = 整栈下沉 18px, 叠进精灵图顶部的透明空档
    (单格 208 高, 角色头顶留了约 30px 透明边), 否则气泡和帽子之间
    隔着整段透明区, 视觉上悬空。
-   状态行与气泡互斥显示(见 pet.js), 交替时高度变化由浏览器平滑过渡 */
+   状态行与气泡互斥显示(见 pet.js), 交替时高度变化由浏览器平滑过渡。
+   zoom 接 --pet-scale(设置页"宠物大小"滑杆, pet.js 写入): 对子元素
+   而非 fixed 容器缩放, 避开 zoom 作用在 fixed 定位上的布局怪癖 */
 #pet-text {
   display: flex;
   flex-direction: column;
@@ -34,6 +36,11 @@
   gap: 4px;
   margin-bottom: -18px;
   pointer-events: none;
+  zoom: var(--pet-scale, 1);
+  /* 文字栈压在精灵上层: 负 margin 会把状态/气泡沉进精灵图范围,
+     精灵是后绘的兄弟节点, 不抬 z 的话帧图一顶到头顶就会盖住文字 */
+  position: relative;
+  z-index: 1;
 }
 
 #pet-sprite {
@@ -45,6 +52,7 @@
   filter: drop-shadow(0 6px 10px rgba(0, 0, 0, .35));
   will-change: transform;
   transform-origin: 50% 82%;      /* 拖动倾斜/落地回弹的支点在脚部 */
+  zoom: var(--pet-scale, 1);      /* 与文字栈同一缩放系数 */
 }
 #pet-sprite:active { cursor: grabbing; }
 #pet-sprite.pet-land {
@@ -89,7 +97,8 @@
 /* 气泡: 常规流内元素(文字栈第二行, 由 #pet-text 负 margin 下沉),
    不再绝对定位; 小尾巴指向下方人物头顶 */
 #pet-bubble {
-  max-width: 200px;
+  /* 上限随悬浮窗宽收敛: 缩放窗口变窄时气泡不许撑出窗口被裁字 */
+  max-width: min(240px, calc(100vw - 12px));
   font-size: 12px;
   line-height: 1.45;
   text-align: center;
