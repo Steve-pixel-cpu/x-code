@@ -209,35 +209,25 @@
    * 一处全局透出。RGB 保持原值只降 alpha(乘 --bg-surf, 随"壁纸亮度"滑块
    * 联动: 100% 最透 / 50% 默认 / 更低更实), 文字对比度不受影响 */
   :root[data-bg="1"]:not([data-fx="acrylic"]) {
-    --bg:        rgb(16 16 20 / calc(.62 * var(--bg-surf, 1)));
-    --surface:   rgb(23 23 29 / calc(.70 * var(--bg-surf, 1)));
-    --surface-2: rgb(29 29 36 / calc(.64 * var(--bg-surf, 1)));
-    --surface-3: rgb(38 38 47 / calc(.60 * var(--bg-surf, 1)));
-    --code-bg:   rgb(12 12 17 / calc(.58 * var(--bg-surf, 1)));
-    --code-head: rgb(19 19 24 / calc(.70 * var(--bg-surf, 1)));
-    --hover:     rgb(29 29 36 / calc(.50 * var(--bg-surf, 1)));
-    --active:    rgb(35 35 44 / calc(.52 * var(--bg-surf, 1)));
+    --bg:        rgb(16 16 20 / calc(.48 * var(--bg-surf, 1)));
+    --surface:   rgb(23 23 29 / calc(.55 * var(--bg-surf, 1)));
+    --surface-2: rgb(29 29 36 / calc(.50 * var(--bg-surf, 1)));
+    --surface-3: rgb(38 38 47 / calc(.46 * var(--bg-surf, 1)));
+    --code-bg:   rgb(12 12 17 / calc(.45 * var(--bg-surf, 1)));
+    --code-head: rgb(19 19 24 / calc(.55 * var(--bg-surf, 1)));
+    --hover:     rgb(29 29 36 / calc(.38 * var(--bg-surf, 1)));
+    --active:    rgb(35 35 44 / calc(.40 * var(--bg-surf, 1)));
   }
   :root[data-theme="light"][data-bg="1"]:not([data-fx="acrylic"]) {
-    --bg:        rgb(255 255 255 / calc(.62 * var(--bg-surf, 1)));
-    --surface:   rgb(255 255 255 / calc(.70 * var(--bg-surf, 1)));
-    --surface-2: rgb(243 243 245 / calc(.64 * var(--bg-surf, 1)));
-    --surface-3: rgb(234 234 238 / calc(.60 * var(--bg-surf, 1)));
-    --code-bg:   rgb(247 247 249 / calc(.58 * var(--bg-surf, 1)));
-    --code-head: rgb(239 239 242 / calc(.70 * var(--bg-surf, 1)));
-    --hover:     rgb(243 243 245 / calc(.50 * var(--bg-surf, 1)));
-    --active:    rgb(236 236 239 / calc(.52 * var(--bg-surf, 1)));
-    --accent-soft: rgb(241 242 244 / calc(.72 * var(--bg-surf, 1)));
-  }
-  /* 半透明后花哨壁纸会让等宽小字发花: 四个大面积/重文字面板挂一层
-   * 页面内磨砂(acrylic 的 #input-card 同款先例)。聊天正文区壁纸已经
-   * #bg-scrim 压暗, 不再逐元素加 blur, 控制 GPU 开销 */
-  :root[data-bg="1"]:not([data-fx="acrylic"]) #plan-panel,
-  :root[data-bg="1"]:not([data-fx="acrylic"]) #input-card,
-  :root[data-bg="1"]:not([data-fx="acrylic"]) .td-wrap,
-  :root[data-bg="1"]:not([data-fx="acrylic"]) .to-wrap {
-    -webkit-backdrop-filter: blur(14px) saturate(1.25);
-    backdrop-filter: blur(14px) saturate(1.25);
+    --bg:        rgb(255 255 255 / calc(.48 * var(--bg-surf, 1)));
+    --surface:   rgb(255 255 255 / calc(.55 * var(--bg-surf, 1)));
+    --surface-2: rgb(243 243 245 / calc(.50 * var(--bg-surf, 1)));
+    --surface-3: rgb(234 234 238 / calc(.46 * var(--bg-surf, 1)));
+    --code-bg:   rgb(247 247 249 / calc(.45 * var(--bg-surf, 1)));
+    --code-head: rgb(239 239 242 / calc(.55 * var(--bg-surf, 1)));
+    --hover:     rgb(243 243 245 / calc(.38 * var(--bg-surf, 1)));
+    --active:    rgb(236 236 239 / calc(.40 * var(--bg-surf, 1)));
+    --accent-soft: rgb(241 242 244 / calc(.55 * var(--bg-surf, 1)));
   }
   /* 普通主题 + 壁纸: 侧栏本体降到 88% 不透明度, dock 同步透明跟随,
    * 免得播放条比侧栏更实、在底部显出一截白带 */
