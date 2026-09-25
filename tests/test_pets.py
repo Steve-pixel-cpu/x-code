@@ -181,11 +181,12 @@ def test_list_pets_priority_and_cache(tmp_path, monkeypatch):
 # ------------------------------------------------------------
 
 def test_builtin_pet_ships():
-    """仓库必须带内置宠物(xcode-cat), 否则开箱无宠物可用。"""
+    """仓库必须带内置宠物(feibi/kunge 两只, 不再多带), 否则开箱无宠物可用。"""
     root = Path(server.__file__).resolve().parent
-    sheet = root / "pets" / "xcode-cat" / "spritesheet.png"
-    assert (root / "pets" / "xcode-cat" / "pet.json").exists()
-    assert server._image_size(sheet) == (1536, 1872)
+    for pid, rows in (("feibi", 11), ("kunge", 9)):
+        folder = root / "pets" / pid
+        assert (folder / "pet.json").exists(), pid
+        assert server._image_size(folder / "spritesheet.webp") == (1536, rows * 208), pid
 
 
 def _isolated_pets(tmp_path, monkeypatch):
@@ -238,3 +239,20 @@ def test_pet_html_page_and_token_gate(client, monkeypatch):
     assert ok.status_code == 200
     assert ok.headers["content-type"].startswith("text/html")
     assert "pet-float" in ok.text
+
+
+def test_bundled_pets_pass_contract():
+    """仓库 pets/ 里的内置宠物(随安装包分发)必须全部过扫描契约:
+    图集 1536 宽、行数 9(v1)/11(v2)、manifest 合规。内置默认宠物
+    就 feibi/kunge 两只——精确集合断言, 多带少带都拦。新增或替换
+    内置宠物时这里兜底——坏图集在测试期就被拦下, 而不是装到用户
+    机器上表现为桌宠白屏。"""
+    repo_pets = Path(server.__file__).resolve().parent / "pets"
+    bundled = sorted(d for d in repo_pets.iterdir() if d.is_dir())
+    assert {d.name for d in bundled} == {"feibi", "kunge"}
+    for folder in bundled:
+        found = server._scan_pet_folder(folder, "install")
+        assert found is not None, f"内置宠物 {folder.name} 没过契约校验"
+        info, sheet = found
+        assert info["id"] == folder.name      # id 即文件夹名(扫描层的约定)
+        assert sheet.is_file()

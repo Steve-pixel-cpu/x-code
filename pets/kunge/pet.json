@@ -1,0 +1,6 @@
+{
+  "id": "hoops",
+  "displayName": "Hoops",
+  "description": "A compact chibi basketball pet based on the provided character.",
+  "spritesheetPath": "spritesheet.webp"
+}
