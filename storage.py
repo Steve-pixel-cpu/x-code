@@ -1,5 +1,6 @@
 import json
 import os
+import threading
 import uuid
 from typing import Literal, List
 from datetime import datetime, timezone
@@ -55,16 +56,30 @@ class ModelRecord(BaseModel):
 
 class SessionStore:
 
+    # 进程内互斥: 大记录(几十 KB 的工具结果)经缓冲写入可能拆成多次
+    # write() 系统调用, 并发线程交错时另一条记录的半截插进中间——
+    # JSONL 出现"一行撕成多行"的结构性损坏(20260925-022538 实测)。
+    _append_lock = threading.Lock()
+
     def __init__(self, storage_dir: Path):
         self._storage_dir = storage_dir
 
     def  _append_entry(self, path: Path, entry):
-        """追加一条 JSONL 记录。entry 是已 dump 的 dict 或 pydantic 模型。"""
+        """追加一条 JSONL 记录。entry 是已 dump 的 dict 或 pydantic 模型。
+
+        整条记录序列化成一段 bytes 后**单次** write 追加: json.dumps 的
+        输出不可能含裸换行(字符串内控制字符一律转义), 单次写入再配合
+        O_APPEND 语义, 记录要么整行落下要么不落, 不会被别的并发写半路
+        撕开。代理字符(上游 errors="surrogateescape" 之类漏进来的)在
+        编码时就地转 U+FFFD, 保证 utf-8 编码永不抛错、永不吐裸字节。"""
         path.parent.mkdir(parents=True, exist_ok=True)
         data = entry.model_dump() if isinstance(entry, BaseModel) else entry
-        with open(path, "a", encoding='utf-8') as f:
-            f.write(json.dumps(data, ensure_ascii=False))
-            f.write("\n")
+        text = json.dumps(data, ensure_ascii=False)
+        payload = (text.encode("utf-8", errors="surrogatepass")
+                   .decode("utf-8", errors="replace")
+                   .encode("utf-8") + b"\n")
+        with self._append_lock, open(path, "ab") as f:
+            f.write(payload)
 
 
     def save_message(self, session_id: str, message: Message, parent_uuid: Optional[str]) -> str:

@@ -366,12 +366,36 @@ def _window_line_count(lines: list[str], budget: int) -> int:
     return len(lines)
 
 
+def _looks_binary(head: bytes) -> bool:
+    """前 _BINARY_SNIFF_BYTES 字节里含 NUL 即按二进制处理——文本文件
+    （源码/JSON/日志/markdown, 任何语言任何编码）不会出现 0x00,
+    二进制格式(图片/压缩包/对象文件)的头里几乎必有。"""
+    return b"\x00" in head
+
+
+_BINARY_SNIFF_BYTES = 8192
+
+
 def read_tool(params: dict, workdir: Optional[str] = None) -> str:
     """读文本文件。大文件必须用 offset/limit 按行取窗口: 整读超窗口时
     返回首页 + 明确翻页指令（"continue with offset=N"）, 而不是掐中段——
     分页是照抄参数就能走的确定路径, 不依赖模型自己想出绕路方案。
     errors="replace": 不可解码字节就地变 U+FFFD, 不再整读报错。"""
     path = resolve_path(params.get('path', ''), workdir)
+    try:
+        with open(path, 'rb') as f:
+            head = f.read(_BINARY_SNIFF_BYTES)
+    except FileNotFoundError:
+        return f'ERROR: file not found {path}'
+    except OSError as e:
+        return f'ERROR: cannot read {path}: {e}'
+    # 二进制嗅探: 图片/压缩包/编译产物等不是文本, 读出来只会是一屏
+    # 乱码(还曾把 JSONL 会话档案撕出坏行)。明确拒绝并给出替代路径。
+    if _looks_binary(head):
+        return (f"ERROR: {path} is a binary file ({len(head)}+ bytes, "
+                f"contains NUL/non-text bytes). read_file only handles text. "
+                f"For metadata use bash with stat/file; to inspect bytes use "
+                f"bash with xxd/od; images cannot be viewed as text.")
     try:
         with open(path, 'r', encoding="utf-8", errors="replace") as f:
             lines = f.readlines()

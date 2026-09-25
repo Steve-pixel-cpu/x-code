@@ -407,3 +407,38 @@ def TOOL_REQUIREMENTS_FIXTURE():
     return {"write_file": PermissionMode.WORKSPACE_WRITE,
             "edit_file": PermissionMode.WORKSPACE_WRITE,
             "read_file": PermissionMode.PLAN}
+
+
+# ------------------------------------------------------------
+# 工具层/存储层的健壮性(事故: read_file 读 PNG 把会话 JSONL 撕出坏行)
+# ------------------------------------------------------------
+
+def test_read_tool_refuses_binary_file(tmp_path):
+    from tools import read_tool
+    png = tmp_path / "x.png"
+    png.write_bytes(b"\x89PNG\r\n\x1a\n\x00\x00" + b"\xff" * 100)
+    out = read_tool({"path": str(png)}, str(tmp_path))
+    assert out.startswith("ERROR:")
+    assert "binary" in out
+    # 文本文件(含 CJK/emoji, 无 NUL)照常可读
+    txt = tmp_path / "a.txt"
+    txt.write_text("你好 world\n", encoding="utf-8")
+    assert "你好 world" in read_tool({"path": str(txt)}, str(tmp_path))
+
+
+def test_store_append_survives_hostile_content(tmp_path):
+    """工具结果带裸换行/控制字符/代理字符时, JSONL 每条记录仍恰好一行:
+    json.dumps 转义控制字符, 代理字符就地转 U+FFFD, 落盘永不吐裸字节。"""
+    from storage import SessionStore
+    from models import Message
+    store = SessionStore(tmp_path)
+    hostile = ("line1\nline2\r\n\x00null \x1f ctrl \ufffd replacement "
+               "\udc80 surrogate \udcff pair")
+    store.save_message("s-x", Message.tool_result(
+        id="t1", name="bash", output=hostile, is_error=False), parent_uuid=None)
+    raw = (tmp_path / "s-x.jsonl").read_bytes()
+    assert raw.count(b"\n") == 1                       # 单条记录单行, 无裸字节
+    lines = raw.decode("utf-8").splitlines()           # 能按 utf-8 解码
+    loaded = json.loads(lines[0])                      # 且是合法 JSON
+    out = loaded["message"]["content"][0]["output"]
+    assert "line1" in out and "line2" in out           # 内容保真(转义形态)
