@@ -224,6 +224,68 @@ def test_stream_kwargs_system_and_tools():
     assert "tools" not in captured
 
 
+def test_stream_kwargs_reasoning_effort_mapping():
+    """thinking 档位映射 reasoning_effort: 默认/按轮覆盖都生效; max 无对应
+    档位映射成 high（端点缺省多为 medium, 保住"最大思考"语义）。"""
+    c = _client()   # 实例默认 high
+    captured = {}
+    def fake_create(**kw):
+        captured.update(kw)
+        return iter([_chunk(finish="stop")])
+    pytest.MonkeyPatch().setattr(c.raw_client.chat.completions, "create", fake_create)
+
+    c.stream(system_prompt=[], messages=[Message.user_text("hi")])
+    assert captured["reasoning_effort"] == "high"
+
+    c.stream(system_prompt=[], messages=[Message.user_text("hi")],
+             thinking_level="low")
+    assert captured["reasoning_effort"] == "low"
+
+    c.stream(system_prompt=[], messages=[Message.user_text("hi")],
+             thinking_level="max")
+    assert captured["reasoning_effort"] == "high"
+
+
+def _bad_request(message: str) -> openai.BadRequestError:
+    req = httpx.Request("POST", "https://api.test/v1/chat/completions")
+    return openai.BadRequestError(message, response=httpx.Response(400, request=req),
+                                  body=None)
+
+
+def test_reasoning_effort_400降级剥参重试并禁用():
+    """端点不认 reasoning_effort（报错文本未必点名参数）: 剥参重建一次,
+    之后本实例不再附加。"""
+    c = _client()
+    calls: list[dict] = []
+    def create(**kw):
+        calls.append(kw)
+        if len(calls) == 1:
+            raise _bad_request("Extra inputs are not permitted")   # 不点名参数
+        return iter([_chunk(delta=NS(content="ok"), finish="stop")])
+    pytest.MonkeyPatch().setattr(c.raw_client.chat.completions, "create", create)
+
+    events = c.stream(system_prompt=[], messages=[Message.user_text("hi")])
+    assert "".join(e.text for e in events if hasattr(e, "text")) == "ok"
+    assert "reasoning_effort" in calls[0]
+    assert "reasoning_effort" not in calls[1]
+    assert c._reasoning_effort_ok is False
+
+    c.stream(system_prompt=[], messages=[Message.user_text("again")])
+    assert "reasoning_effort" not in calls[2]
+
+
+def test_reasoning_effort_降级后真实400照常抛出():
+    """剥参重试仍 400: 是真实请求错误, 映射成 RetryHttpApiError 抛出。"""
+    c = _client()
+    def create(**kw):
+        raise _bad_request("Invalid model")
+    pytest.MonkeyPatch().setattr(c.raw_client.chat.completions, "create", create)
+    with pytest.raises(RetryHttpApiError) as ei:
+        c.stream(system_prompt=[], messages=[Message.user_text("hi")])
+    assert ei.value.status_code == 400
+    assert c._reasoning_effort_ok is False
+
+
 # ---------------------------------------------------------------------------
 # 错误映射与重试
 # ---------------------------------------------------------------------------

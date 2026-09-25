@@ -795,6 +795,8 @@ def print_status(runtime: "ConversationRuntime") -> None:
     print(c_dim(SEPARATOR))
     print(field_line("输入", f"{input_tokens:,} tokens"))
     print(field_line("输出", f"{output_tokens:,} tokens"))
+    print(field_line("缓存写入", f"{usage.cache_creation_input_tokens:,} tokens"))
+    print(field_line("缓存读取", f"{usage.cache_read_input_tokens:,} tokens"))
     print(field_line("合计", f"{total_tokens:,} tokens"))
     print(c_dim(SEPARATOR))
     print(field_line("轮数", f"{turns:,}"))
@@ -802,7 +804,10 @@ def print_status(runtime: "ConversationRuntime") -> None:
     print(field_line("权限模式", runtime.permission_mode().as_str()))
     print(field_line("思考等级", runtime.thinking_level()))
     latest = runtime.usage().current_turn_usage()
-    print(field_line("最近一轮", f"{latest.input_tokens:,} 入 / {latest.output_tokens:,} 出"))
+    print(field_line(
+        "最近一轮",
+        f"{latest.input_tokens:,} 入 / {latest.output_tokens:,} 出"
+        f"（缓存读 {latest.cache_read_input_tokens:,}）"))
     print(c_dim(SEPARATOR))
 
 def do_compact(runtime: ConversationRuntime):

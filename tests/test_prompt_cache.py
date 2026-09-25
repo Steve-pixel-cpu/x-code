@@ -1,9 +1,11 @@
 """prompt caching 规格钉子: 断点位置、边界标记不外发、端点降级。
 
-缓存的价值前提是"前缀逐字节一致": tools 末位、system 静态段、messages
-最后一块（滚动）三处断点把上一迭代结束时的全部历史钉成下一调用的缓存
-前缀。断点打错位置（比如打在动态段）会缓存永远 miss; 打进共享的 tools
-spec 列表会污染其他会话——这两类错误都在这里钉死。
+缓存的价值前提是"前缀逐字节一致": tools 末位、system 静态段、system
+动态段、messages 最后一块（滚动）四处断点（Anthropic 上限）把上一迭代
+结束时的全部历史钉成下一调用的缓存前缀; 动态段会话内字节级稳定, 它的
+断点在 messages 前缀断裂时（压缩换视图/计划模式切换）保住 tools+整个
+system 的缓存读。断点数超 4 会被 API 拒绝; 打进共享的 tools spec 列表
+会污染其他会话——这两类错误都在这里钉死。
 
 运行方式（在 x-code 目录下）:
     uv run pytest tests/test_prompt_cache.py -v
@@ -56,7 +58,7 @@ def _bad_request(message: str) -> anthropic.BadRequestError:
 # 断点位置 — system 边界拆分、tools 末位、messages 滚动
 # ------------------------------------------------------------
 
-def test_system_静态段打断点_动态段不打_边界标记不外发():
+def test_system_静动态段各打断点_边界标记不外发():
     client, captured = make_client()
     client.stream(
         system_prompt=["STATIC RULES", SYSTEM_PROMPT_DYNAMIC_BOUNDARY, "dynamic env"],
@@ -66,8 +68,27 @@ def test_system_静态段打断点_动态段不打_边界标记不外发():
     system = captured[0]["system"]
     assert system == [
         {"type": "text", "text": "STATIC RULES", "cache_control": CACHE_CONTROL},
-        {"type": "text", "text": "dynamic env"},
+        {"type": "text", "text": "dynamic env", "cache_control": CACHE_CONTROL},
     ]
+
+
+def test_断点总数不超上限4():
+    """tools 末位 + system 静态 + system 动态 + messages 末位 = 恰好 4,
+    再多任何一处都会被 Anthropic 400 拒绝。"""
+    tools = [{"name": "read_file", "input_schema": {}},
+             {"name": "bash", "input_schema": {}}]
+    client, captured = make_client(tools=tools)
+    client.stream(
+        system_prompt=["STATIC", SYSTEM_PROMPT_DYNAMIC_BOUNDARY, "dyn"],
+        messages=[Message.user_text("hi")],
+    )
+
+    kw = captured[0]
+    count = sum(t.get("cache_control") is not None for t in kw["tools"])
+    count += sum(b.get("cache_control") is not None for b in kw["system"])
+    count += sum(b.get("cache_control") is not None
+                 for m in kw["messages"] for b in m["content"])
+    assert count == 4
 
 
 def test_messages_滚动断点落在最后一块():

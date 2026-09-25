@@ -431,8 +431,9 @@ class SystemPromptBuilder:
         sections.append(self._subagents_section())
 
         # ══════ 缓存边界 ══════
-        # 这个标记告诉 API 客户端:
-        # 上面的内容可以缓存，下面的每次可能不同
+        # 这个标记告诉 API 客户端把 sections 分成两段: 上面跨会话逐字节
+        # 稳定, 下面会话内稳定但含会话相关内容（日期/git 快照/CLAUDE.md）
+        # 且计划模式段会插在边界之后。两段各自打断点（共 4 处上限）。
         sections.append(SYSTEM_PROMPT_DYNAMIC_BOUNDARY)
 
         # 动态部分（每次会话可能不同）

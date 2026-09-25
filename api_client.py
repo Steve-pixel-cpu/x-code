@@ -187,10 +187,26 @@ THINKING_LEVEL_TO_BUDGET = {
     "high": 16384,
 }
 
+# 思考等级 → OpenAI reasoning_effort（OpenAI 协议线）。跨端点没有统一的
+# 思考参数, 这里取事实标准 reasoning_effort（OpenAI 官方, 多数兼容端点
+# 跟随; DeepSeek/Qwen 等不认的端点报 400 时剥参重试一次并本实例禁用,
+# 见 OpenAIApiClient.stream 的降级分支）。"max" 无对应档位: OpenAI 最高
+# 就是 high, 且端点缺省多为 medium, 映射成 high 才保住"最大思考"语义。
+THINKING_LEVEL_TO_REASONING_EFFORT = {
+    "low": "low",
+    "medium": "medium",
+    "high": "high",
+    "max": "high",
+}
+
 # --- prompt caching ---
-# 断点（tools 末位 → system 静态段 → messages 最后一块滚动）之间的前缀在
-# 迭代间逐字节一致, 命中后服务端对前缀只按缓存读计价/预填充——长会话里
-# 每步的输入成本和首 token 延迟都随历史增长而不再随之线性变贵变慢。
+# 断点（tools 末位 → system 静态段 → system 动态段 → messages 最后一块滚动）
+# 之间的前缀在迭代间逐字节一致, 命中后服务端对前缀只按缓存读计价/预填充
+# ——长会话里每步的输入成本和首 token 延迟都随历史增长而不再随之线性变贵
+# 变慢。动态段（环境/git 快照/CLAUDE.md/技能清单）会话内字节级稳定, 给它
+# 打断点是为 messages 前缀断裂的时机（压缩/MicroCompact 换视图、计划模式
+# 切换）兜底: tools+整个 system 仍按缓存读, 只有 messages 部分全价。四处
+# 断点 = Anthropic 允许的上限。
 CACHE_CONTROL = {"type": "ephemeral"}
 
 _ansi_lock = threading.Lock()
@@ -547,9 +563,11 @@ class ClaudeApiClient(ApiClient):
                       thinking_level: Optional[str], use_cache: bool,
                       include_tools: bool = True,
                       model: Optional[str] = None) -> dict:
-        """组装请求参数。use_cache 时打三处 cache_control 断点: tools 末位、
-        system 静态段、messages 最后一块（滚动断点）。滚动断点让"上一迭代结束
-        时的全部历史"成为下一调用的缓存前缀, 全价只付一次。
+        """组装请求参数。use_cache 时打四处 cache_control 断点（上限）:
+        tools 末位、system 静态段、system 动态段、messages 最后一块（滚动
+        断点）。滚动断点让"上一迭代结束时的全部历史"成为下一调用的缓存前缀,
+        全价只付一次; 动态段断点在 messages 前缀断裂时（压缩换视图/计划
+        模式切换）保住 tools+整个 system 的缓存读。
         include_tools=False 用于非会话调用的 side-call（如压缩摘要器）:
         不给工具可调, 也不把工具声明白白算进输入。
         model 覆盖: None = 用实例默认（多会话共用 client 时按轮携带）。"""
@@ -561,7 +579,10 @@ class ClaudeApiClient(ApiClient):
                 block["cache_control"] = dict(CACHE_CONTROL)
             system_blocks.append(block)
         if dynamic:
-            system_blocks.append({"type": "text", "text": "\n\n".join(dynamic)})
+            block = {"type": "text", "text": "\n\n".join(dynamic)}
+            if use_cache:
+                block["cache_control"] = dict(CACHE_CONTROL)
+            system_blocks.append(block)
 
         kwargs: dict = {
             "model": model if model is not None else self.model,
@@ -915,6 +936,10 @@ class OpenAIApiClient(ApiClient):
         self._should_stop_provider = should_stop_provider
         self._on_event_provider = on_event_provider
         self._on_event: Optional[WireObserver] = None
+        # reasoning_effort 开关: 端点对它报 400 时降级关闭（见 stream() 里
+        # _open_stream 的兜底分支）, 与 ClaudeApiClient 的 cache_control
+        # 降级同一套模式。
+        self._reasoning_effort_ok = True
         self.model = model
         self.tools = tools or []
         self.emit_output = emit_output
@@ -985,9 +1010,11 @@ class OpenAIApiClient(ApiClient):
 
     def _build_kwargs(self, converted_messages: list[dict],
                       system_prompt: list[str], include_tools: bool,
+                      thinking_level: Optional[str] = None,
                       model: Optional[str] = None) -> dict:
         """组装请求参数。OpenAI 协议无 cache_control 断点（各家服务端自动
-        前缀缓存）; thinking 档位 v1 不映射（无跨端点统一参数）。
+        前缀缓存）; thinking 档位映射 reasoning_effort（端点不认时 400 剥参
+        降级, 见 stream() 的 _open_stream）。
         model 覆盖: None = 用实例默认（多会话共用 client 时按轮携带）。"""
         kwargs: dict = {
             "model": model if model is not None else self.model,
@@ -1002,6 +1029,11 @@ class OpenAIApiClient(ApiClient):
             ] + converted_messages
         if self.tools and include_tools:
             kwargs["tools"] = _openai_tools(self.tools)
+        level = thinking_level if thinking_level is not None else self.thinking_level
+        if self._reasoning_effort_ok:
+            effort = THINKING_LEVEL_TO_REASONING_EFFORT.get(level)
+            if effort is not None:
+                kwargs["reasoning_effort"] = effort
         return kwargs
 
     def stream(self, system_prompt: list[str], messages: list[Message],
@@ -1017,7 +1049,8 @@ class OpenAIApiClient(ApiClient):
           个别端点连函数名都分片——id+name 齐了才广播 WireToolStart）
         - delta.reasoning_content（DeepSeek 系思考端点）→ 思考指示器/线级事件
         - usage chunk → 用量; finish_reason → stop_reason; [DONE] 收尾
-        thinking_level 形参保留与 ClaudeApiClient 相同的签名（v1 忽略）。
+        thinking_level 与 ClaudeApiClient 同语义: None = 用实例默认, 档位
+        映射 reasoning_effort 下发。
         model 可选参数: None = 用实例默认（多会话按轮携带, 与 anthropic 版对齐）。
         """
         events: List[AssistantEvent] = []
@@ -1028,7 +1061,7 @@ class OpenAIApiClient(ApiClient):
             wire = self._on_event
         converted = _convert_message_openai(messages)
         kwargs = self._build_kwargs(converted, system_prompt, include_tools,
-                                    model=model)
+                                    thinking_level=thinking_level, model=model)
         emit = self.emit_output if emit_output is None else emit_output
         echo = _TerminalEcho(emit)
         if emit and sys.stdout.isatty():
@@ -1048,6 +1081,27 @@ class OpenAIApiClient(ApiClient):
                 raise StreamInterrupted()
             try:
                 return self.client.chat.completions.create(**kwargs)
+            except openai.BadRequestError as e:
+                # 个别兼容端点不认 reasoning_effort: 带 400 即剥参重建一次
+                # 并本实例禁用。不按错误文本过滤（"Extra inputs are not
+                # permitted" 这类报错不点名参数）; 其余 400 是真实请求错误,
+                # 重试一次仍会 400 并抛出, 只白付一次快速失败的建连。
+                # kwargs 为本次调用私有, 原地剥除让 send_with_retry 的后续
+                # 重试与降级视图一致。
+                if self._reasoning_effort_ok and "reasoning_effort" in kwargs:
+                    self._reasoning_effort_ok = False
+                    kwargs.pop("reasoning_effort")
+                    try:
+                        return self.client.chat.completions.create(**kwargs)
+                    except Exception as e2:
+                        retry_err = self._map_to_retry_error(e2)
+                        if retry_err is None:
+                            raise
+                        raise retry_err from e2
+                retry_err = self._map_to_retry_error(e)
+                if retry_err is None:
+                    raise
+                raise retry_err from e
             except Exception as e:
                 retry_err = self._map_to_retry_error(e)
                 if retry_err is None:
