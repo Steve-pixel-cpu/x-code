@@ -1799,6 +1799,23 @@
     color: var(--err); background: var(--err-soft);
     border-color: color-mix(in srgb, var(--err) 45%, transparent);
   }
+  /* 记忆类按钮（总是允许/本会话允许/记住目录）: 弱于主"允许"一档,
+     与"允许"同族但降调——默认动作仍是一次性批准, 记忆是显式选择 */
+  .pr-btn.always, .pr-btn.session {
+    border: 1px dashed var(--accent-border);
+    background: transparent; color: var(--text-2);
+    padding: 6px 12px; font-weight: 500;
+  }
+  .pr-btn.always svg, .pr-btn.session svg { color: var(--accent); }
+  .pr-btn.always:hover, .pr-btn.session:hover {
+    color: var(--text); border-color: var(--accent);
+    background: var(--accent-soft); filter: none;
+  }
+  .pr-btn.always:disabled, .pr-btn.session:disabled { opacity: .55; cursor: default; }
+  .perm-row .pr-detail {
+    color: var(--warn, #b8860b); font-size: calc(11.5px * var(--fs-ui));
+    line-height: 1.5; overflow-wrap: anywhere; user-select: none;
+  }
   /* 定格: 决定后整卡降调, 撤等待提示, 结果以状态条收尾 */
   .perm-row.allowed, .perm-row.denied {
     opacity: .62; background: transparent;

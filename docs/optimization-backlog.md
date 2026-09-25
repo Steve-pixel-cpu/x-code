@@ -98,7 +98,15 @@ blockingLimit        = effectiveWindow -  3_000   # 强制手动压缩
 
 ---
 
-## 待办 4：权限管线的 bypass-immune 安全检查
+## 待办 4：权限管线的 bypass-immune 安全检查 ✅（已落地）
+
+**状态**：已在 permissions.py 落地（2026-09）——写路径分级
+`classify_write_path`（inside/outside/sensitive）+ shell 破坏族敏感路径
+扫描 `shell_command_touches_sensitive_path`，敏感路径（`.git/`、
+`~/.x-code/`、`~/.ssh/`、shell 配置文件）在任何模式（含
+danger-full-access/allow）下都强制人工裁决，不可被命令白名单短路；
+无 prompter（subagent）直接拒绝。测试见 tests/test_path_policy.py。
+设计说明见 guides/05_permissions.md 末节。
 
 **价值**：Claude 有四个"即使 bypassPermissions 模式也照样拦截"的检查（bypass-immune）：
 1. 工具实现级 denied（如 BashTool 对单个危险子命令的判定）
@@ -112,8 +120,12 @@ blockingLimit        = effectiveWindow -  3_000   # 强制手动压缩
 - " rm -rf .git" 类不可逆破坏被 ALLOW 模式静默放行
 
 **实现要点**：
-- 挂点在 `runtime._authorize_tool_use`（所有写类工具：write_file/bash/powershell）之前做路径扫描
+- ~~挂点在 `runtime._authorize_tool_use`（所有写类工具：write_file/bash/powershell）之前做路径扫描~~
+  实际落点在 `permissions.PermissionPolicy.authorize` 开头（策略层统一闸门，
+  CLI/Web/subagent 全走这里）
 - 路径匹配需解析 bash 命令里的重定向目标与命令参数（复用 `shell_command_is_read_only` 的 shlex 解析）
+  ——已实现：破坏族（rm/mv/cp/tee 等）参数 + `>`/`>>` 重定向目标；
+  命令替换等解析不了的构造是已知盲区（不误报，靠审批兜底）
 - Claude 还有"进 auto 模式剥离危险权限、退出恢复"的模式切换副作用集中化（`transitionPermissionMode`），
   x-code 权限模式切换（permissions.py）可参考
 - 更深的（OS 沙箱、extglob 禁用、bare git repo 攻击防护）见 06-bash-engine.md §安全加固，优先级低

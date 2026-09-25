@@ -2706,6 +2706,89 @@ function buildAlwaysAllowBtn(requestId, sid, input) {
   return btn;
 }
 
+/* "本会话允许"按钮: 前缀规则只写入该会话 runtime 的会话级白名单（不落盘）,
+ * 会话内同类命令不再弹问, 会话结束即失效——比"总是允许"轻一档的记忆。 */
+function buildSessionAllowBtn(requestId, sid, input) {
+  const rule = allowlistRuleOf(input);
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "pr-btn session";
+  btn.innerHTML = ICON_PRM_OK;
+  const txt = document.createElement("span");
+  txt.textContent = rule ? `本会话允许"${rule} …"` : "本会话允许";
+  btn.appendChild(txt);
+  btn.onclick = async function () {
+    btn.disabled = true;
+    try {
+      const r = await fetch(`/api/sessions/${encodeURIComponent(sid)}/allow-rules`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ rule: rule || "bash" }),
+      });
+      if (!r.ok) {
+        const err = await r.json().catch(() => ({}));
+        throw new Error(err.detail || r.status);
+      }
+      respondPermission(requestId, true, sid);
+      toast(`本会话内不再询问: ${rule || "该命令"}`);
+    } catch (e) {
+      btn.disabled = false;
+      toast("会话规则写入失败: " + e.message);
+    }
+  };
+  return btn;
+}
+
+/* 写工具目标路径所在目录（取绝对路径才有可记的目录; 相对路径交给
+ * 服务端 resolve 会按服务进程 cwd 解析, 记错目录不如不记）。 */
+function writeTargetDirOf(input) {
+  let p = "";
+  try {
+    const data = JSON.parse(input || "{}");
+    if (typeof data.path === "string") p = data.path;
+  } catch (e) { return null; }
+  if (!/^[a-zA-Z]:[\\/]/.test(p) && !p.startsWith("/")) return null;
+  p = p.replace(/[\\/]+$/, "");
+  const i = Math.max(p.lastIndexOf("/"), p.lastIndexOf("\\"));
+  const dir = i > 0 ? p.slice(0, i) : null;
+  return dir && dir.length > 2 ? dir : null;
+}
+
+/* "允许并记住该目录"按钮: 写出 workspace 根的审批卡专用——目标目录加入
+ * 全局附加目录（additionalDirectories）并批准本次, 之后写该目录不再弹问。
+ * 敏感路径（escalation=sensitive）不给记忆出路, 每次都问。 */
+function buildRememberDirBtn(requestId, sid, input) {
+  const dir = writeTargetDirOf(input);
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "pr-btn always";
+  btn.innerHTML = ICON_PRM_OK;
+  const txt = document.createElement("span");
+  txt.textContent = dir ? `允许并记住 ${dir}` : "允许并记住该目录";
+  btn.appendChild(txt);
+  btn.onclick = async function () {
+    if (!dir) { respondPermission(requestId, true, sid); return; }
+    btn.disabled = true;
+    try {
+      const r = await fetch("/api/settings/additional-dirs", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ dir }),
+      });
+      if (!r.ok) {
+        const err = await r.json().catch(() => ({}));
+        throw new Error(err.detail || r.status);
+      }
+      respondPermission(requestId, true, sid);
+      toast(`已记住目录, 之后写该目录不再询问: ${dir}`);
+    } catch (e) {
+      btn.disabled = false;
+      toast("记住目录失败: " + e.message);
+    }
+  };
+  return btn;
+}
+
 function onPermissionRequest(msg, sid) {
   // sid 缺省 = 当前会话（旧事件流路径）: WS 分发处总是带 sid
   const sid2 = sid || state.sessionId;
@@ -2749,10 +2832,26 @@ function onPermissionRequest(msg, sid) {
   cmd.textContent = body;
   row.appendChild(cmd);
 
+  // 弹问原因（敏感路径/写出 workspace 根）: 用户得知道这次为什么弹
+  if (msg.detail) {
+    const why = document.createElement("div");
+    why.className = "pr-detail";
+    why.textContent = "⚠ " + msg.detail;
+    row.appendChild(why);
+  }
+
   row.appendChild(buildPermChoices(msg.request_id, sid2, "允许", "拒绝"));
-  // shell 命令审批卡追加"总是允许": 前缀入白名单, 之后同类命令不再弹问
+  // shell 命令审批卡追加记忆按钮: "总是允许"入全局白名单（落盘）,
+  // "本会话允许"只写会话级规则（会话结束失效）——同类命令不再逐条问
   if (msg.tool_name === "bash" || msg.tool_name === "powershell") {
     row.appendChild(buildAlwaysAllowBtn(msg.request_id, sid2, msg.input));
+    row.appendChild(buildSessionAllowBtn(msg.request_id, sid2, msg.input));
+  }
+  // 写出 workspace 根的审批卡: 记住目标目录（加入附加目录）后免问;
+  // 敏感路径不给记忆出路（escalation=sensitive 不渲染此按钮）
+  if ((msg.tool_name === "write_file" || msg.tool_name === "edit_file")
+      && msg.escalation === "outside-write") {
+    row.appendChild(buildRememberDirBtn(msg.request_id, sid2, msg.input));
   }
 
   colOf(sid2).appendChild(row);

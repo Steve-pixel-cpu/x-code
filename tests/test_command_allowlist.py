@@ -22,6 +22,7 @@ from permissions import (
     PermissionDecision,
     PermissionMode,
     PermissionPolicy,
+    PermissionRequest,
     shell_command_matches_allowlist,
 )
 
@@ -122,6 +123,43 @@ def test_policy_allowlist_not_for_other_tools(policy_workspace_write):
 
 
 # ------------------------------------------------------------
+# 会话级白名单: add_session_allow_rule（不落盘, 会话结束失效）
+# ------------------------------------------------------------
+
+def test_policy_session_rule_allows(policy_workspace_write):
+    # 只写会话规则, 未配置全局规则——PROMPT/workspace-write 下同前缀放行
+    policy_workspace_write.add_session_allow_rule("uv run pytest")
+    r = policy_workspace_write.authorize("bash", _cmd("uv run pytest -q"))
+    assert r.decision == PermissionDecision.ALLOW
+    assert "session allowlist" in (r.reason or "")
+
+
+def test_policy_session_rule_independent_from_global(policy_workspace_write):
+    policy_workspace_write.set_command_allowlist(["git push"])
+    policy_workspace_write.add_session_allow_rule("uv run pytest")
+    # 两边规则各自命中, 理由标注来源
+    r1 = policy_workspace_write.authorize("bash", _cmd("git push origin"))
+    assert "user allowlist" in r1.reason
+    r2 = policy_workspace_write.authorize("bash", _cmd("uv run pytest -q"))
+    assert "session allowlist" in r2.reason
+    # 没被任何一侧覆盖的命令照旧走原档位逻辑
+    r3 = policy_workspace_write.authorize("bash", _cmd("python x.py"))
+    assert r3.decision != PermissionDecision.ALLOW
+
+
+def test_policy_session_rule_dedup_and_clean(policy_workspace_write):
+    policy_workspace_write.add_session_allow_rule("  git\t push ")
+    policy_workspace_write.add_session_allow_rule("git push")   # normcase 后重复
+    assert policy_workspace_write._session_allowlist == ["git push"]
+
+
+def test_policy_session_rule_empty_noop(policy_workspace_write):
+    policy_workspace_write.add_session_allow_rule("   ")
+    r = policy_workspace_write.authorize("bash", _cmd("git push"))
+    assert r.decision != PermissionDecision.ALLOW
+
+
+# ------------------------------------------------------------
 # 配置存取: config.load/save_command_allowlist
 # ------------------------------------------------------------
 
@@ -207,3 +245,56 @@ def test_permission_respond_session_not_found(isolated_settings):
     r = tc.post("/api/permissions/respond",
                 json={"session_id": "nope", "request_id": "x", "approved": True})
     assert r.status_code == 404
+
+
+# ------------------------------------------------------------
+# CLI prompter: y/a/s/N 记忆选项（审批疲劳的 CLI 端出口）
+# ------------------------------------------------------------
+
+def _bash_request() -> PermissionRequest:
+    return PermissionRequest(
+        tool_name="bash",
+        input=json.dumps({"command": "git push origin main"}),
+        current_mode=PermissionMode.WORKSPACE_WRITE,
+        required_mode=PermissionMode.DANGER_FULL_ACCESS)
+
+
+def test_cli_prompter_always_adds_global_rule(monkeypatch):
+    from main import CliPermissionPrompter
+    seen: dict = {}
+    prompter = CliPermissionPrompter(
+        on_always=lambda rule: seen.setdefault("always", rule),
+        on_session=lambda rule: seen.setdefault("session", rule))
+    monkeypatch.setattr("builtins.input", lambda *a: "a")
+    r = prompter.decide(_bash_request())
+    assert r.decision == PermissionDecision.ALLOW
+    assert seen["always"] == "git push"          # 前 ≤2 词规则（与 Web 同口径）
+    assert "session" not in seen
+
+
+def test_cli_prompter_session_option(monkeypatch):
+    from main import CliPermissionPrompter
+    seen: dict = {}
+    prompter = CliPermissionPrompter(
+        on_always=lambda rule: seen.setdefault("always", rule),
+        on_session=lambda rule: seen.setdefault("session", rule))
+    monkeypatch.setattr("builtins.input", lambda *a: "s")
+    r = prompter.decide(_bash_request())
+    assert r.decision == PermissionDecision.ALLOW
+    assert seen["session"] == "git push"
+    assert "always" not in seen
+
+
+def test_cli_prompter_default_and_non_shell(monkeypatch):
+    from main import CliPermissionPrompter
+    prompter = CliPermissionPrompter()
+    # 回车 = 拒绝（朝安全侧）
+    monkeypatch.setattr("builtins.input", lambda *a: "")
+    assert prompter.decide(_bash_request()).decision == PermissionDecision.DENY
+    # 非 shell 工具没有记忆选项: "a" 不识别, 落到拒绝
+    monkeypatch.setattr("builtins.input", lambda *a: "a")
+    req = PermissionRequest(
+        tool_name="write_file", input=json.dumps({"path": "x", "content": "y"}),
+        current_mode=PermissionMode.WORKSPACE_WRITE,
+        required_mode=PermissionMode.WORKSPACE_WRITE)
+    assert prompter.decide(req).decision == PermissionDecision.DENY

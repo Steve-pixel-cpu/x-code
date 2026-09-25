@@ -3,6 +3,7 @@
 import json
 import os
 import platform
+import re
 import sys
 from datetime import datetime, timezone
 from enum import Enum
@@ -18,7 +19,8 @@ from api_client import (
     DEFAULT_PROTOCOL,
     THINKING_LEVELS,
 )
-from config import RuntimeConfig, ConfigLoader, USER_DIR, load_command_allowlist
+from config import (RuntimeConfig, ConfigLoader, USER_DIR, load_command_allowlist,
+                    load_additional_directories, save_command_allowlist)
 from hooks import HookRunner
 from models import Message, Session, TextContentBlock, ToolContentBlock
 from permissions import (
@@ -548,11 +550,39 @@ def parse_slash_command(input: str) -> Optional[SlashCommand]:
     return command_map.get(name, SlashCommand.UNKNOWN)
 
 
+def command_allow_rule(tool_input: str) -> Optional[str]:
+    """从 bash/powershell 入参提取前缀白名单规则: 命令前 ≤2 个词（剥
+    VAR=val 前缀、去引号）——与 Web 端 allowlistRuleOf 同口径, 服务端
+    保存时再清洗, 授权层按 shlex 词对齐匹配。取不出词返回 None。"""
+    try:
+        params = json.loads(tool_input)
+        cmd = str(params.get("command") or "")
+    except Exception:
+        return None
+    words = [w for w in cmd.split()
+             if w and not re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", w)]
+    words = [w.strip("\"'") for w in words[:2]]
+    return " ".join(words)[:80].strip() or None
+
+
 class CliPermissionPrompter:
-    """多行权限面板（黄色），y/yes 放行，其余与 Ctrl+C 一律朝安全侧拒绝。"""
+    """多行权限面板（黄色）。y 本次放行; bash/powershell 能提出前缀规则时
+    额外给 a=总是（入全局白名单）/ s=本会话（会话级白名单）——治审批疲劳,
+    同类命令不再逐条问; 其余与 Ctrl+C 一律朝安全侧拒绝。"""
+
+    def __init__(self,
+                 on_always: Optional[callable] = None,
+                 on_session: Optional[callable] = None):
+        # a/s 的落地回调（拿得到 runtime 与 config 的闭包, prompter 自身
+        # 不持有它们）。缺省时对应选项退化为仅本次放行。
+        self._on_always = on_always
+        self._on_session = on_session
 
     def decide(self, request: PermissionRequest) -> PermissionResult:
         deny_reason = f"User denied permission to run {request.tool_name}!"
+        rule = (command_allow_rule(request.input)
+                if request.tool_name in ("bash", "powershell") else None)
+        rememberable = rule is not None
         print()
         print(c_yellow("⚠ 需要授权"))
         print(c_yellow(field_line("工具", request.tool_name)))
@@ -560,9 +590,13 @@ class CliPermissionPrompter:
             "权限",
             f"{request.required_mode.as_str()}（当前 {request.current_mode.as_str()}）",
         )))
+        if request.detail:
+            print(c_yellow(field_line("原因", request.detail)))
         print(c_yellow(field_line("内容", describe_tool_input(request.input))))
+        hint = ("批准? [y]本次 / [a]总是(白名单) / [s]本会话 / [N]拒绝 "
+                if rememberable else "批准? [y/N] ")
         try:
-            user_input = input(c_yellow("批准? [y/N] "))
+            user_input = input(c_yellow(hint))
         except KeyboardInterrupt:
             print()
             print(c_yellow("已拒绝。"))
@@ -570,10 +604,33 @@ class CliPermissionPrompter:
                 decision=PermissionDecision.DENY,
                 reason=deny_reason
             )
-        if user_input.strip().lower() in ["y", "yes"]:
+        ans = user_input.strip().lower()
+        if ans in ("y", "yes"):
             return PermissionResult(
                 decision=PermissionDecision.ALLOW,
                 reason= "user said yes!"
+            )
+        if ans in ("a", "always") and rememberable:
+            if self._on_always is not None:
+                try:
+                    self._on_always(rule)
+                    print(c_yellow(f"已加全局白名单: {rule}"))
+                except Exception as e:
+                    print(c_yellow(f"白名单保存失败({e}), 仅本次放行"))
+            return PermissionResult(
+                decision=PermissionDecision.ALLOW,
+                reason="user said yes! (added to global allowlist)"
+            )
+        if ans in ("s", "session") and rememberable:
+            if self._on_session is not None:
+                try:
+                    self._on_session(rule)
+                    print(c_yellow(f"本会话内该前缀不再询问: {rule}"))
+                except Exception as e:
+                    print(c_yellow(f"会话规则写入失败({e}), 仅本次放行"))
+            return PermissionResult(
+                decision=PermissionDecision.ALLOW,
+                reason="user said yes! (added to session allowlist)"
             )
         print(c_yellow("已拒绝。"))
         return PermissionResult(
@@ -635,6 +692,10 @@ def build_runtime(session: Session,
     # 用户命令白名单: settings.json 持久规则, 启动即生效（CLI 与 Web 同源）。
     # setter 返回 None, 不能挂进上面的 builder 链尾。
     running_time.set_command_allowlist(load_command_allowlist())
+    # workspace 根初值: CLI 执行层不传 workdir（Popen 继承进程 cwd）,
+    # 根 = 当前目录 + 全局附加目录。Web 端组装后按会话 workdir 重设。
+    running_time.set_workspace_roots(
+        [str(Path.cwd())] + load_additional_directories())
     return running_time
 
 def resolve_permission_mode(runtime_config: RuntimeConfig) -> PermissionMode:
@@ -1148,7 +1209,13 @@ def start(session_store:SessionStore,session_id:str):
             messages=session_msgs,
         )
     )
-    prompter = CliPermissionPrompter()
+    prompter = CliPermissionPrompter(
+        # a=总是: 规则入全局白名单（settings.json）并热更当前 runtime;
+        # s=本会话: 只写 runtime 的会话级规则, 不落盘。
+        on_always=lambda rule: runtime.set_command_allowlist(
+            save_command_allowlist(load_command_allowlist() + [rule])),
+        on_session=lambda rule: runtime.add_session_allow_rule(rule),
+    )
     run_repl(runtime=runtime, prompter=prompter, store=session_store, session_id=session_id,last_uuid=last_uuid)
 
 

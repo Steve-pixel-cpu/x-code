@@ -60,7 +60,8 @@ from api_client import (
 )
 from config import (USER_DIR, SETTINGS_FILE, ConfigLoader, McpServerConfig,
                     RuntimeConfig, load_providers, save_providers,
-                    load_command_allowlist, save_command_allowlist)
+                    load_command_allowlist, save_command_allowlist,
+                    load_additional_directories, save_additional_directories)
 from main import (
     AUTO_TITLE_LEN,
     TOOLS,
@@ -650,6 +651,8 @@ class WebPermissionPrompter:
             "input": request.input,
             "current_mode": request.current_mode.as_str(),
             "required_mode": request.required_mode.as_str(),
+            "detail": request.detail,
+            "escalation": request.escalation,
         })
         # 不设超时地等待审批（用户明确要求取消 120s 自动拒绝）:
         # 只被 resolve() / cancel()（stop、断连）解除, 弹窗可见就一直等。
@@ -840,6 +843,9 @@ def load_runtime_for(web_session: WebSession) -> None:
     )
     web_session.runtime.set_thinking_level(web_session.thinking_level)
     web_session.runtime.set_model(web_session.model_id)
+    # workspace 根: 会话工作目录 + 全局附加目录（写路径分级/敏感扫描基准）
+    web_session.runtime.set_workspace_roots(
+        _workspace_roots_for(web_session.workdir))
     # 未经执行就被终局的工具（权限拒绝 / hook 拦截 / prompter 拒绝）:
     # 补发 tool_result 镜像, 前端工具卡才能闭合——否则永远"运行中"。
     # executed 路径不经此处（EmittingToolRegistry 已发）, 不会双发。
@@ -1597,6 +1603,9 @@ async def api_set_session_workdir(session_id: str, request: dict):
     store.set_workdir(session_id, workdir)
     if web_session is not None:
         web_session.workdir = workdir   # 运行态同步, 恢复对话时不再绑回旧目录
+        # workspace 根跟着改绑走（runtime 未组装时下次组装会带上新值）
+        if web_session.runtime is not None:
+            web_session.runtime.set_workspace_roots(_workspace_roots_for(workdir))
     return {"ok": True, "workdir": workdir}
 
 
@@ -2223,6 +2232,26 @@ def _apply_allowlist_to_runtimes(rules: list) -> None:
                 pass
 
 
+def _workspace_roots_for(workdir: Optional[str]) -> list:
+    """会话的 workspace 根: 会话工作目录（未绑定时退为服务进程 cwd——
+    与执行层 Popen 继承 cwd 的实际行为一致）+ 全局附加目录。
+    写路径分级（permissions.classify_write_path）与 shell 敏感路径
+    扫描都以这组根为基准。"""
+    base = workdir if workdir else str(Path.cwd())
+    return [base] + load_additional_directories()
+
+
+def _apply_workspace_roots_to_runtimes() -> None:
+    """附加目录增删后热更新所有活跃 runtime 的 workspace 根。
+    各会话根不同（含各自 workdir）, 按会话逐个重算。"""
+    for ws in list(_sessions.values()):
+        if ws.runtime is not None:
+            try:
+                ws.runtime.set_workspace_roots(_workspace_roots_for(ws.workdir))
+            except Exception:
+                pass
+
+
 @app.get("/api/settings/allowlist")
 async def api_get_allowlist():
     return {"rules": load_command_allowlist()}
@@ -2251,6 +2280,61 @@ async def api_delete_allowlist_rule(request: dict):
     saved = save_command_allowlist(rules)
     _apply_allowlist_to_runtimes(saved)
     return {"ok": True, "rules": saved}
+
+
+@app.post("/api/sessions/{session_id}/allow-rules")
+async def api_add_session_allow_rule(session_id: str, request: dict):
+    """会话级命令白名单（审批卡"本会话允许"）: 只写该会话 runtime 的
+    策略对象, 不落盘, 会话结束即失效。runtime 未组装时 409——能弹审批
+    卡说明 runtime 已在, 这里只是防御。"""
+    web_session = _sessions.get(session_id)
+    if web_session is None:
+        raise HTTPException(status_code=404, detail="会话不存在或未打开")
+    if web_session.runtime is None:
+        raise HTTPException(status_code=409, detail="会话 runtime 未组装")
+    rule = str(request.get("rule") or "").strip()
+    if not rule:
+        raise HTTPException(status_code=400, detail="rule 不能为空")
+    web_session.runtime.add_session_allow_rule(rule)
+    return {"ok": True, "rule": rule}
+
+
+# ============================================================================
+# REST: 附加工作目录（写路径分级的 workspace 根扩展）
+# 审批卡"允许并记住该目录"写入; 设置页"权限"分区可增删。
+# ============================================================================
+
+@app.get("/api/settings/additional-dirs")
+async def api_get_additional_dirs():
+    return {"dirs": load_additional_directories()}
+
+
+@app.post("/api/settings/additional-dirs")
+async def api_add_additional_dir(request: dict):
+    """新增一个附加目录（须存在）。保存后重算所有活跃会话的 workspace 根,
+    越界写立即变为根内写（不再弹问）。"""
+    d = str(request.get("dir") or "").strip()
+    if not d:
+        raise HTTPException(status_code=400, detail="dir 不能为空")
+    p = Path(d)
+    if not p.is_dir():
+        raise HTTPException(status_code=400, detail=f"目录不存在: {d}")
+    saved = save_additional_directories(
+        load_additional_directories() + [str(p.resolve())])
+    _apply_workspace_roots_to_runtimes()
+    return {"ok": True, "dirs": saved}
+
+
+@app.delete("/api/settings/additional-dirs")
+async def api_delete_additional_dir(request: dict):
+    """移除一个附加目录（按原文精确匹配; 前端从列表渲染而来）。"""
+    d = str(request.get("dir") or "").strip()
+    if not d:
+        raise HTTPException(status_code=400, detail="dir 不能为空")
+    saved = save_additional_directories(
+        [x for x in load_additional_directories() if x != d])
+    _apply_workspace_roots_to_runtimes()
+    return {"ok": True, "dirs": saved}
 
 
 # ============================================================================

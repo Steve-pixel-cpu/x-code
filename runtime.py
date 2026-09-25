@@ -528,6 +528,16 @@ class ConversationRuntime:
         策略对象与会话各持一份, 这里只更新本 runtime 的这份。"""
         self._permission_policy.set_command_allowlist(rules)
 
+    def set_workspace_roots(self, roots: list) -> None:
+        """workspace 根热更新（会话改绑目录 / 附加目录增删后推给活跃
+        runtime）。写路径分级与 shell 敏感路径扫描以此为准。"""
+        self._permission_policy.set_workspace_roots(roots)
+
+    def add_session_allow_rule(self, rule: str) -> None:
+        """本会话临时命令白名单规则（审批卡"本会话允许"/CLI 的 s 选项）。
+        只改本 runtime 策略对象的这份, 不落盘。"""
+        self._permission_policy.add_session_allow_rule(rule)
+
     def thinking_level(self) -> str:
         return self._thinking_level
 

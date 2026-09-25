@@ -1,5 +1,6 @@
 
 import json
+import os
 import re
 import shlex
 from enum import IntEnum, Enum
@@ -74,6 +75,13 @@ class PermissionRequest(BaseModel):
     required_mode: PermissionMode
     # 镜像方（如 Web 端）配对工具卡用: 授权询问/拒绝时知道结果该落到哪张卡
     tool_use_id: Optional[str] = None
+    # 弹问原因补充（"敏感路径"/"写出 workspace 根"）: CLI 面板与 Web 审批卡
+    # 原样展示, 用户知道这次为什么弹。空 = 常规越权升级。
+    detail: Optional[str] = None
+    # 结构化分级标记: "outside-write"（写出 workspace 根, 记住目录后免问）/
+    # "sensitive"（敏感路径, 任何记忆机制都不豁免, 每次都问）。
+    # Web 审批卡据此决定给不给"允许并记住该目录"按钮。
+    escalation: Optional[str] = None
 
 # Prompter 接口 — 用 Protocol 不用 ABC
 # Protocol 不需要继承，只要有 decide() 方法就行（鸭子类型）
@@ -282,11 +290,185 @@ def shell_command_matches_allowlist(tool_name: str, tool_input: str,
     return matched
 
 
+# ============================================================================
+# 写路径分级（应用层策略沙箱）。workspace-write 档从此名副其实:
+# write_file/edit_file 的目标路径 resolve 后与 workspace 根比对——
+#   inside    落在根内   → 维持 WORKSPACE_WRITE（行为不变, 零新增弹窗）
+#   outside   越出所有根 → 升 DANGER, 走既有相邻档升级弹问
+#   sensitive 命中敏感根 → bypass-immune: 任何模式（含 danger/allow）都
+#                          强制人工裁决, 不能被模式/白名单短路
+# 这是约定式闸门（policy gate）, 没有内核强制力——用户批准的 shell 命令
+# 仍以完整用户权限执行。shell 侧只做"显式破坏"最小扫描（见下）。
+# ============================================================================
+
+PATH_SCOPED_WRITE_TOOLS = frozenset({"write_file", "edit_file"})
+
+# 敏感路径（bypass-immune 清单）:
+# - 路径里任何一段精确叫 ".git"（版本库元数据; .gitignore 等正常文件不中招）
+# - ~/.ssh、~/.x-code（本应用自身配置——白名单/设置就在里面, 防自逃脱）
+# - ~/.bashrc/.zshrc/.profile/.gitconfig（shell 配置, 写它们=持久化任意命令）
+SENSITIVE_HOME_DIRS = frozenset({".ssh", ".x-code"})
+SENSITIVE_HOME_FILES = frozenset({".bashrc", ".zshrc", ".profile", ".gitconfig"})
+
+
+def _is_within(child: Path, parent: Path) -> bool:
+    """child 是否等于 parent 或落在 parent 之内。normcase 归一——
+    Windows 大小写不敏感（.GIT 与 .git 是同一目录）; POSIX 上 normcase
+    是恒等变换, 保持大小写敏感语义。"""
+    nc = os.path.normcase
+    c, p = nc(str(child)), nc(str(parent))
+    return c == p or c.startswith(p + os.sep)
+
+
+def _path_is_sensitive(p: Path) -> bool:
+    if any(os.path.normcase(part) == ".git" for part in p.parts):
+        return True
+    try:
+        home = Path.home().resolve()
+    except (OSError, RuntimeError):
+        return False
+    return (any(_is_within(p, home / d) for d in SENSITIVE_HOME_DIRS)
+            or any(_is_within(p, home / f) for f in SENSITIVE_HOME_FILES))
+
+
+def _resolved_roots(workspace_roots: list) -> list:
+    out = []
+    for r in workspace_roots or []:
+        try:
+            out.append(Path(str(r)).expanduser().resolve())
+        except (OSError, ValueError, RuntimeError):
+            continue
+    return out
+
+
+def classify_write_path(path: str, workspace_roots: list) -> str:
+    """写工具目标路径分级: 'inside' | 'outside' | 'sensitive'。
+    相对路径按第一个 workspace 根（会话工作目录）解析, 与执行层
+    tools.resolve_path 同口径; 坏路径按越界处理（升级审批兜底）。
+    未配置根时退为进程 cwd 作隐式根——对齐执行层 workdir=None 时
+    Popen/相对路径落到进程 cwd 的实际行为。"""
+    raw = str(path or "").strip()
+    if not raw:
+        return "outside"
+    roots = _resolved_roots(workspace_roots)
+    if not roots:
+        try:
+            roots = [Path.cwd()]
+        except (OSError, RuntimeError):
+            return "outside"
+    try:
+        p = Path(raw).expanduser()
+        if not p.is_absolute() and roots:
+            p = roots[0] / p
+        p = p.resolve()
+    except (OSError, ValueError, RuntimeError):
+        return "outside"
+    if _path_is_sensitive(p):
+        return "sensitive"
+    if any(_is_within(p, r) for r in roots):
+        return "inside"
+    return "outside"
+
+
+def _tool_param_path(tool_input: str) -> str:
+    """从工具 JSON 入参里取 path 字段（write_file/edit_file 用）。"""
+    try:
+        params = json.loads(tool_input)
+        return str(params.get("path") or "")
+    except Exception:
+        return ""
+
+
+# 显式破坏族: 拦"点名删除/挪动敏感路径"的 shell 命令（rm -rf .git、
+# mv ~/.ssh x、echo hi > ~/.bashrc）。只认首词命中 rm/mv/cp 等的命令
+# 与显式 > / >> 重定向目标——git commit/add 等正常工作流不经此判定。
+DESTRUCTIVE_PATH_COMMANDS = frozenset({
+    "rm", "rmdir", "rd", "mv", "cp", "tee",
+    "del", "remove-item", "move", "copy-item",
+})
+
+_REDIRECT_TOKEN_RE = re.compile(r"^\d*>+")
+
+
+def _redirect_targets(tokens: list) -> list:
+    """shlex 分词后提取 > / >> 的目标词（含 2>err 这类带 fd 前缀的）。"""
+    out = []
+    i = 0
+    while i < len(tokens):
+        t = tokens[i]
+        if _REDIRECT_TOKEN_RE.match(t):
+            rest = _REDIRECT_TOKEN_RE.sub("", t)
+            if rest:
+                out.append(rest)
+            elif i + 1 < len(tokens) and not _REDIRECT_TOKEN_RE.match(tokens[i + 1]):
+                out.append(tokens[i + 1])
+                i += 1
+        i += 1
+    return out
+
+
+def _candidate_is_sensitive(token: str, base: Optional[Path]) -> bool:
+    try:
+        p = Path(token).expanduser()
+        if not p.is_absolute():
+            p = (base or Path.cwd()) / p
+        return _path_is_sensitive(p.resolve())
+    except (OSError, ValueError, RuntimeError):
+        return False
+
+
+def _segment_sensitive_hit(seg: str, base: Optional[Path]) -> Optional[str]:
+    """单段命令里提取破坏族参数/重定向目标做敏感比对, 命中返回路径词。"""
+    if "$(" in seg or "`" in seg or "<(" in seg:
+        return None   # 命令替换解析不了: 静态盲区, 靠审批兜底
+    cleaned = re.sub(r"\d?[<>]&\d", "", seg)       # 2>&1 类 fd 拷贝
+    cleaned = re.sub(r"\d*>>?\s*/dev/null", "", cleaned)
+    # 反斜杠归一为 /: shlex posix 模式会把 C:\a\b 吃成 C:ab（未加引号的
+    # Windows 路径）, powershell 侧 \ 本来就是分隔符。归一只可能多报
+    # （更保守）, 不会漏报敏感命中。
+    cleaned = cleaned.replace("\\", "/")
+    try:
+        tokens = shlex.split(cleaned, posix=True)
+    except ValueError:
+        return None
+    if not tokens:
+        return None
+    candidates: list = []
+    if _first_word(tokens) in DESTRUCTIVE_PATH_COMMANDS:
+        candidates += [t for t in tokens[1:] if not t.startswith("-")]
+    candidates += _redirect_targets(tokens)
+    return next((c for c in candidates if _candidate_is_sensitive(c, base)),
+                None)
+
+
+def shell_command_touches_sensitive_path(tool_name: str, tool_input: str,
+                                         workspace_roots: list) -> Optional[str]:
+    """bash/powershell 命令是否"点名破坏"敏感路径（破坏族参数或显式
+    重定向目标落在敏感根内）。返回命中的路径词（供审批提示）, 否则 None。
+
+    只做显式命中的最小切片: 命令替换/解析失败一律视为未命中——shell
+    路径静态分析是盲区, 拿不准的场景维持"靠审批兜底"的既有口径。"""
+    try:
+        params = json.loads(tool_input)
+        cmd = str(params.get("command") or "")
+    except Exception:
+        return None
+    roots = _resolved_roots(workspace_roots)
+    base = roots[0] if roots else None
+    for seg in _split_shell_segments(cmd):
+        hit = _segment_sensitive_hit(seg, base)
+        if hit is not None:
+            return hit
+    return None
+
+
 class PermissionPolicy:
     def __init__(self, active_mode: PermissionMode):
         self._active_mode = active_mode
         self._tool_requirements: Dict[str, PermissionMode] = {}
         self._command_allowlist: list = []
+        self._session_allowlist: list = []
+        self._workspace_roots: list = []
 
     def with_tool_requirement(self,tool_name: str, required_mode: PermissionMode) -> Self:
         self._tool_requirements[tool_name] = required_mode
@@ -298,10 +480,46 @@ class PermissionPolicy:
         self._command_allowlist = list(rules or [])
         return self
 
+    def set_workspace_roots(self, roots: list) -> Self:
+        """workspace 根（会话工作目录 + additionalDirectories）。写工具的
+        路径分级与 shell 敏感路径扫描都以它为基准, 会话改绑目录时热更新。
+        第一项约定为会话工作目录——相对路径按它解析（对齐执行层）。"""
+        self._workspace_roots = [str(r) for r in (roots or [])
+                                 if str(r).strip()]
+        return self
+
+    def add_session_allow_rule(self, rule: str) -> Self:
+        """本会话临时白名单规则（审批卡"本会话允许"/CLI 的 s 选项）:
+        不落盘, 会话结束即失效。与全局规则同一匹配器, 去重追加。"""
+        cleaned = " ".join(str(rule or "").split())
+        if cleaned and cleaned.lower() not in {r.lower()
+                                               for r in self._session_allowlist}:
+            self._session_allowlist.append(cleaned)
+        return self
+
     def required_mode_for(self, tool_name: str) -> PermissionMode:
         return self._tool_requirements.get(
             tool_name, PermissionMode.DANGER_FULL_ACCESS
         )
+
+    def _require_sensitive_approval(self, tool_name: str, input: str,
+                                    prompter: Optional[PermissionPrompter],
+                                    tool_use_id: Optional[str],
+                                    detail: str) -> PermissionResult:
+        """敏感路径的终局闸门: 有 prompter 交人工裁决（不给出"拒绝后记忆"
+        的自动放行路径——每次都问）; 没有（subagent 等）直接拒绝并说明。"""
+        if prompter is None:
+            return PermissionResult(
+                decision=PermissionDecision.DENY,
+                reason=f"tool '{tool_name}' touches a sensitive path and "
+                       f"always requires explicit approval ({detail}); "
+                       f"no interactive prompter is available")
+        return prompter.decide(PermissionRequest(
+            tool_name=tool_name, input=input,
+            current_mode=self.active_mode,
+            required_mode=PermissionMode.DANGER_FULL_ACCESS,
+            tool_use_id=tool_use_id, detail=detail,
+            escalation="sensitive"))
 
     @property
     def active_mode(self) -> PermissionMode:
@@ -316,6 +534,8 @@ class PermissionPolicy:
                   tool_use_id: Optional[str] = None) -> PermissionResult:
         current = self.active_mode
         required = self.required_mode_for(tool_name)
+        detail: Optional[str] = None
+        escalation: Optional[str] = None
 
         # 只读 shell 白名单: bash/powershell 未显式登记档位（走 DANGER
         # fallback）时, 命令经保守判定确为只读则按最低档评估——
@@ -326,27 +546,62 @@ class PermissionPolicy:
                 and shell_command_is_read_only(tool_name, input)):
             required = PLAN_MODE   # == READ_ONLY_MODE(1): 数值比较即放行
 
+        # 写路径分级 + bypass-immune 敏感路径检查。
+        #
+        # 分级: workspace-write 档不再"全盘放行"——inside 维持原档（零新增
+        # 弹窗）, outside 升 DANGER 走既有升级弹问。
+        #
+        # sensitive 无模式豁免: 先于 ALLOW 快速路径与一切白名单,
+        # danger-full-access/allow 也不能静默改 .git、~/.bashrc、本应用
+        # 自身配置（backlog 待办 4 的落地）。无 prompter（如 ALLOW 模式的
+        # subagent）直接拒绝并说明, 由主会话代为执行。shell 侧同口径:
+        # 破坏族点名敏感路径的命令同样不可被白名单/只读判定短路。
+        if tool_name in PATH_SCOPED_WRITE_TOOLS:
+            kind = classify_write_path(_tool_param_path(input),
+                                       self._workspace_roots)
+            if kind == "sensitive":
+                return self._require_sensitive_approval(
+                    tool_name, input, prompter, tool_use_id,
+                    detail="敏感路径（.git / shell 配置 / 本应用配置）")
+            if kind == "outside":
+                required = PermissionMode.DANGER_FULL_ACCESS
+                detail = "写出 workspace 根（工作目录 + 附加目录之外）"
+                escalation = "outside-write"
+        elif tool_name in MUTATING_SHELL_TOOLS:
+            hit = shell_command_touches_sensitive_path(
+                tool_name, input, self._workspace_roots)
+            if hit is not None:
+                return self._require_sensitive_approval(
+                    tool_name, input, prompter, tool_use_id,
+                    detail=f"命令点名操作敏感路径: {hit}")
+
         # 快速路径: Allow 模式跳过一切; 其余模式仅在"当前权限足够"时放行。
         # PROMPT(4) 数值上 >= 大多数 required, 但它的语义是"每次都问",
         # 不是"权限更高"——必须赶在 >= 比较之前拦截, 否则 prompt 模式
         # 形同虚设(所有工具默认 required=DANGER_FULL_ACCESS < 4, 全被放行)。
         if current == PermissionMode.ALLOW:
             return PermissionResult(decision= PermissionDecision.ALLOW, reason= "")
-        # 用户命令白名单: 显式授权过的命令前缀直接放行（优先于一切弹问）。
-        # 只对 bash/powershell 生效——"以 xx 开头的命令"是 shell 语义。
-        if (tool_name in MUTATING_SHELL_TOOLS and self._command_allowlist):
-            hit = shell_command_matches_allowlist(tool_name, input,
-                                                  self._command_allowlist)
-            if hit is not None:
-                return PermissionResult(
-                    decision=PermissionDecision.ALLOW,
-                    reason=f"command matches user allowlist rule: {hit}")
+        # 用户命令白名单: 全局持久规则 + 本会话临时规则, 命中前缀直接
+        # 放行（优先于一切弹问）。只对 bash/powershell 生效——
+        # "以 xx 开头的命令"是 shell 语义。
+        if tool_name in MUTATING_SHELL_TOOLS:
+            for rules, label in ((self._command_allowlist, "user"),
+                                 (self._session_allowlist, "session")):
+                if rules:
+                    hit = shell_command_matches_allowlist(tool_name, input,
+                                                          rules)
+                    if hit is not None:
+                        return PermissionResult(
+                            decision=PermissionDecision.ALLOW,
+                            reason=f"command matches {label} allowlist rule: {hit}")
         if current == PermissionMode.PROMPT:
             request = PermissionRequest(tool_name = tool_name,
                                         input = input,
                                         current_mode= current,
                                         required_mode = required,
-                                        tool_use_id = tool_use_id )
+                                        tool_use_id = tool_use_id,
+                                        detail = detail,
+                                        escalation = escalation )
             if prompter is not None:
                 return prompter.decide(request)
             return PermissionResult(decision= PermissionDecision.DENY,
@@ -359,7 +614,9 @@ class PermissionPolicy:
                                     input = input,
                                     current_mode= current,
                                     required_mode = required,
-                                    tool_use_id = tool_use_id )
+                                    tool_use_id = tool_use_id,
+                                    detail = detail,
+                                    escalation = escalation )
 
 
         # "可升级弹问"分支（相邻档位）: 当前档差一档且目标可议时交给

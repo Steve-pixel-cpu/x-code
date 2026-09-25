@@ -106,3 +106,44 @@ policy = (PermissionPolicy(PermissionMode.WORKSPACE_WRITE)
 - `required_mode_for()` 对未注册工具默认返回 `DANGER_FULL_ACCESS`，不是 `READ_ONLY`
 - `authorize` 中 Allow 模式的判断要放在 `>=` 比较之前（因为 Allow 是特殊模式）
 - prompter 可以是 None（没有 prompter 时，需要询问的场景应该拒绝）
+
+## x-code 在 CC 之上的扩展：写路径分级与审批疲劳治理
+
+CC 的档位只看"工具名"，不看"参数"。x-code 把 `write_file`/`edit_file`
+的参数（目标路径）也纳入判定——这是**应用层策略沙箱**（policy gate）：
+
+```
+classify_write_path(path, workspace_roots):
+  inside    落在根内   → 维持 WORKSPACE_WRITE（零新增弹窗）
+  outside   越出所有根 → 升 DANGER，走既有升级弹问（可"记住该目录"免问）
+  sensitive 命中敏感根 → bypass-immune：任何模式都强制人工裁决
+```
+
+- workspace 根 = 会话工作目录 + `additionalDirectories`（审批卡
+  "允许并记住该目录"写入）；相对路径按第一个根解析，与执行层
+  `tools.resolve_path` 同口径；未配置根时退为进程 cwd（对齐 Popen 继承
+  cwd 的实际行为）。
+- 敏感根：路径里任何一段精确叫 `.git`（`.gitignore` 不中招）、
+  `~/.ssh`、`~/.bashrc/.zshrc/.profile/.gitconfig`、`~/.x-code`
+  （本应用自身配置——白名单就在里面，防"自逃脱"）。
+- bypass-immune 检查放在 authorize **最前面**：先于 ALLOW 快速路径、
+  先于命令白名单——danger/allow 模式和已入白名单的前缀都豁免不了它。
+  无 prompter（ALLOW 模式的 subagent）时直接 DENY 并说明原因。
+- shell 侧同口径的最小切片：`rm/mv/cp/tee` 等破坏族的参数、显式
+  `>`/`>>` 重定向目标落在敏感根内 → 强制弹审批；`git commit/add`
+  等正常流不经此判定。
+
+**审批疲劳**（每条命令都弹窗的体验事故）的三层免问出口：
+
+1. 只读 shell 白名单（`ls/cat/git log` 类探查免问，保守判定拿不准即不豁免）
+2. 命令前缀白名单：全局持久（settings.json `commandAllowlist`）+ 会话级
+   （`add_session_allow_rule`，会话结束失效）；词对齐前缀匹配，组合命令
+   每段都必须命中，命令替换/写重定向一票否决
+3. CLI 面板 y/a/s/N、Web 审批卡"总是允许/本会话允许/允许并记住该目录"
+
+**诚实边界**：这一切都在应用层，没有内核强制力——用户批准的 shell
+命令仍以完整用户权限执行，审批本身就是闸门而非技术隔离。真正的 OS 级
+沙箱（Linux Landlock / macOS Seatbelt 包裹 bash 子进程）是 Codex CLI 的
+形态；x-code 是本机单用户工具，威胁模型是"防误操作 + 可审计"，
+与 CC 同档（权限模式 + 审批），未来若需要可在 `tools._run_command`
+处增量包裹。

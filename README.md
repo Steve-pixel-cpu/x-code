@@ -12,7 +12,7 @@
 - **MCP 客户端**：配置文件里声明 MCP 服务器（stdio 子进程 / streamable HTTP / SSE），启动时自动连接，外部工具以 `mcp__<服务器>__<工具>` 注入工具循环，与内置工具同管线（权限审批、hooks、输出截断）；Web 端支持 `/api/mcp/reload` 热重载
 - **Skills 技能包**：Claude Code 兼容的 `SKILL.md`（YAML frontmatter + 正文指令，可捆绑脚本/模板），任务匹配时模型先用 `skill_read` 读正文再遵循（渐进式披露，只注入 name+description 清单省 token）；项目级 `.claude/skills/` 与用户级 `~/.x-code/skills/` 两级发现、同名覆盖；Web 设置页从 GitHub 仓库一键安装社区 skills（如 `anthropics/skills`），装完即时生效无需重启；CLI `/skills` 查看
 - **内置工具集**：`bash` / `powershell`（Windows 下走 Git Bash，UTF-8 无乱码）、`read_file` / `write_file`、`grep` / `glob`（纯 Python 实现，免 shell）、后台任务 `task_output` / `task_stop`、任务清单 `todo`、计划卡 `present_plan`、浏览器实测 `browser_navigate` / `browser_snapshot` / `browser_click` / `browser_type` / `browser_console` 等（Playwright 无头 Chromium，可实际操作 Web 系统做功能测试）
-- **三级权限体系**：`plan`（只读）→ `workspace-write`（工作目录内可写）→ `danger-full-access`（全放行）；每个工具登记权限档位，越权时 CLI 弹 y/N 面板、Web 端弹审批卡，plan 模式下可一键升级
+- **三级权限体系**：`plan`（只读）→ `workspace-write`（workspace 根内可写，写路径分级：根外审批/敏感路径任何模式都强制确认）→ `danger-full-access`（全放行）；每个工具登记权限档位，越权时 CLI 弹审批面板、Web 端弹审批卡；只读命令白名单 + 命令前缀白名单（全局/会话级）+ 附加目录记忆治审批疲劳，plan 模式下可一键升级
 - **多 Agent 编排**：Leader 通过 `agent_tool` / `agent_status` / `agent_reap` / `agent_list` 派生 subagent 并行干活，白名单 + 规格过滤防递归失控，孤儿 agent 启动对账
 - **会话持久化**：JSONL 增量落盘、断点恢复（`-c` / `--resume`）、自动命名、auto-compact（上下文超阈值自动压缩，保留近几条消息）
 - **Hooks**：`PreToolUse` / `PostToolUse` 挂 shell 命令，工具执行前后触发
@@ -207,11 +207,31 @@ description: 处理 PDF 拆分/合并/提取文本时的标准流程与脚本
 | 模式 | 说明 |
 |---|---|
 | `plan` | 只读：仅放行读文件/搜索类工具，写操作被硬拒（并附提示引导切模式） |
-| `workspace-write` | 工作目录内可写文件、可派生 subagent；执行命令仍需审批 |
-| `danger-full-access` | 全放行（含任意命令执行） |
+| `workspace-write` | workspace 根内可写文件（工作目录 + 附加目录）、可派生 subagent；执行命令仍需审批 |
+| `danger-full-access` | 全放行（含任意命令执行）；仅敏感路径仍强制确认 |
 
 工具按"只读 / 本地写 / 任意命令"三档登记所需权限，越权即触发审批：
-CLI 是黄色 y/N 面板（Ctrl+C 一律朝安全侧拒绝），Web 端是弹窗审批卡。
+CLI 是黄色面板（y 本次 / a 总是 / s 本会话 / N 拒绝，Ctrl+C 一律朝安全侧
+拒绝），Web 端是弹窗审批卡（同样带"总是允许 / 本会话允许"记忆按钮）。
+
+**写路径分级（应用层策略沙箱）**：`write_file`/`edit_file` 的目标路径
+resolve 后与 workspace 根（会话工作目录 + `additionalDirectories` 附加目录）
+比对——根内静默放行（零新增弹窗）；写出根外升档弹审批，审批卡上可
+"允许并记住该目录"（目录进附加目录，之后免问）；命中敏感路径
+（`.git/`、`~/.ssh`、shell 配置文件、`~/.x-code` 本应用配置）则
+bypass-immune：任何模式（含 danger-full-access/allow）都强制人工裁决，
+不可被白名单或记忆机制豁免。shell 侧同口径：`rm`/`mv`/`cp`/`tee` 等
+破坏族点名敏感路径、或显式重定向写入敏感文件（`echo x > ~/.bashrc`）
+同样强制弹审批；`git commit`/`git add` 等正常工作流不受影响。
+
+**审批疲劳治理**：shell 只读白名单（ls/cat/git log 等探查命令免问）+
+用户命令前缀白名单（全局持久，设置页与审批卡可维护）+ 会话级白名单
+（只对本会话生效）三层免问；重复命令靠 a/s 记忆消除逐条审批。
+
+**诚实边界**：这是应用层策略沙箱 + 人工审核（policy gate），没有内核
+强制力——用户批准的 shell 命令仍以完整用户权限执行，审批本身就是闸门
+而非技术隔离；shell 命令的路径静态分析是已知盲区（命令替换等构造无法
+可靠解析），靠"变异命令需审批"兜底。
 
 ## 桌面端打包
 

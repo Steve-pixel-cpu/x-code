@@ -514,3 +514,55 @@ def save_command_allowlist(rules: list) -> list:
     SETTINGS_FILE.write_text(
         json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
     return out
+
+
+# 附加工作目录（additionalDirectories 键）: 写路径分级（permissions.
+# classify_write_path）除了会话工作目录外还放行这些目录——跨仓库协作
+# 时"允许并记住该目录"免逐次审批。审批卡按钮写入, 设置页可增删。
+ADDITIONAL_DIRS_KEY = "additionalDirectories"
+ADDITIONAL_DIRS_MAX = 50
+ADDITIONAL_DIR_MAX_LEN = 400
+
+
+def load_additional_directories() -> list:
+    """读附加目录列表; 无文件/损坏/形状不对 = 空列表。"""
+    try:
+        data = json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    dirs = data.get(ADDITIONAL_DIRS_KEY) if isinstance(data, dict) else None
+    if not isinstance(dirs, list):
+        return []
+    return [d.strip() for d in dirs
+            if isinstance(d, str) and d.strip()][:ADDITIONAL_DIRS_MAX]
+
+
+def save_additional_directories(dirs: list) -> list:
+    """写附加目录: 去重保序（normcase 归一——Windows 大小写不敏感）、
+    逐条清洗限长, 返回生效列表。读-改-写保留 settings.json 其他 key。"""
+    out: list = []
+    seen: set = set()
+    for d in (dirs or []):
+        if not isinstance(d, str):
+            continue
+        cleaned = d.strip()
+        if not cleaned or len(cleaned) > ADDITIONAL_DIR_MAX_LEN:
+            continue
+        key = os.path.normcase(cleaned)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(cleaned)
+        if len(out) >= ADDITIONAL_DIRS_MAX:
+            break
+    try:
+        data = json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            data = {}
+    except (OSError, ValueError):
+        data = {}
+    data[ADDITIONAL_DIRS_KEY] = out
+    SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    SETTINGS_FILE.write_text(
+        json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    return out
