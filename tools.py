@@ -425,6 +425,29 @@ _FILE_STATE: dict = {}          # 绝对路径 -> 读取时的内容 sha256
 _FILE_STATE_LOCK = threading.Lock()
 _FILE_STATE_CAP = 500           # 简单上限: 超过清最老的（dict 保插入序）
 
+# 按路径的写锁: read-modify-write 型工具（edit_file / write_file）的
+# 检查→读盘→替换→整文件重写必须对同一路径互斥，否则同一条消息里并行
+# 执行的多个 edit（runtime 的 ThreadPoolExecutor）或主对话 × subagent
+# 并发编辑同一文件时，后写者以旧基线整文件覆盖，先写者的改动被静默吞掉。
+# 锁注册表按路径惰性创建，容量与 _FILE_STATE_CAP 同款策略（清最老）。
+# 锁顺序恒为 路径锁 -> _FILE_STATE_LOCK，无反向获取，无死锁风险。
+_WRITE_LOCKS: dict = {}         # 绝对路径 -> threading.Lock
+_WRITE_LOCKS_GUARD = threading.Lock()
+_WRITE_LOCKS_CAP = 500
+
+
+def _write_lock_for(path) -> threading.Lock:
+    key = str(path)
+    with _WRITE_LOCKS_GUARD:
+        lock = _WRITE_LOCKS.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _WRITE_LOCKS[key] = lock
+            if len(_WRITE_LOCKS) > _WRITE_LOCKS_CAP:
+                for k in list(_WRITE_LOCKS)[:len(_WRITE_LOCKS) - _WRITE_LOCKS_CAP]:
+                    _WRITE_LOCKS.pop(k, None)
+        return lock
+
 
 def _content_hash(text: str) -> str:
     import hashlib
@@ -477,26 +500,29 @@ def _check_write_allowed(path) -> Optional[str]:
 def write_tool(params: dict, workdir: Optional[str] = None) -> str:
     path = resolve_path(params.get('path', ''), workdir)
     content = params.get('content', '')
-    # 覆盖已存在文件: 必须 read 过 + 内容未过期（新文件创建不受限）
-    refused = _check_write_allowed(path)
-    if refused:
-        return refused
-    existed = path.exists()
-    old_text = ""
-    if existed:
+    # 临界区: 检查→写盘→刷新档案对同一路径互斥, 与 edit_file 的并发
+    # 编辑互斥（否则并行 write/edit 以旧基线整文件覆盖, 互相吞改动）。
+    with _write_lock_for(path):
+        # 覆盖已存在文件: 必须 read 过 + 内容未过期（新文件创建不受限）
+        refused = _check_write_allowed(path)
+        if refused:
+            return refused
+        existed = path.exists()
+        old_text = ""
+        if existed:
+            try:
+                old_text = path.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
+                old_text = None   # 二进制/不可解码旧内容: diff 不可靠, 置 None 跳过
         try:
-            old_text = path.read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError):
-            old_text = None   # 二进制/不可解码旧内容: diff 不可靠, 置 None 跳过
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with open(path, 'w', encoding="utf-8") as f:
-            f.write(content)
-    except FileNotFoundError:
-        return f'ERROR: directory not found {path}'
-    except OSError as e:
-        return f'ERROR: cannot write {path}: {e}'
-    _record_read_state(path, content)   # 写后刷新档案, 后续编辑以新内容为基准
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with open(path, 'w', encoding="utf-8") as f:
+                f.write(content)
+        except FileNotFoundError:
+            return f'ERROR: directory not found {path}'
+        except OSError as e:
+            return f'ERROR: cannot write {path}: {e}'
+        _record_read_state(path, content)   # 写后刷新档案, 后续编辑以新内容为基准
 
     new_lines = len(content.splitlines())
     if content and not content.endswith(NL):
@@ -530,29 +556,33 @@ def edit_file_tool(params: dict, workdir: Optional[str] = None) -> str:
     if not path.exists():
         return (f"ERROR: file not found: {path} "
                 f"(new files are created with write_file)")
-    refused = _check_write_allowed(path)
-    if refused:
-        return refused
-    current = _disk_text(path)
-    if current is None:
-        return f"ERROR: cannot read {path}"
-    count = current.count(old)
-    if count == 0:
-        return (f"ERROR: old_string not found in {path}. Copy it verbatim "
-                f"from the file — mind whitespace and indentation — or "
-                f"read_file the relevant range first.")
-    if count > 1 and not replace_all:
-        return (f"ERROR: old_string matches {count} places in {path}. "
-                f"Extend it with more surrounding context to make it "
-                f"unique, or set 'replace_all': true.")
-    new_text = (current.replace(old, new) if replace_all
-                else current.replace(old, new, 1))
-    try:
-        with open(path, 'w', encoding="utf-8") as f:
-            f.write(new_text)
-    except OSError as e:
-        return f'ERROR: cannot write {path}: {e}'
-    _record_read_state(path, new_text)   # 写后刷新档案
+    # 临界区: 同一路径的并发编辑在此串行化。否则并行的两个 edit 都以
+    # 同一磁盘版本为基线替换后整文件重写，后写者覆盖先写者的改动。
+    # 串行化后后者读到前者已落盘的新内容, 多处编辑全部保留。
+    with _write_lock_for(path):
+        refused = _check_write_allowed(path)
+        if refused:
+            return refused
+        current = _disk_text(path)
+        if current is None:
+            return f"ERROR: cannot read {path}"
+        count = current.count(old)
+        if count == 0:
+            return (f"ERROR: old_string not found in {path}. Copy it verbatim "
+                    f"from the file — mind whitespace and indentation — or "
+                    f"read_file the relevant range first.")
+        if count > 1 and not replace_all:
+            return (f"ERROR: old_string matches {count} places in {path}. "
+                    f"Extend it with more surrounding context to make it "
+                    f"unique, or set 'replace_all': true.")
+        new_text = (current.replace(old, new) if replace_all
+                    else current.replace(old, new, 1))
+        try:
+            with open(path, 'w', encoding="utf-8") as f:
+                f.write(new_text)
+        except OSError as e:
+            return f'ERROR: cannot write {path}: {e}'
+        _record_read_state(path, new_text)   # 写后刷新档案
     replaced = count if replace_all else 1
     delta = len(new_text) - len(current)
     summary = (f"OK: edited {path} ({replaced} replacement"
