@@ -1507,7 +1507,7 @@ wheels = [
 
 [[package]]
 name = "x-code"
-version = "3.2.2"
+version = "3.2.5"
 source = { virtual = "." }
 dependencies = [
     { name = "anthropic" },
@@ -1517,6 +1517,7 @@ dependencies = [
     { name = "playwright" },
     { name = "pydantic" },
     { name = "python-dotenv" },
+    { name = "pyyaml" },
     { name = "trafilatura" },
     { name = "tzdata" },
     { name = "uvicorn", extra = ["standard"] },
@@ -1537,6 +1538,7 @@ requires-dist = [
     { name = "playwright", specifier = ">=1.49" },
     { name = "pydantic", specifier = ">=2.13.5" },
     { name = "python-dotenv", specifier = ">=1.2.3" },
+    { name = "pyyaml", specifier = ">=6.0" },
     { name = "trafilatura", specifier = ">=2.0" },
     { name = "tzdata", specifier = ">=2026.4" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.30" },

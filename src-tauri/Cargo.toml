@@ -1,6 +1,6 @@
 [package]
 name = "x-code"
-version = "3.2.2"
+version = "3.2.5"
 description = "x-code 桌面壳（Tauri 版）"
 edition = "2021"
 
