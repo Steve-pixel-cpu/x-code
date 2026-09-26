@@ -14,6 +14,7 @@
 - **内置工具集**：`bash` / `powershell`（Windows 下走 Git Bash，UTF-8 无乱码）、`read_file` / `write_file`、`grep` / `glob`（纯 Python 实现，免 shell）、后台任务 `task_output` / `task_stop`、任务清单 `todo`、计划卡 `present_plan`、浏览器实测 `browser_navigate` / `browser_snapshot` / `browser_click` / `browser_type` / `browser_console` 等（Playwright 无头 Chromium，可实际操作 Web 系统做功能测试）
 - **三级权限体系**：`plan`（只读）→ `workspace-write`（workspace 根内可写，写路径分级：根外审批/敏感路径任何模式都强制确认）→ `danger-full-access`（全放行）；每个工具登记权限档位，越权时 CLI 弹审批面板、Web 端弹审批卡；只读命令白名单 + 命令前缀白名单（全局/会话级）+ 附加目录记忆治审批疲劳，plan 模式下可一键升级
 - **多 Agent 编排**：Leader 通过 `agent_tool` / `agent_status` / `agent_reap` / `agent_list` 派生 subagent 并行干活，白名单 + 规格过滤防递归失控，孤儿 agent 启动对账
+- **Headless 模式**：`-p "任务"` 一次性执行后退出，脚本/管道/定时任务可直接调用（`git diff | python main.py -p "审查这次改动"`）；stdout 只出最终结果（`--output-format json` 另含用量/子状态），进度走 stderr；退出码表意（0=完成 1=错误 2=中断 3=预算收束 4=用法错误）；`--model` / `--permission-mode` 单次覆盖；无人值守下权限升级自动拒绝
 - **会话持久化**：JSONL 增量落盘、断点恢复（`-c` / `--resume`）、自动命名、auto-compact（上下文超阈值自动压缩，保留近几条消息）
 - **用户记忆**：跨会话画像事实记忆，让 Agent 更懂你。对话中模型用 `memory_write` / `memory_update` / `memory_delete` 三工具自动沉淀（免审批、写入反馈可见），每次会话注入系统提示词（prompt cache 友好：静态指引 + 动态边界之下独立 section）；存储为结构化 JSON（`~/.x-code/memory.json`），`MemoryStore` 抽象为 RAG 检索预留接口；零参数遗忘机制——200 条容量触发 LRU 淘汰（hits 为主权重、user 来源豁免、淘汰归档可找回）；CLI `/memory` 管理命令 + Web 设置页"记忆"区块
 - **Hooks**：`PreToolUse` / `PostToolUse` 挂 shell 命令，工具执行前后触发

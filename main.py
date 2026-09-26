@@ -32,7 +32,7 @@ from permissions import (
 from permissions import PermissionRequest, PermissionResult, PermissionMode, PermissionPolicy, PermissionDecision, \
     PermissionPrompter
 from prompt import ProjectContext, SystemPromptBuilder
-from runtime import ConversationRuntime
+from runtime import ConversationRuntime, ToolExecutor
 from storage import SessionStore
 from tools import (ToolRegistry, bash_tool, edit_file_tool, glob_tool,
                    grep_tool, read_tool,
@@ -659,23 +659,28 @@ class CliPermissionPrompter:
 
 # --- CLI 工具执行 ---
 class CliToolExecutor:
-    def __init__(self, registry: ToolRegistry):
+    def __init__(self, registry: ToolRegistry, out=None):
         self.registry = registry
+        # 进度/预览的输出目的地: None = stdout（REPL 观感不变）; headless
+        # 传 stderr——stdout 只留给最终结果, `x-code -p ... | 下游` 才能拿到干净输出
+        self._out = out if out is not None else sys.stdout
 
     def execute(self, tool_name: str, input: str, tool_use_id: str | None = None) -> str:
         desc = describe_tool_input(input)
-        print()
-        print(c_cyan(f"⚙ 工具 {tool_name}" + (f"  {desc}" if desc else "")))
-        print()
+        print(file=self._out)
+        print(c_cyan(f"⚙ 工具 {tool_name}" + (f"  {desc}" if desc else "")),
+              file=self._out)
+        print(file=self._out)
         try:
             output = self.registry.execute(tool_name, input)
         except Exception as e:
             # 终端看红 ✗；异常继续上抛，由 runtime 转 tool_result 给模型
-            print(c_red(f"✗ {tool_name} 失败: {truncate_line(one_line(str(e)))}"))
-            print()
+            print(c_red(f"✗ {tool_name} 失败: {truncate_line(one_line(str(e)))}"),
+                  file=self._out)
+            print(file=self._out)
             raise
-        print(c_dim(indent_block(format_preview(output))))
-        print()
+        print(c_dim(indent_block(format_preview(output))), file=self._out)
+        print(file=self._out)
         return output
 
 # --- 组装 runtime ---
@@ -685,6 +690,7 @@ def build_runtime(session: Session,
                   system_prompt: list[str],
                   hooks_config: RuntimeConfig,
                   permission_mode: PermissionMode = DANGER_FULL_ACCESS_MODE,
+                  tool_executor: Optional[ToolExecutor] = None,
                  ) -> ConversationRuntime:
     permission_policy = PermissionPolicy(
         active_mode = permission_mode,
@@ -695,7 +701,8 @@ def build_runtime(session: Session,
 
     running_time = ConversationRuntime(
         api_client=api_client,
-        tool_executor=CliToolExecutor(registry),
+        # None = 默认 CLI 执行器（进度打 stdout）; headless 传 stderr 版
+        tool_executor=tool_executor or CliToolExecutor(registry),
         system_prompt=system_prompt,
         hook_runner=hook_runner,
         permission_policy=permission_policy,
@@ -1273,18 +1280,32 @@ def mcp_status_lines() -> list[str]:
     return lines
 
 
-def start(session_store:SessionStore,session_id:str):
+class StartupError(RuntimeError):
+    """启动装配失败（缺 API_KEY / 非法覆盖参数）。消息可直接展示给用户。"""
+
+
+def _assemble(session_store: SessionStore, session_id: str, *,
+              model_override: Optional[str] = None,
+              permission_mode_override: Optional[str] = None,
+              progress_out=None,
+              emit_output: bool = True,
+              ) -> tuple[RuntimeConfig, ConversationRuntime, Optional[str]]:
+    """REPL 与 headless 共用的装配路径: 环境检查 → 配置 → 权限模式 →
+    技能/工具注册 → 系统提示词 → API client → runtime。
+    装配期进度打 progress_out（None = stdout; headless 传 stderr,
+    保证 stdout 只出结果）。失败抛 StartupError, 消息可直接展示。"""
     load_dotenv()
     api_key = os.getenv("API_KEY")
     if api_key is None:
-        print(c_red("✗ API_KEY not set!"))
-        return
+        raise StartupError("API_KEY not set!")
+    out = progress_out if progress_out is not None else sys.stdout
 
     # 启动对账: 上次进程死亡遗留的 running 孤儿标记为 failed
     # （reconcile 假设此刻本进程尚无 running worker, 只能在启动时调一次）
     n = get_orchestrator().reconcile_orphans()
     if n:
-        print(c_dim(f"启动对账: {n} 个上次遗留的 running agent 已标记为 failed"))
+        print(c_dim(f"启动对账: {n} 个上次遗留的 running agent 已标记为 failed"),
+              file=out)
 
     # 配置先于工具装配: mcpServers 决定 build_registry 连哪些服务器
     config_loader = ConfigLoader(
@@ -1292,18 +1313,32 @@ def start(session_store:SessionStore,session_id:str):
         config_home=USER_DIR,   # x-code 自己的用户配置目录
     )
     runtime_config = config_loader.load()
+    # 权限模式: CLI 覆盖 > 配置 > 默认。与 resolve_permission_mode 同一条
+    # 红线: 不接受 "allow"——它会连将来注册为 prompt/allow 的工具一并放行。
+    if permission_mode_override:
+        name = permission_mode_override.strip().lower()
+        if name == "read-only":
+            name = "plan"   # 旧名兼容: 归一为 plan
+        mode = NAME_TO_MODE.get(name)
+        if mode is None or mode == ALLOW_MODE:
+            raise StartupError(
+                f"无效的权限模式: {permission_mode_override!r}"
+                f"（可选: {' | '.join(v for v in MODE_TO_NAME.values() if v != 'allow')}）")
+        permission_mode = mode
+    else:
+        permission_mode = resolve_permission_mode(runtime_config)
     # 技能发现: 项目级覆盖用户级, 解析失败降级为警告行不挡启动
     skill_warnings: list[str] = []
     skills = discover_skills(Path.cwd(), USER_DIR,
                              on_error=lambda msg: skill_warnings.append(msg))
     for w in skill_warnings:
-        print(c_yellow(f"  ⚠ {w}"))
+        print(c_yellow(f"  ⚠ {w}"), file=out)
     registry = build_registry(mcp_servers=runtime_config.mcp_servers(),
                               skills=skills)
     for line in mcp_status_lines():
-        print(line)
+        print(line, file=out)
     if skills:
-        print(c_dim(f"  ✓ Skills: {', '.join(s.name for s in skills)}"))
+        print(c_dim(f"  ✓ Skills: {', '.join(s.name for s in skills)}"), file=out)
 
     session_load = session_store.load_session(session_id)
     session_msgs = session_load[0]
@@ -1338,20 +1373,32 @@ def start(session_store:SessionStore,session_id:str):
     api_client = make_api_client(
         cli_protocol,
         api_key=str(api_key),
-        model=runtime_config.model() or DEFAULT_MODEL,
+        model=model_override or runtime_config.model() or DEFAULT_MODEL,
         tools=TOOLS,
         thinking_level=runtime_config.thinking_level(),
+        emit_output=emit_output,
     )
     runtime = build_runtime(
         api_client=api_client,
         system_prompt=system_prompt,
         registry=registry,
-        permission_mode=resolve_permission_mode(runtime_config),
+        permission_mode=permission_mode,
         hooks_config=runtime_config,
         session= Session(
             messages=session_msgs,
-        )
+        ),
+        # progress_out=None → 执行器打 stdout（REPL 观感不变）
+        tool_executor=CliToolExecutor(registry, out=out),
     )
+    return runtime_config, runtime, last_uuid
+
+
+def start(session_store:SessionStore,session_id:str):
+    try:
+        _, runtime, last_uuid = _assemble(session_store, session_id)
+    except StartupError as e:
+        print(c_red(f"✗ {e}"))
+        return
     prompter = CliPermissionPrompter(
         # a=总是: 规则入全局白名单（settings.json）并热更当前 runtime;
         # s=本会话: 只写 runtime 的会话级规则, 不落盘。
@@ -1360,6 +1407,154 @@ def start(session_store:SessionStore,session_id:str):
         on_session=lambda rule: runtime.add_session_allow_rule(rule),
     )
     run_repl(runtime=runtime, prompter=prompter, store=session_store, session_id=session_id,last_uuid=last_uuid)
+
+
+# --- Headless 模式: -p "任务" 一次性执行 ---
+#
+# 契约:
+#   stdout 只放最终结果（text = 最后一条 assistant 正文; json = 结果对象）,
+#   装配进度/工具活动/告警全走 stderr——`x-code -p "..." | 下游` 才能拿到
+#   干净输出。流式回显整机关闭（emit_output=False）, 最终文本由本模块统一输出。
+#   无人值守: prompter 传 None → 权限升级一律自动拒绝（与 subagent 同语义）,
+#   拒绝理由作为 tool_result 回给模型自行交代; 要全放行走
+#   --permission-mode danger-full-access 或 settings.json 白名单。
+#   不做自动命名: 面向脚本/评测, 省一次 LLM side-call, 会话名保持时间戳。
+# 退出码: 0=完成; 1=运行错误; 2=中断(Ctrl+C); 3=预算/迭代提前收束（结果
+#        可能不完整）; 4=用法/启动错误。
+
+def _final_assistant_text(assistant_messages: list) -> str:
+    """最终回复 = 逆序找第一条带正文的 assistant 消息。中途的过渡解说
+    （工具调用前的短句）不取——脚本/评测要的是任务收尾时那段话。"""
+    for msg in reversed(assistant_messages):
+        texts = [b.text for b in msg.content if isinstance(b, TextContentBlock)]
+        if texts:
+            return "".join(texts)
+    return ""
+
+
+def run_headless(session_store: SessionStore, session_id: str, task: str, *,
+                 output_format: str = "text",
+                 model_override: Optional[str] = None,
+                 permission_mode_override: Optional[str] = None) -> int:
+    setup_console()
+
+    # 管道输入: stdin 非 TTY 时把内容并入任务——`git diff | x-code -p "审查"`
+    if not sys.stdin.isatty():
+        try:
+            piped = sys.stdin.read()
+        except Exception:
+            piped = ""
+        if piped.strip():
+            task = f"{task}\n\n--- 管道输入（stdin）---\n{piped}"
+
+    try:
+        _, runtime, last_uuid = _assemble(
+            session_store, session_id,
+            model_override=model_override,
+            permission_mode_override=permission_mode_override,
+            progress_out=sys.stderr,
+            emit_output=False,
+        )
+    except StartupError as e:
+        print(c_red(f"✗ {e}"), file=sys.stderr)
+        return 4
+
+    idx_before = len(runtime.session().messages) - 1
+    summary = None
+    subtype = "completed"
+    try:
+        summary = runtime.run_turn(task, None)
+    except KeyboardInterrupt:
+        print(c_yellow("\n⚠ 已中断"), file=sys.stderr)
+        repair_interrupted_turn(runtime.session())
+        subtype = "interrupted"
+    except Exception as e:
+        print(c_red(f"\n✗ {e}"), file=sys.stderr)
+        subtype = "error"
+
+    # 落盘（含 run_turn 刚 append 的 user 消息）; 错误/中断路径也照常存,
+    # 之后 --resume 能接上
+    for msg in runtime.session().messages[idx_before + 1:]:
+        last_uuid = session_store.save_message(
+            session_id=session_id, message=msg, parent_uuid=last_uuid)
+
+    code = {"completed": 0, "error": 1, "interrupted": 2}.get(subtype, 1)
+    if summary is not None and subtype == "completed":
+        if summary.budget_exhausted or summary.iterations_exhausted:
+            subtype = ("budget_exhausted" if summary.budget_exhausted
+                       else "iterations_exhausted")
+            code = 3
+            print(c_yellow("⚠ 本轮被预算/迭代上限提前收束, 结果可能不完整"),
+                  file=sys.stderr)
+
+    result_text = _final_assistant_text(summary.assistant_messages) if summary else ""
+    if output_format == "json":
+        payload = {
+            "type": "result",
+            "subtype": subtype,
+            "is_error": code != 0,
+            "result": result_text,
+            "session_id": session_id,
+            "num_iterations": summary.iterations if summary else 0,
+            "auto_compacted": summary.auto_compacted if summary else False,
+            "usage": summary.usage.model_dump() if summary else {},
+        }
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+    elif result_text:
+        print(result_text)
+    return code
+
+
+def _parse_headless_args(rest: list[str]) -> tuple[Optional[str], dict, Optional[str]]:
+    """解析 -p 后面的参数。返回 (task, opts, error): 成功时 error=None;
+    失败时 task=None 且 error 是可直接展示的原因。
+    校验原则与 main() 同: 先验数量/取值, 任何分支不越界取 args。"""
+    opts = {"output_format": "text", "model_override": None,
+            "permission_mode_override": None}
+    task = None
+    i = 0
+    while i < len(rest):
+        arg = rest[i]
+        if arg == "--output-format":
+            if i + 1 >= len(rest):
+                return None, opts, "--output-format 需要值: text | json"
+            i += 1
+            if rest[i] not in ("text", "json"):
+                return None, opts, f"无效的 --output-format: {rest[i]!r}（可选: text | json）"
+            opts["output_format"] = rest[i]
+        elif arg == "--model":
+            if i + 1 >= len(rest):
+                return None, opts, "--model 需要模型名"
+            i += 1
+            opts["model_override"] = rest[i]
+        elif arg == "--permission-mode":
+            if i + 1 >= len(rest):
+                return None, opts, "--permission-mode 需要值（plan | workspace-write | danger-full-access）"
+            i += 1
+            opts["permission_mode_override"] = rest[i]
+        elif arg.startswith("-"):
+            return None, opts, f"未知选项: {arg}"
+        elif task is None:
+            task = arg
+        else:
+            return None, opts, f"多余的位置参数: {arg!r}（任务文本只收一个, 带空格请加引号）"
+        i += 1
+    if not task or not task.strip():
+        return None, opts, ('缺少任务文本。用法: python main.py -p "任务" '
+                            "[--output-format text|json] [--model 名] "
+                            "[--permission-mode plan|workspace-write|danger-full-access]")
+    return task, opts, None
+
+
+def run_headless_cli(session_store: SessionStore, session_id: str,
+                     rest: list[str]) -> None:
+    """main() 的 -p 分支: 解析参数 → 跑单 turn → 按退出码退出进程。"""
+    task, opts, error = _parse_headless_args(rest)
+    if error:
+        print(c_red(f"✗ {error}"))
+        sys.exit(4)
+    sys.exit(run_headless(session_store=session_store, session_id=session_id,
+                          task=task, **opts))
 
 
 # --- 入口 ---
@@ -1372,6 +1567,15 @@ def usage() -> None:
     print("  -c, --continue  恢复最近一次会话")
     print("  --resume <id>   恢复指定会话")
     print("  --list          列出全部会话")
+    print('  -p, --print "任务"  一次性执行任务后退出（headless）, stdin 非'
+          "终端时会并入任务")
+    print("                      --output-format text|json   text=只出正文;"
+          " json=结果对象(含用量/子状态)")
+    print("                      --model <名>                覆盖本次运行的模型")
+    print("                      --permission-mode <模式>    plan | "
+          "workspace-write | danger-full-access")
+    print("                      退出码: 0=完成 1=运行错误 2=中断 "
+          "3=预算/迭代提前收束 4=用法/启动错误")
 
 
 def main():
@@ -1394,6 +1598,11 @@ def main():
         return
 
     head = args[0]
+    if head in ("-p", "--print"):
+        # headless 一次性执行: 进程退出码即任务结果（见 run_headless 契约）
+        run_headless_cli(session_store, session_id, args[1:])
+        return
+
     if head == "--list":
         for sid in session_store.list_sessions():
             title = display_title(session_store, sid)
