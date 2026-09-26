@@ -1,0 +1,32 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    # 项目有 Windows 专属代码（shell 判定/路径策略/编码处理）, 与开发机
+    # 同平台跑; Git Bash 在 windows runner 上预装
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+
+      - name: Install uv
+        run: pip install uv
+
+      - name: Run tests
+        run: uv run pytest -q
+
+      - name: Evals smoke (fixtures discoverable, no network)
+        run: uv run python evals/run_evals.py --list
