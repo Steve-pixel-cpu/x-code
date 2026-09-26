@@ -259,6 +259,28 @@ build-exe.cmd
 
 `build-mac.sh` 提供 macOS 打包入口。
 
+## 发版
+
+三平台产物由 GitHub Actions 在打 tag 时自动构建并发布（`.github/workflows/release.yml`）：
+
+```bash
+git tag v3.3.9
+git push origin v3.3.9
+# 等 Release workflow 跑完（约 15-25 分钟）, 产物自动挂到 GitHub Release
+```
+
+| 平台 | 产物 | 自动更新 |
+|---|---|---|
+| Windows | `x-code_<ver>_x64-setup.exe` | ✅（NSIS + 更新签名） |
+| macOS (Apple Silicon) | `x-code_<ver>_aarch64.dmg` + `.app.tar.gz` | ✅（更新包带 minisign 签名） |
+| Linux | `x-code_<ver>_amd64.AppImage` | ✅ |
+
+- `latest.json` 含三平台更新条目, 已装用户通过自动更新收到新版本
+- 手动触发（Actions 页 Run workflow）：只构建并传 artifact, 不发 Release
+- 签名密钥走仓库 Secrets（`TAURI_SIGNING_PRIVATE_KEY` / `_PASSWORD`）；
+  缺失时构建成功但无 `.sig`, 不能作为自动更新目标
+- macOS 未做 Apple 公证：首次打开需右键 → 打开, 或 `xattr -cr /Applications/x-code.app`
+
 ## 测试
 
 ```bash
