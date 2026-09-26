@@ -1,8 +1,10 @@
 import contextvars
 import fnmatch
+import hashlib
 import json
 import os
 import platform
+import re
 import shutil
 import signal
 import subprocess
@@ -29,12 +31,84 @@ MAX_TOOL_OUTPUT_CHARS = 20_000
 _KEEP_HEAD = 14_000  # 开头: 结构、表头、命令回显
 _KEEP_TAIL = 6_000   # 结尾: 报错和最终状态通常在这里
 
+# 二段式截断（落盘）分工具上限: 超限全文写盘、会话里只回首尾 + 路径,
+# 中段信息不再永久丢失（模型需要时自己 read_file）。bash 系上限抬高到
+# 30k; grep/glob/edit_file 的输出结构性更强（表头/文件列表/diff）, 给到
+# 100k; read_file 自带分页且落盘会形成"读结果"的循环依赖, 不参与落盘,
+# 维持纯截断。上限内维持原行为（不落盘不截断）。
+SPILL_LIMITS = {
+    "bash": 30_000,
+    "powershell": 30_000,
+    "edit_file": 100_000,
+    "grep": 100_000,
+    "glob": 100_000,
+}
+TOOL_RESULTS_DIR = USER_CONFIG_HOME / "tool-results"
+SPILL_RETENTION_DAYS = 7           # 落盘按 mtime 清理, 防目录无限增长
+_SPILL_CLEANUP_INTERVAL_S = 3600   # 清理节流: 每小时最多扫一次目录
+_last_spill_cleanup = 0.0
 
-def truncate_tool_output(output: str) -> str:
-    """超限时保留首尾、掐掉中段，并留标记让模型知道去拿哪部分。"""
-    if len(output) <= MAX_TOOL_OUTPUT_CHARS:
+
+def _spill_marker(omitted: int, path: str) -> str:
+    """截断标记: 说明被掐多少 + 全文在哪（反引号包路径, 提取时按它定界）。"""
+    return (
+        f"\n\n[... output truncated: {omitted} characters omitted. "
+        f"Full output saved to `{path}` — inspect it with read_file "
+        f"(offset/limit) instead of repeating this call. ...]\n\n"
+    )
+
+
+def spill_tool_output(output: str) -> Optional[str]:
+    """工具输出全文落盘（内容 hash 命名, 同内容去重）, 返回路径字符串。
+
+    尽力而为: 任何落盘失败返回 None, 截断退化为纯掐中段——存储问题
+    不放大成工具失败。"""
+    global _last_spill_cleanup
+    try:
+        TOOL_RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+        digest = hashlib.sha256(output.encode("utf-8")).hexdigest()[:16]
+        path = TOOL_RESULTS_DIR / f"{digest}.txt"
+        if not path.exists():
+            path.write_text(output, encoding="utf-8")
+        now = time.time()
+        if now - _last_spill_cleanup > _SPILL_CLEANUP_INTERVAL_S:
+            _last_spill_cleanup = now
+            _cleanup_spilled_outputs(now)
+        return str(path)
+    except Exception:
+        return None
+
+
+def _cleanup_spilled_outputs(now: float) -> None:
+    """过期落盘清理（SPILL_RETENTION_DAYS, 按 mtime）。逐文件容错。"""
+    cutoff = now - SPILL_RETENTION_DAYS * 86400
+    for p in TOOL_RESULTS_DIR.glob("*.txt"):
+        try:
+            if p.stat().st_mtime < cutoff:
+                p.unlink()
+        except OSError:
+            continue
+
+
+def resumable_spill_path(output: str) -> Optional[str]:
+    """从截断文本中提取落盘路径（microcompact 占位符带上它, 被清掉的旧
+    结果由此可找回）。无落盘标记返回 None。"""
+    match = re.search(r"Full output saved to `([^`]+)`", output or "")
+    return match.group(1) if match else None
+
+
+def truncate_tool_output(output: str, tool_name: str = "") -> str:
+    """超限时二段式处理: 落盘型工具（SPILL_LIMITS）全文写盘、回显首尾 +
+    路径; 其余维持纯首尾截断（tool_name 缺省 = 旧调用方, 行为不变）。"""
+    limit = SPILL_LIMITS.get(tool_name, MAX_TOOL_OUTPUT_CHARS)
+    if len(output) <= limit:
         return output
     omitted = len(output) - _KEEP_HEAD - _KEEP_TAIL
+    if tool_name in SPILL_LIMITS:
+        path = spill_tool_output(output)
+        if path:
+            return (output[:_KEEP_HEAD] + _spill_marker(omitted, path)
+                    + output[-_KEEP_TAIL:])
     return (
         output[:_KEEP_HEAD]
         + f"\n\n[... output truncated: {omitted} characters omitted. "
@@ -73,7 +147,7 @@ class ToolRegistry():
 
         try:
             result = self._handlers[name](params, workdir)
-            return truncate_tool_output(result)
+            return truncate_tool_output(result, name)
         except Exception as e:
             raise ToolError(f"Tool execution error: {e}")
 

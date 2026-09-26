@@ -79,3 +79,91 @@ def test_prompt_contains_economy_instruction():
     joined = "\n".join(sections)
 
     assert "Act economically" in joined
+
+
+# ------------------------------------------------------------
+# 二段式截断（落盘）: bash/grep 等超限全文写盘, 会话里回首尾 + 路径;
+# read_file 与未知工具维持纯截断; 落盘失败静默退化
+# ------------------------------------------------------------
+
+import pytest
+import time as _time
+from pathlib import Path
+
+import tools
+from tools import resumable_spill_path
+
+
+@pytest.fixture
+def spill_dir(tmp_path, monkeypatch):
+    d = tmp_path / "tool-results"
+    d.mkdir(parents=True)
+    monkeypatch.setattr(tools, "TOOL_RESULTS_DIR", d)
+    return d
+
+
+def test_within_spill_limit_untouched(spill_dir):
+    out = "x" * 25_000
+    assert truncate_tool_output(out, "bash") is out      # 25k < 30k: 不截不落盘
+    assert list(spill_dir.glob("*.txt")) == []
+
+
+def test_bash_overflow_spills_full_output(spill_dir):
+    head, tail = "HEAD " + "a" * 100, "b" * 100 + " TAIL"
+    output = head + "x" * 40_000 + tail
+
+    result = truncate_tool_output(output, "bash")
+
+    assert result.startswith(head) and result.endswith(tail)
+    assert "Full output saved to" in result
+    path = resumable_spill_path(result)
+    assert path is not None
+    assert Path(path).read_text(encoding="utf-8") == output   # 全文可找回
+
+
+def test_grep_limit_is_100k(spill_dir):
+    out = "x" * 50_000
+    assert truncate_tool_output(out, "grep") is out
+    assert "Full output saved to" in truncate_tool_output("y" * 120_000, "grep")
+
+
+def test_unknown_tool_keeps_pure_truncation(spill_dir):
+    out = "x" * (MAX_TOOL_OUTPUT_CHARS + 5_000)
+    result = truncate_tool_output(out)                    # 旧调用口径: 不落盘
+    assert "Full output saved to" not in result
+    assert "characters omitted" in result
+    assert list(spill_dir.glob("*.txt")) == []
+
+
+def test_registry_passes_tool_name_to_truncation(spill_dir):
+    registry = ToolRegistry().register(
+        "bash", lambda params, workdir: "y" * 40_000)
+    result = registry.execute("bash", "")
+    assert "Full output saved to" in result
+
+
+def test_resumable_spill_path_no_marker():
+    assert resumable_spill_path("普通输出") is None
+
+
+def test_spill_failure_degrades_to_pure_truncation(spill_dir, monkeypatch):
+    monkeypatch.setattr(tools, "spill_tool_output", lambda out: None)  # 落盘失败
+    out = "x" * 40_000
+    result = truncate_tool_output(out, "bash")
+    assert "characters omitted" in result                 # 退化为纯截断, 不炸
+    assert "Full output saved to" not in result
+
+
+def test_spill_cleanup_deletes_expired(spill_dir):
+    old = spill_dir / "old.txt"
+    old.write_text("stale", encoding="utf-8")
+    past = _time.time() - 8 * 86400
+    import os
+    os.utime(old, (past, past))
+    fresh = spill_dir / "fresh.txt"
+    fresh.write_text("keep", encoding="utf-8")
+
+    tools._cleanup_spilled_outputs(_time.time())
+
+    assert not old.exists()
+    assert fresh.exists()
