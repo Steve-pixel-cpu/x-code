@@ -248,10 +248,20 @@ def register_skill_tools(registry, skills: list[Skill]):
 def sync_skill_tools(tools_list: list[dict], skills: list[Skill]) -> None:
     """TOOLS（api_client / multi_agent 共享的同一列表对象）原地增删
     skill_read 的 spec。与 _attach_mcp_tools 同一手法的理由: 列表被
-    多处按引用持有, 原地改即全链路生效, 重建对象会丢同步。"""
+    多处按引用持有, 原地改即全链路生效, 重建对象会丢同步。
+
+    插入位置 = 内置工具与 MCP 后缀的边界（第一个 mcp__ 之前）, 不用
+    append: 工具列表给模型的顺序必须满足"内置工具稳定前缀 + mcp__* 纯
+    后缀", 且与安装/连接时序无关——否则 MCP 热重载会把 skill_read 从
+    尾部吸到 mcp 块之前, 工具清单中段变动打穿该点之后的全部 prompt
+    cache（最贵 12 倍）。"""
     has = any(t.get("name") == SKILL_TOOL_NAME for t in tools_list)
     if skills and not has:
-        tools_list.append(dict(skill_read_spec))
+        from mcp_client import MCP_TOOL_PREFIX   # 延迟导入防环
+        insert_at = next((i for i, t in enumerate(tools_list)
+                          if str(t.get("name", "")).startswith(MCP_TOOL_PREFIX)),
+                         len(tools_list))
+        tools_list.insert(insert_at, dict(skill_read_spec))
     elif not skills and has:
         tools_list[:] = [t for t in tools_list if t.get("name") != SKILL_TOOL_NAME]
 
