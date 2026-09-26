@@ -5001,7 +5001,7 @@ function renderUtilityStatus() {
   if (!s || !el) return;
   el.classList.remove("err");
   if (!s.provider) el.textContent = "当前：跟主模型";
-  else if (s.valid) el.textContent = `当前：${s.effective_model || "?"}（side-call）`;
+  else if (s.valid) el.textContent = `当前：起名/摘要等后台任务用 ${s.effective_model || "?"}`;
   else { el.textContent = "已配置但不可用（供应商被禁用或缺 key），暂跟主模型"; el.classList.add("err"); }
 }
 let utSaveTimer = null;
@@ -6111,8 +6111,16 @@ async function loadMemories() {
   }
 }
 
+/* 记忆分类下拉: 用应用统一的 dd 弹层替换原生 select */
+let memCategory = "fact";
+const memCatDd = makeDropdown($("mem-category"), {
+  items: Object.entries(MEM_CAT_LABEL).map(([value, label]) => ({ value, label })),
+  value: memCategory,
+  onChange(v) { memCategory = v; },
+});
+
 async function addMemoryFromInput() {
-  const inp = $("mem-input"), cat = $("mem-category"), btn = $("btn-mem-add");
+  const inp = $("mem-input"), btn = $("btn-mem-add");
   const content = (inp.value || "").trim();
   if (!content) { toast("先写点要记的内容"); return; }
   btn.disabled = true;
@@ -6120,7 +6128,7 @@ async function addMemoryFromInput() {
     const r = await fetch("/api/memory", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ content, category: cat.value }),
+      body: JSON.stringify({ content, category: memCategory }),
     });
     if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `HTTP ${r.status}`);
     inp.value = "";

@@ -450,11 +450,11 @@
         <div class="prov-actions">
           <span id="prov-save-status" class="prov-save-status" aria-live="polite"></span>
         </div>
-        <div class="al-sub">Side-call 小模型</div>
-        <div class="sp-section-desc">压缩摘要、会话记忆摘要、会话自动命名等"整理型"调用走这里指定的供应商与模型（建议选便宜模型），主对话不受影响；不配置则跟主模型。改动停顿后自动保存，立即生效</div>
+        <div class="al-sub">辅助模型（自动起名、摘要等后台任务）</div>
+        <div class="sp-section-desc">会话自动起名、长对话自动压缩成摘要、跨会话记忆整理，这些后台任务默认也在用你的主力对话模型。这里可以指定一个更便宜的模型专门干这些活——省钱，且不影响对话本身；不配置就跟主模型。改动停顿后自动保存，立即生效</div>
         <div class="al-add-row">
-          <select id="ut-provider" class="hex-input" aria-label="side-call 供应商"></select>
-          <input id="ut-model" class="hex-input" spellcheck="false" placeholder="模型名，留空 = 跟随该供应商当前主模型" maxlength="100">
+          <select id="ut-provider" class="hex-input" aria-label="辅助模型供应商"></select>
+          <input id="ut-model" class="hex-input" spellcheck="false" placeholder="模型名，如 glm-4.5-air；留空 = 用该供应商的主模型" maxlength="100">
         </div>
         <span id="ut-status" class="prov-save-status" aria-live="polite"></span>
       </div>
@@ -522,11 +522,10 @@
         <div class="sp-section-desc">Agent 在对话中自动沉淀的用户画像与长期事实，跨会话注入系统提示——它因此更懂你。这里添加的条目标记为"用户"来源，不会被自动淘汰；其余条目由 Agent 维护（写入时可在对话流里看到）</div>
         <div class="al-add-row">
           <input id="mem-input" class="hex-input" spellcheck="false" placeholder="添加一条记忆，例如: 偏好简洁的回复风格" maxlength="500">
-          <select id="mem-category" class="hex-input mem-cat-select">
-            <option value="preference">偏好</option>
-            <option value="fact" selected>事实</option>
-            <option value="context">背景</option>
-          </select>
+          <button type="button" class="dd set-dd mem-cat-dd" id="mem-category">
+            <span class="dd-label">事实</span>
+            <span class="dd-chev"><svg width="9" height="6" viewBox="0 0 9 6" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M1 1l3.5 3.5L8 1"/></svg></span>
+          </button>
           <button type="button" id="btn-mem-add" class="icon-act">添加</button>
         </div>
         <div id="mem-list" class="al-rule-list"></div>
