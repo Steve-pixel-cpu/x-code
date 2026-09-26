@@ -6147,6 +6147,7 @@ memInputEl.addEventListener("keydown", (e) => {
 memInputEl.addEventListener("input", () => {
   memInputEl.style.height = "auto";
   memInputEl.style.height = Math.min(memInputEl.scrollHeight, 160) + "px";
+  memInputEl.classList.toggle("scrollable", memInputEl.scrollHeight > 160);
 });
 
 function openSettings() {

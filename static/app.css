@@ -1646,6 +1646,23 @@
   .hex-input.invalid { border-color: var(--err); }
   /* 字号输入: 复用 hex-input 底样式, 收窄放数字 */
   .num-input { width: 64px; }
+  /* 长文本输入（记忆/白名单规则/路径/仓库等）: 恢复正常左对齐 + 等宽字体,
+     只有色值/数字才需要靠右 */
+  .hex-input.txt-input {
+    flex: 1; width: auto; text-align: left;
+    font-family: inherit;
+  }
+  /* 记忆输入: 多行文本框, Enter 发送 / Shift+Enter 换行, 随内容自动增高 */
+  .mem-input {
+    min-height: 32px; max-height: 160px;
+    padding: 7px 9px;
+    line-height: 1.5;
+    resize: none;
+    overflow-y: hidden;
+    field-sizing: content;
+  }
+  .mem-input.scrollable { overflow-y: auto; }
+  .mem-input::placeholder { color: var(--text-3); }
 /* 壁纸亮度滑块行 */
 .set-row input[type="range"] { width: 140px; accent-color: var(--accent); cursor: pointer; }
 .set-row input[type="range"]:disabled { opacity: .4; cursor: default; }
@@ -2653,3 +2670,98 @@ body.col-resizing, body.col-resizing * { cursor: col-resize !important; }
   word-break: break-all;
 }
 .skill-del { position: absolute; right: 10px; top: 8px; }
+
+/* --- 设置页: 记忆分区 (美化) --- */
+/* 分类下拉: 复用应用 dd 弹层, 仅做定宽 + 与输入框对齐 */
+.mem-cat-dd {
+  height: 32px;
+  border: 1px solid var(--border-strong);
+  background: var(--surface);
+  padding: 0 8px 0 10px;
+  cursor: pointer;
+  transition: border-color .12s;
+}
+.mem-cat-dd:hover, .mem-cat-dd.open { border-color: var(--accent-border); }
+
+/* 记忆条目卡片 */
+.mem-item {
+  display: flex; align-items: flex-start; gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--code-bg);
+  transition: border-color .12s, background .12s;
+}
+.mem-item:hover { border-color: var(--accent-border); }
+.mem-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 6px; }
+.mem-content {
+  font-size: calc(12.5px * var(--fs-ui));
+  line-height: 1.55;
+  color: var(--text-1);
+  word-break: break-word;
+}
+.mem-meta { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+
+/* 分类徽章: 固定色相 + 低透明度底, 亮暗主题都可读 */
+.mem-cat {
+  flex: none;
+  font-size: calc(10.5px * var(--fs-ui));
+  font-weight: 600;
+  padding: 1px 8px;
+  border-radius: 999px;
+  line-height: 1.6;
+}
+.mem-cat-preference {
+  color: var(--accent);
+  background: var(--accent-soft);
+  border: 1px solid var(--accent-border);
+}
+.mem-cat-fact {
+  color: #4a86ec;
+  background: rgba(74, 134, 236, .10);
+  border: 1px solid rgba(74, 134, 236, .30);
+}
+.mem-cat-context {
+  color: #8b80f9;
+  background: rgba(139, 128, 249, .10);
+  border: 1px solid rgba(139, 128, 249, .30);
+}
+
+/* 来源徽章 */
+.mem-src {
+  flex: none;
+  font-size: calc(10px * var(--fs-ui));
+  padding: 0 7px;
+  border-radius: 999px;
+  line-height: 1.7;
+  border: 1px solid var(--border);
+  color: var(--text-3);
+}
+.mem-src-user { color: var(--accent); border-color: var(--accent-border); }
+.mem-time {
+  margin-left: auto;
+  font-size: calc(10.5px * var(--fs-ui));
+  color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+}
+
+/* 删除按钮: 悬停浮现 */
+.mem-del {
+  flex: none;
+  opacity: 0;
+  transition: opacity .12s, color .12s, border-color .12s;
+}
+.mem-item:hover .mem-del, .mem-del:focus-visible { opacity: 1; }
+.mem-del:hover { color: #e5484d; border-color: rgba(229, 72, 77, .45); }
+
+/* 空状态 */
+.mem-empty {
+  display: flex; flex-direction: column; align-items: center; gap: 4px;
+  padding: 28px 16px;
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--r-md);
+  text-align: center;
+}
+.mem-empty-ico { font-size: 22px; opacity: .75; margin-bottom: 2px; }
+.mem-empty-main { font-size: calc(12.5px * var(--fs-ui)); font-weight: 600; color: var(--text-2); }
+.mem-empty-sub { font-size: calc(11.5px * var(--fs-ui)); color: var(--text-3); }
