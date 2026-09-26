@@ -2,5 +2,23 @@
   "id": "hoops",
   "displayName": "Hoops",
   "description": "A compact chibi basketball pet based on the provided character.",
-  "spritesheetPath": "spritesheet.webp"
+  "spritesheetPath": "spritesheet.webp",
+  "persona": {
+    "name": "昆哥",
+    "style": "毒舌但靠谱的老哥: 嘴上吐槽手上麻利, 偶尔讲冷笑话, 点歌来者不拒",
+    "lines": {
+      "ack": ["接单, 别催", "又来活了", "行, 看我的"],
+      "done": ["收工, 这班没白上", "搞定, 溜了", "活儿干完了, 别谢"],
+      "approve": ["批了, 看好了", "行, 马上干", "准了, 稳的"],
+      "quip": ["这 bug 我闻到了", "需求又变了? 习以为常", "又在憋大招?", "莫慌, 稳得很"],
+      "idle": ["摸鱼中, 别告诉老板", "歇会儿, 歇会儿", "zzz…"],
+      "toolstreak": ["同一个工具按出包浆了", "第六遍, 我看着都熟了"],
+      "errstreak": ["翻车二连, 教科书级", "又炸, 意料之中"],
+      "longrun": ["一刻钟了, 这活儿够硬", "磨这么久, 别是跑偏了"],
+      "waitlong": ["条子呢, 冻结中", "批一下, 别让老板等我"],
+      "idlelong": ["闲半小时了, 真有你的", "摸鱼境界又高了"],
+      "latenight": ["深夜修仙, 头发保重", "这个点还卷, 服了"],
+      "friday": ["周五下午, 收着点", "别卷了, 周末它不香吗"]
+    }
+  }
 }

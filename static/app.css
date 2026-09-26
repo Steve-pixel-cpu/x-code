@@ -1142,11 +1142,9 @@
 
   /* ============ 底部输入卡片 ============ */
   #composer { flex: none; padding: 6px 32px 18px; }
-  #thinking {
-    display: none; width: var(--content-w); margin: 0 auto 8px; padding-left: 6px;
-    align-items: center; gap: 9px;
-  }
-  /* 等待转圈: 模型首 token 未到 / 工具跑完后的 prefill 空窗, 告诉用户还没结束 */
+  /* 忙碌转圈: 挂在当前会话消息列最底部, 随内容一起滚动 (节点由 JS 移动) */
+  #thinking { display: none; align-items: center; gap: 9px; padding: 6px 0 2px; }
+  /* 工作中转圈: 会话忙时挂在消息列末尾, 告诉用户还没结束 */
   #thinking .spin {
     flex: none; width: 13px; height: 13px; border-radius: 50%;
     border: 2px solid var(--border-strong); border-top-color: var(--accent);

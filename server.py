@@ -1877,6 +1877,30 @@ def _image_size(path: Path) -> Optional[tuple[int, int]]:
     return None
 
 
+def _pet_persona(raw: dict) -> dict:
+    """pet.json persona 字段白名单清洗: 人设只有 name/style 两个自由文本槽,
+    lines 是事件台词包(分组名 → 句子数组)。超长截断, 空段丢弃。"""
+    out: dict = {}
+    name = raw.get("name")
+    if isinstance(name, str) and name.strip():
+        out["name"] = name.strip()[:40]
+    style = raw.get("style")
+    if isinstance(style, str) and style.strip():
+        out["style"] = " ".join(style.split())[:300]
+    lines = raw.get("lines")
+    if isinstance(lines, dict):
+        clean: dict[str, list[str]] = {}
+        for group, arr in lines.items():
+            if not isinstance(arr, list):
+                continue
+            ls = [s.strip() for s in arr if isinstance(s, str) and s.strip()]
+            if ls:
+                clean[str(group)[:20]] = ls[:12]
+        if clean:
+            out["lines"] = clean
+    return out
+
+
 def _scan_pet_folder(folder: Path, source: str) -> Optional[tuple[dict, Path]]:
     """解析一个宠物文件夹: manifest 缺字段回退, 找到合规精灵图才算宠物。
     manifest 的 spritesheetPath 必须仍解析在文件夹内——Codex 生态的防穿越
@@ -1914,12 +1938,17 @@ def _scan_pet_folder(folder: Path, source: str) -> Optional[tuple[dict, Path]]:
     pid = folder.name
     name = manifest.get("displayName")
     desc = manifest.get("description")
-    return ({"id": pid,
-             "displayName": name.strip() if isinstance(name, str) and name.strip() else pid,
-             "description": desc.strip() if isinstance(desc, str) else "",
-             "source": source,
-             "rows": size[1] // _PET_ROW_HEIGHT},
-            sheet)
+    info = {"id": pid,
+            "displayName": name.strip() if isinstance(name, str) and name.strip() else pid,
+            "description": desc.strip() if isinstance(desc, str) else "",
+            "source": source,
+            "rows": size[1] // _PET_ROW_HEIGHT}
+    persona = manifest.get("persona")
+    if isinstance(persona, dict):
+        cleaned = _pet_persona(persona)
+        if cleaned:
+            info["persona"] = cleaned
+    return (info, sheet)
 
 
 def _list_pets() -> dict:
@@ -1997,6 +2026,136 @@ async def api_pets_open_dir():
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"打开失败: {e}")
     return {"ok": True}
+
+
+# ============================================================================
+# REST: 桌宠周期点评（现场统计 + pet.json 人设 → 一句应景台词; 悬浮输入框
+# 的任务/点歌走完整 agent 会话, 不经过这里）
+# ============================================================================
+
+_PET_DEFAULT_STYLE = ("摸鱼搭子: 住在主人屏幕上的电子小同事, 会吐槽会捧场, "
+                      "陪摸鱼也催干活, 对点歌点单来者不拒")
+
+
+def _pet_system_prompt(persona: dict) -> str:
+    """桌宠 system prompt: 人设来自 pet.json(前端透传), 交互规则留在代码里。
+    规则收紧到"一句话 + JSON 输出", 让便宜小模型也能稳定被解析。"""
+    name = str(persona.get("name") or "").strip() or "桌宠"
+    style = str(persona.get("style") or "").strip() or _PET_DEFAULT_STYLE
+    return "\n".join([
+        f"你是桌面宠物「{name}」, 住在主人的电脑屏幕上。",
+        f"人设: {style}",
+        "说话规则: 每次只说一句话, 最多 20 个字; 口语化、有趣; 不用引号、"
+        "换行、序号和 emoji; 不复述代码或命令内容。",
+        '输出格式: 只输出一个 JSON 对象: {"say": "你要说的话"}。',
+    ])
+
+
+def _pet_quip_prompt(state: dict) -> str:
+    """点评/事件台词的现场上下文: 只有工具名与计数, 永不携带代码/命令内容。
+    event 存在 = 事件驱动台词(针对刚发生的事说), 否则是兜底随机点评。"""
+    parts: list[str] = []
+    event = str(state.get("event") or "").strip()
+    if event:
+        parts.append("刚刚发生: " + event[:100])
+    base = str(state.get("base") or "idle")
+    parts.append("当前状态: " + ("正在打工" if base.startswith("running") else "空闲摸鱼"))
+    minutes = state.get("run_minutes")
+    if isinstance(minutes, (int, float)) and minutes >= 1:
+        parts.append(f"这一轮已经跑了 {int(minutes)} 分钟")
+    top = str(state.get("top_tools") or "").strip()
+    if top:
+        parts.append("用得最多的工具: " + top[:60])
+    errs = state.get("errors")
+    if isinstance(errs, int) and errs > 0:
+        parts.append(f"出错 {errs} 次")
+    hour = state.get("hour")
+    if isinstance(hour, int) and 0 <= hour <= 23:
+        parts.append(f"现在 {hour} 点")
+    busy = state.get("busy_sessions")
+    if isinstance(busy, int) and busy > 0:
+        parts.append(f"有 {busy} 个会话在干活")
+    tail = ("针对刚发生的这件事, 说一句应景的吐槽"
+            if event else "结合人设和现场说一句应景的点评")
+    return "\n".join(parts) + "\n" + tail
+
+
+def _pet_parse_reply(text: str) -> dict:
+    """宽松解析 LLM 回复: 取首个平衡 {...} 块认 JSON。没有花括号 → 整段
+    当 say(模型无视格式的兜底); 有花括号但认不出/截断 → 空 say——
+    半截 JSON 不当人话, 前端有内置台词兜底。"""
+    t = (text or "").strip().strip("`")
+    start = t.find("{")
+    if start < 0:
+        return {"say": " ".join(t.split())[:80] if t else ""}
+    depth = 0
+    for i in range(start, len(t)):
+        if t[i] == "{":
+            depth += 1
+        elif t[i] == "}":
+            depth -= 1
+            if depth == 0:
+                try:
+                    obj = json.loads(t[start:i + 1])
+                except ValueError:
+                    return {"say": ""}
+                if isinstance(obj, dict) and isinstance(obj.get("say"), str):
+                    return {"say": " ".join(obj["say"].split())[:80]}
+                return {"say": ""}
+    return {"say": ""}
+
+
+# 桌宠专属 client 单槽缓存: (provider_id, api_key, base_url, protocol, model, cli)。
+# 桌宠同一时刻只用一个模型, 任何连接要素变化即重建——构建很轻(SDK 客户端初始化)。
+_pet_client: Optional[tuple] = None
+
+
+def _pet_api_client(provider_id: Optional[str], model_id: Optional[str]):
+    """桌宠请求所用 client: 未指定模型 → 全局单例(跟随全局模型);
+    指定 provider|model → 按该供应商配置构建专属 client(用户选的便宜小模型)。
+    供应商被删/禁用回落全局。不挂镜像/打断钩子——generate_text 是直连
+    SDK 的一次性调用, 不进轮次循环, 也不该被"点停止"打断。"""
+    global _pet_client
+    active = _provider_cfg.get("active") or {}
+    if not provider_id or provider_id == active.get("provider"):
+        return api_client
+    prov = next((p for p in _provider_cfg.get("providers", [])
+                 if p.get("id") == provider_id), None)
+    if not prov or not prov.get("enabled"):
+        return api_client
+    protocol = _protocol_of(prov)
+    base_url = _normalize_base_url(prov.get("base_url"), protocol=protocol) or None
+    api_key = prov.get("api_key") or ""
+    cached = _pet_client
+    if (cached is not None and cached[0] == provider_id and cached[1] == api_key
+            and cached[2] == base_url and cached[3] == protocol
+            and cached[4] == (model_id or "")):
+        return cached[5]
+    cli = make_api_client(
+        protocol, api_key=api_key, model=model_id or "", base_url=base_url,
+        tools=TOOLS, emit_output=False,
+    )
+    _pet_client = (provider_id, api_key, base_url, protocol, model_id or "", cli)
+    return cli
+
+
+@app.post("/api/pet/chat")
+def api_pet_chat(payload: Optional[dict] = Body(None)):
+    """桌宠周期点评: 现场统计(事件/工具直方图/时长, 全是数字) + pet.json
+    人设 → 一句应景台词。同 _ai_title 的 side-call 打法: 一次性生成,
+    无工具、不进会话历史。隐私红线: 入参只收工具名/计数, 不收代码内容。
+    任何失败返回 {"say": ""}, 前端回退内置台词, 桌宠永不因 AI 失败而沉默。"""
+    data = payload if isinstance(payload, dict) else {}
+    persona = data.get("persona") if isinstance(data.get("persona"), dict) else {}
+    cli = _pet_api_client(str(data.get("provider_id") or "").strip() or None,
+                          str(data.get("model_id") or "").strip() or None)
+    state = data.get("state") if isinstance(data.get("state"), dict) else {}
+    try:
+        raw = cli.generate_text(
+            [_pet_system_prompt(persona)], _pet_quip_prompt(state), 64)
+    except Exception:
+        return {"say": ""}
+    return _pet_parse_reply(raw)
 
 
 @app.get("/api/ping")

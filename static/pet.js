@@ -37,6 +37,29 @@
     jumping: "收工！", waving: "你好呀", review: "瞅一眼",
   };
 
+  /* 内置台词库: 事件台词的随机池, 也是 AI 失败/未开时的回退语料。
+   * 前五组跟事件走(接单/收工/批准/干活点评/摸鱼闲聊), 后七组是事件驱动
+   * 台词(见 initFloat evalEvents): toolstreak 同工具连用 / errstreak 连续
+   * 出错 / longrun 单轮太久 / waitlong 审批等太久 / idlelong 闲太久 /
+   * latenight 深夜 / friday 周五下午。
+   * 宠物 pet.json 的 persona.lines 同名分组整体覆盖(见 initFloat applyPersona)
+   * ——人设注入改 pet.json 即可, 换宠物=换性格。 */
+  const PET_LINES = {
+    ack: ["接单！", "来活儿了！", "包在我身上", "接单, 冲！"],
+    done: ["收工！", "收工！这班没白上", "搞定, 撒花", "活儿干完了, 溜了"],
+    approve: ["好, 批了！", "收到, 马上开干", "准了, 看我的"],
+    quip: ["这 bug 我闻到了", "稳住, 快收工了", "键盘敲得飞起啊",
+      "这波操作有点东西", "莫慌, 稳得很", "又在憋大招?"],
+    idle: ["摸鱼中, 别催", "喝口水, 歇会儿", "有活儿随时叫我", "zzz…"],
+    toolstreak: ["又来? 这都第六遍了", "同一个工具按到包浆了", "熟能生巧, 但也别太熟"],
+    errstreak: ["翻车二连… 问题不大", "又炸了, 深呼吸", "这代码跟咱有仇吧"],
+    longrun: ["这轮跑挺久啊, 硬活儿", "还在磨, 我陪你", "大工程啊这是"],
+    waitlong: ["条子呢~ 冻结中", "批一下呗, 等急了", "嘘… 在等你点头"],
+    idlelong: ["闲了半天了哦", "摸鱼摸得挺扎实", "有活儿随时叫我"],
+    latenight: ["这个点了, 头发保重", "深夜卷王就是你", "早点睡, 明天再战"],
+    friday: ["周五下午了, 收着点干", "熬过这几分钟就是周末", "周末不加班, 答应我"],
+  };
+
   // 注: 不跟随系统的"减弱动效"(prefers-reduced-motion)定格——桌宠是
   // 玩赏性的小动画, 用户明确要求拖动/状态都要动起来
 
@@ -155,6 +178,7 @@
       overlay: null,         // 一次性态(jumping/waving/review), 播完回 base
       alt: 0,                // 工具调用交替换跑动方向
       failTimer: 0, bubbleTimer: 0, lastToolBubble: 0,
+      persona: null,         // 宠物人设(pet.json persona 字段, 启动时装载)
     };
 
     const setStatus = (name) => { statusEl.textContent = STATUS_TEXT[name] || STATUS_TEXT.idle; };
@@ -265,6 +289,7 @@
     function forgetPerm(sid) {
       if (!pendingPerms.delete(permKey(sid))) return;
       if (pendingPerms.size) { showLatestPerm(); return; }
+      stats.waitSince = 0;   // 待批清空: 催条子计时归零
       pet.pendingPerm = null;
       recomputeBase();
     }
@@ -281,18 +306,266 @@
       }
     }
 
+    /* ---- AI 互动: 台词包 / 周期点评 / 悬浮输入框(点歌+聊天) ----
+     * 人设来自宠物 pet.json 的 persona 字段(随 /api/pets 返回, 启动时装载):
+     * name/style 由后端拼进 system prompt; lines 同名分组覆盖内置台词包。
+     * AI 开关与模型在主窗设置页(xc-pet.aiChatter/aiProvider/aiModel),
+     * 悬浮窗每次现读 pref(), 主窗改动经 storage 事件天然生效。 */
+    const lines = {
+      ack: PET_LINES.ack.slice(), done: PET_LINES.done.slice(),
+      approve: PET_LINES.approve.slice(), quip: PET_LINES.quip.slice(),
+      idle: PET_LINES.idle.slice(),
+    };
+    const lastPick = {};
+    const pick = (group) => {
+      const arr = lines[group];
+      if (!arr || !arr.length) return "";
+      if (arr.length === 1) return arr[0];
+      let i;
+      do { i = Math.random() * arr.length | 0; } while (i === lastPick[group]);
+      lastPick[group] = i;
+      return arr[i];
+    };
+    function applyPersona(persona) {
+      pet.persona = persona && typeof persona === "object" ? persona : null;
+      const pack = pet.persona && pet.persona.lines;
+      if (!pack) return;
+      for (const g of Object.keys(lines)) {
+        const ls = Array.isArray(pack[g])
+          ? pack[g].filter(s => typeof s === "string" && s.trim()).slice(0, 12)
+          : null;
+        if (ls && ls.length) {
+          lines[g] = ls;
+          delete lastPick[g];
+        }
+      }
+    }
+
+    /* ---- 现场统计器: 事件驱动台词的信号源, 全部本地数据 ----
+     * runStart 本轮开工时刻 / tools 本轮工具直方图 / lastToolRun 同名
+     * 工具连用计数 / errStreak 连续出错轮数 / idleSince 何时开始闲 /
+     * waitSince 待批从何时起 / lastSpont 最近一次主动开口 / said 各事件
+     * 的上次开口时间(独立冷却)。只记名字和数字, 不碰代码内容。 */
+    const stats = {
+      runStart: 0, tools: {}, lastTool: "", lastToolRun: 0,
+      errStreak: 0, idleSince: Date.now(), waitSince: 0,
+      lastSpont: 0, lastFiller: 0, said: {},
+    };
+    const EVT_COLD = {   // 各事件的冷却(ms): 每类话不烦人
+      toolstreak: 0,          // 每轮同一条连击只说一次(计数 === 阈值时触发)
+      errstreak: 600000,      // 出错吐槽 10 分钟一次
+      longrun: 0,             // 每轮"跑很久"只说一次
+      waitlong: 0,            // 每次待批期间只催一次
+      idlelong: 0,            // 每段空闲只念一次
+      latenight: 21600000,    // 深夜梗 6 小时一次
+      friday: 72000000,       // 周五梗 20 小时一次
+    };
+    const MIN_GAP = 90000;    // 任意两句主动话之间至少隔 90s
+
+    function canSay(tag, now) {
+      if (now - stats.lastSpont < MIN_GAP) return false;
+      return now - (stats.said[tag] || 0) >= (EVT_COLD[tag] || 0);
+    }
+
+    // AI 请求: 8s 超时; 任何失败返回 null, 调用方回退台词包
+    async function aiChat(payload) {
+      const p = pref();
+      try {
+        const ctrl = new AbortController();
+        const timer = setTimeout(() => ctrl.abort(), 8000);
+        const r = await fetch("/api/pet/chat", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            persona: pet.persona || {},
+            provider_id: p.aiProvider || "",
+            model_id: p.aiModel || "",
+            ...payload,
+          }),
+          signal: ctrl.signal,
+        });
+        clearTimeout(timer);
+        if (!r.ok) return null;
+        const data = await r.json();
+        return data && typeof data === "object" ? data : null;
+      } catch { return null; }
+    }
+
+    /* 事件开口: AI 开 = LLM 生成(人设 + "刚刚发生"事件上下文, 失败回退
+     * 台词包); AI 关 = 直接抽台词包。返回是否真的开了口。 */
+    async function quipLine(tag, event, extra) {
+      if (pref().aiChatter === true) {
+        const data = await aiChat({
+          state: {
+            event, base: pet.base,
+            run_minutes: extra && extra.runMinutes,
+            top_tools: extra && extra.topTools,
+            errors: extra && extra.errors,
+            hour: new Date().getHours(),
+            busy_sessions: [...sessionPhase.values()].filter(v => v !== "idle").length,
+          },
+        });
+        const say = data && typeof data.say === "string" ? data.say.trim() : "";
+        if (say) return say;
+      }
+      return pick(tag || (/^running/.test(pet.base) ? "quip" : "idle"));
+    }
+
+    async function speakEvent(tag, event, extra) {
+      const now = Date.now();
+      if (!canSay(tag, now)) return;
+      // 等批场景说"催条子"要走 transientBubble(说完把"点我同意"找回来),
+      // 其余事件不打断权限气泡
+      const inWait = !!pendingPerms.size;
+      if (tag !== "waitlong" && (inWait || !bubbleEl.hidden)) return;
+      stats.said[tag] = now;
+      stats.lastSpont = now;
+      const say = await quipLine(tag, event, extra);
+      // 请求期间状态可能变: 落话前再让一次位(同上, waitlong 例外)
+      if (tag !== "waitlong" && (pendingPerms.size || !bubbleEl.hidden)) return;
+      if (tag === "waitlong") transientBubble(say, 2600);
+      else bubble(say, 3200);
+    }
+
+    /* 30s 一跳的事件评估器: 一跳最多说一句, 按优先级短路。
+     * 兜底随机点评退居最后(间隔 6 分钟起 + 30% 概率), 让位给真事件 */
+    let tickTimer = 0;
+    function scheduleTick() {
+      clearTimeout(tickTimer);
+      tickTimer = setTimeout(async () => {
+        await evalEvents();
+        scheduleTick();
+      }, 30000);
+    }
+    async function evalEvents() {
+      const now = Date.now();
+      const d = new Date();
+      const hour = d.getHours();
+      // 1. 审批等超 1 分钟: 催条子(等批期间唯一允许的话)
+      if (pendingPerms.size) {
+        if (stats.waitSince && now - stats.waitSince >= 60000) {
+          await speakEvent("waitlong", "主人的审批请求等了一分多钟还没批");
+        }
+        return;   // 等批期间别的都不说
+      }
+      // 2. 连续出错
+      if (stats.errStreak >= 2) {
+        await speakEvent("errstreak", `连着 ${stats.errStreak} 轮都出错了`);
+        return;
+      }
+      const running = /^running/.test(pet.base);
+      const runMin = stats.runStart ? Math.floor((now - stats.runStart) / 60000) : 0;
+      if (running) {
+        // 3. 单轮超 15 分钟
+        if (runMin >= 15) {
+          await speakEvent("longrun", `这一轮已经跑了 ${runMin} 分钟还没完`,
+            { runMinutes: runMin });
+          if (stats.said.longrun === now) return;
+        }
+        // 4. 深夜 / 周五下午
+        if (hour >= 23 || hour < 5) {
+          await speakEvent("latenight", `现在已经是深夜 ${hour} 点还在干活`);
+          if (stats.said.latenight === now) return;
+        } else if (d.getDay() === 5 && hour >= 14 && hour < 18) {
+          await speakEvent("friday", "今天是周五下午, 主人还在干活");
+          if (stats.said.friday === now) return;
+        }
+        // 5. 兜底: 带现场统计的随机点评(上句主动话 6 分钟后, 30% 概率)
+        if (now - Math.max(stats.lastSpont, stats.lastFiller) >= 360000
+            && Math.random() < 0.3) {
+          stats.lastFiller = now;
+          stats.lastSpont = now;
+          const topTools = Object.entries(stats.tools).sort((a, b) => b[1] - a[1])
+            .slice(0, 3).map(([t, n]) => `${t}×${n}`).join(" ");
+          const say = await quipLine("", "", {
+            runMinutes: runMin, topTools, errors: stats.errStreak,
+          });
+          if (!pendingPerms.size && bubbleEl.hidden) bubble(say, 3200);
+        }
+      } else {
+        // 6. 闲超 30 分钟
+        if (now - stats.idleSince >= 1800000) {
+          await speakEvent("idlelong", "主人已经闲了半个多小时了");
+        }
+      }
+    }
+    scheduleTick();
+
+    // 任务转发: pet → 主窗, 走 storage 事件(跨 WebView2 实测可靠; 与事件
+    // 转发相反的方向, 同一套打法)。to 字段区分方向, 双方各自过滤;
+    // __n 用自增序号——storage 事件只在值变化时触发, 时间戳撞毫秒会丢
+    let petCmdSeq = 0;
+    const sendPetCmd = (cmd) => {
+      try {
+        localStorage.setItem("xc-pet-cmd",
+          JSON.stringify({ ...cmd, to: "main", __n: ++petCmdSeq }));
+      } catch { }
+    };
+
+    /* 悬浮输入框 = 全功能任务入口: 文本发给主窗, 落到专属「桌宠」会话跑
+     * 完整 agent 轮次——与主界面输入框同一条链路。点歌由 music_play
+     * 工具执行; 权限请求照常顶到"等你批条子"(点宠物批准)。回复经
+     * xc-pet-cmd 回传, 以气泡形式短驻展示。 */
+    const inputEl = $("pet-input");
+    // 原生前台聚焦: 透明置顶小窗默认不抢前台, 原生窗不在前台时 IME
+    // 挂不到本窗(候选框飘左上角/切不出输入法)——点输入框第一下就要
+    // set_focus, 这之后才谈得上正常打字
+    const focusNative = () => { try { bridge()?.focusPet?.(); } catch { } };
+    if (inputEl) {
+      inputEl.addEventListener("pointerdown", focusNative);
+      inputEl.addEventListener("focus", focusNative);
+      // 打字期间(含 IME 组合态)焦点在手, 框经 :focus 保持可见——
+      // 特意不监听 mouseleave/blur 收框: 鼠标挪开打字曾把框藏掉,
+      // 表现为"输入途中消失"。收框只有两条路: Esc 或发送后
+      inputEl.addEventListener("keydown", (e) => {
+        if (e.key === "Escape") { inputEl.blur(); return; }
+        if (e.key !== "Enter" || e.isComposing) return;
+        const text = inputEl.value.trim();
+        if (!text) return;
+        inputEl.value = "";
+        inputEl.blur();
+        sendPetCmd({ type: "task", text: text.slice(0, 2000) });
+        transientBubble("派活了, 干着呢…", 15000);   // 回复到达即替换
+      });
+    }
+    // 主窗回传: 任务回复(收口时最后一段正文; 空回复=纯工具轮, 歌已在放,
+    // 亮起的播放条就是答复, 不说话)
+    window.addEventListener("storage", (e) => {
+      if (e.key !== "xc-pet-cmd" || !e.newValue) return;
+      try {
+        const cmd = JSON.parse(e.newValue);
+        if (cmd.to === "pet" && cmd.type === "chat" && cmd.text) {
+          transientBubble(String(cmd.text), 4000);
+        }
+      } catch { }
+    });
+
     function onEvent(msg) {
       if (!msg || !msg.type) return;
       const sid = permKey(msg.session_id);
       switch (msg.type) {
         case "turn_started":
           clearTimeout(pet.failTimer);
+          if (!anyPhase("run")) stats.runStart = Date.now();   // 新一轮开工
           sessionPhase.set(sid, "run");
+          // 本轮现场清零: 工具直方图/连击/每轮一次的台词标记
+          stats.tools = {};
+          stats.lastTool = ""; stats.lastToolRun = 0;
+          delete stats.said.toolstreak;
+          delete stats.said.longrun;
           recomputeBase();
-          transientBubble("接单！");
+          transientBubble(pick("ack"));
           break;
         case "tool_use_started": {
           sessionPhase.set(sid, "run");
+          // 现场统计: 只记工具名与次数; 同名连用 6 次说一句
+          const tn = String(msg.tool_name || "工具");
+          stats.tools[tn] = (stats.tools[tn] || 0) + 1;
+          stats.lastToolRun = tn === stats.lastTool ? stats.lastToolRun + 1 : 1;
+          stats.lastTool = tn;
+          if (stats.lastToolRun >= 6) {
+            speakEvent("toolstreak", `${tn} 连着用了 ${stats.lastToolRun} 次`);
+          }
           // 每次工具换一个跑动方向, 桌面上看得到"在忙"
           pet.alt = (pet.alt + 1) % 3;
           pet.runDir = pet.alt === 0 ? "running"
@@ -310,6 +583,8 @@
           forgetPerm(sid);   // 出结果 = 该会话的待批请求已有去向
           break;
         case "permission_request":
+          if (!pendingPerms.size) stats.waitSince = Date.now();   // 新一轮待批
+          delete stats.said.waitlong;
           pendingPerms.set(sid, {
             request_id: msg.request_id || null,
             tool_name: msg.tool_name || "",
@@ -331,6 +606,11 @@
           sessionPhase.set(sid, "idle");
           forgetPerm(sid);
           clearTimeout(pet.failTimer);
+          stats.errStreak = 0;   // 正常收工: 出错连击清零
+          if (!anyPhase("run")) {
+            stats.runStart = 0;
+            stats.idleSince = Date.now();
+          }
           if (othersActive(sid) || pendingPerms.size) {
             recomputeBase();   // 还有别的会话在忙: 不播收工, 继续打工
           } else if (msg.interrupted) {
@@ -339,13 +619,18 @@
             pet.base = "idle";
             setStatus("idle");
             overlayOnce("jumping");
-            bubble("收工！");
+            bubble(pick("done"));
           }
           break;
         }
         case "error": {
           sessionPhase.set(sid, "idle");
           forgetPerm(sid);
+          stats.errStreak += 1;   // 连续出错: 评估器里说一句(带冷却)
+          if (!anyPhase("run")) {
+            stats.runStart = 0;
+            stats.idleSince = Date.now();
+          }
           const text = msg.message ? String(msg.message) : "出事了…";
           if (othersActive(sid) || pendingPerms.size) {
             transientBubble("出错: " + text, 3000);
@@ -384,7 +669,7 @@
         if (pendingPerms.size) showLatestPerm();
         else recomputeBase();   // 别的会话还在跑就继续打工, 全闲才回 idle
         overlayOnce("jumping");
-        transientBubble("好, 批了！");
+        transientBubble(pick("approve"));
         return true;
       } catch (e) {
         bubble("没批成…去主窗口看看");
@@ -534,11 +819,24 @@
     window.addEventListener("pointercancel", endDrag);
     spriteEl.addEventListener("click", () => {
       if (wasDrag) return;
+      // 等批条子时点击仍是批准——功能优先于玩具
       if (pet.base === "waiting" && pet.pendingPerm) {
         approvePendingPerm();
         return;
       }
-      if (pet.base === "idle") overlayOnce("waving");
+      // 点击宠物 = 开/关音乐播放。队列是空的就不折腾主窗了, 直接引导点歌
+      let hasSong = false;
+      try {
+        const m = JSON.parse(localStorage.getItem("xc-music") || "{}");
+        hasSong = Array.isArray(m.queue) && m.queue.length > 0;
+      } catch { }
+      overlayOnce("waving");
+      if (hasSong) {
+        sendPetCmd({ type: "music_toggle" });
+        bubble("♪ …", 2600);   // 回执到达即替换
+      } else {
+        bubble("先点首歌呗", 2200);
+      }
     });
 
     // 量图集里"角色最高点距格顶"的最小像素数（所有行所有帧取最小）。
@@ -587,6 +885,8 @@
           bubble("把宠物文件夹放进 pets 目录(设置里可查路径)", 0);
           return;
         }
+        // 人设随清单一起来: lines 覆盖内置台词包, name/style 留给 AI 请求
+        applyPersona(chosen.persona);
         const sheetUrl = `/api/pets/${encodeURIComponent(chosen.id)}/sheet?_=${Date.now()}`;
         sprite = new PetSprite(spriteEl, sheetUrl, chosen.rows);
         // 气泡下沉量自适应: 量出头顶留白, 下沉 ≤ 留白-6px 视觉间隙,
@@ -710,6 +1010,55 @@
         savePref({ ...pref(), scale: s });
         try { window.xcodeDesktopPet?.resizePet?.(s); } catch { }
       });
+    }
+    // ---- AI 互动: 开关 + 桌宠专属模型。偏好同住 xc-pet, 悬浮窗经 storage
+    //      事件实时跟随(pref() 现读, 无需专门通知)。默认关: 点评和智能
+    //      点歌都要花所配模型的 token, 由用户显式打开。模型下拉数据异步
+    //      拉取后 setItems 补齐, 拉失败时保底"跟随全局模型"单项。 ----
+    const chatter = $("pet-ai-chatter");
+    if (chatter) {
+      chatter.checked = pref().aiChatter === true;
+      chatter.addEventListener("change", () => {
+        savePref({ ...pref(), aiChatter: chatter.checked });
+        toast(chatter.checked ? "桌宠 AI 互动已开启" : "桌宠 AI 互动已关闭");
+      });
+    }
+    const modelDdEl = $("sel-pet-model");
+    if (modelDdEl && typeof makeDropdown === "function") {
+      const p = pref();
+      const saved = (p.aiProvider && p.aiModel) ? `${p.aiProvider}|${p.aiModel}` : "";
+      const modelDd = makeDropdown(modelDdEl, {
+        items: [{ value: "", label: "跟随全局模型" }],
+        value: saved,
+        onChange: (v) => {
+          const i = v.indexOf("|");
+          savePref({
+            ...pref(),
+            aiProvider: i > 0 ? v.slice(0, i) : "",
+            aiModel: i > 0 ? v.slice(i + 1) : "",
+          });
+        },
+      });
+      (async () => {
+        try {
+          const cfg = await (await fetch("/api/providers")).json();
+          const items = [{ value: "", label: "跟随全局模型" }];
+          for (const prov of (cfg.providers || [])) {
+            if (prov.enabled === false) continue;
+            for (const m of (prov.models || [])) {
+              items.push({
+                value: `${prov.id}|${m.id}`,
+                label: `${prov.name || prov.id} / ${m.id}`,
+              });
+            }
+          }
+          // 已保存的组合不在列表里(供应商被删/禁用): 保留原值并标注, 不静默丢
+          if (saved && !items.some(it => it.value === saved)) {
+            items.push({ value: saved, label: `已保存: ${saved}（列表里没有）` });
+          }
+          modelDd.setItems(items, saved);
+        } catch { }
+      })();
     }
     // 刷新: 重扫宠物目录并重绘列表(带 cache-bust, 刚替换的精灵图也能立即生效)
     const rescanBtn = $("btn-pet-rescan");

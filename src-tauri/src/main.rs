@@ -706,6 +706,19 @@ fn set_pet_click_through(app: AppHandle, ignore: bool) {
     }
 }
 
+/// 把桌宠窗带到前台并聚焦: 悬浮输入框获得焦点时调用。透明置顶小窗
+/// 默认不抢前台——原生窗口不在前台时, IME 上下文挂不到 WebView2 上,
+/// 实测候选框飘到屏幕左上角、Ctrl+Space/Wn+Space 也切不动输入法;
+/// set_focus 后输入法正常跟随输入框, 切换也归本窗。
+/// async 形态理由同 move_pet_window: set_focus 要向主线程派发。
+#[tauri::command]
+async fn focus_pet(app: AppHandle) {
+    if let Some(win) = app.get_webview_window("pet") {
+        let _ = win.unminimize();
+        let _ = win.set_focus();
+    }
+}
+
 /// 手动拖动: pet 页按指针位移调这里挪窗（逻辑坐标, 与 JS 的
 /// screenX/screenY 同参照）。必须 async——同步命令在主线程执行,
 /// set_position 又要向主线程派发, 会与 open_pet_window 同款互等卡死。
@@ -828,6 +841,7 @@ const BRIDGE_JS: &str = r#"
       petClose: () => petInvoke('close_pet'),
       startDragPet: () => petInvoke('start_drag_pet'),
       setClickThrough: (ignore) => petInvoke('set_pet_click_through', { ignore: !!ignore }),
+      focusPet: () => petInvoke('focus_pet'),
       movePet: (x, y) => petInvoke('move_pet_window', { x: Number(x), y: Number(y) }),
       resizePet: (scale) => petInvoke('resize_pet_window', { scale: Number(scale) || 1 }),
     };
@@ -908,6 +922,7 @@ fn main() {
             close_pet,
             start_drag_pet,
             set_pet_click_through,
+            focus_pet,
             move_pet_window,
             resize_pet_window
         ])

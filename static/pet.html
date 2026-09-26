@@ -8,7 +8,7 @@
 <!-- 宠物大小在绘制前应用, 防止按默认 100% 先渲染一帧再跳变。
      与 pet.js clampScale 同一范围 [0.5,2], 非法值回退 1 -->
 <script>(function(){try{var p=JSON.parse(localStorage.getItem("xc-pet")||"{}");var s=Number(p.scale);if(!isFinite(s)||s<0.5||s>2)s=1;document.documentElement.style.setProperty("--pet-scale",String(s));}catch(e){}})();</script>
-<link rel="stylesheet" href="/static/pet.css?v=20260925c">
+<link rel="stylesheet" href="/static/pet.css?v=20260926d">
 <style>
   /* 悬浮窗不加载 app.css(那是整套主界面样式), 这里给一份固定深色令牌:
      桌宠浮在任意桌面壁纸上, 玻璃深色底可读性最好, 不跟主题切换。
@@ -28,8 +28,11 @@
     <div id="pet-status">摸鱼中</div>
     <div id="pet-bubble" hidden></div>
   </div>
-  <div id="pet-sprite" title="按住拖动 · 点击互动"></div>
+  <div id="pet-sprite" title="按住拖动 · 点击开关音乐"></div>
+  <input id="pet-input" type="text" maxlength="500" spellcheck="false"
+         autocomplete="off" placeholder="派任务 · 点歌 · 聊天，回车发送"
+         aria-label="桌宠输入框">
 </div>
-<script src="/static/pet.js?v=20260925h" defer></script>
+<script src="/static/pet.js?v=20260926i" defer></script>
 </body>
 </html>

@@ -72,7 +72,6 @@ function runOf(id) {
       reconnected: false,     // 当前连接是否重连（busy_sync 的 busy=false 校正只信重连）
       rlNote: null,           // 限流退避提示行（原地更新, 轮次有进展/收口即撤）
       awaiting: false,        // 忙碌中且正处于等待模型输出的空窗（await_output 起止）
-      awaitT0: null,          // 空窗起点（客户端）: 底部转圈的已耗时计时
     };
   }
   return state.runs[id];
@@ -1451,14 +1450,24 @@ async function deleteSession(id) {
   }
 }
 
+/* 桌宠专属会话 id(悬浮输入框任务的载体): 列表渲染/启动选中都要跳过它。
+ * 读 localStorage 而非文件尾的 petTaskSid 变量——init 渲染可能早于其执行 */
+function petTaskSidSaved() {
+  return localStorage.getItem("xc-pet-task-sid") || "";
+}
+
 function renderSessionList() {
   const list = $("session-list");
   list.innerHTML = "";
   const q = ($("search-input").value || "").trim().toLowerCase();
+  // 桌宠专属会话不进任务列表: 它是悬浮输入框的对话载体, 混在用户
+  // 任务里只会越积越长。会话本体照常存在(WS/轮次/落盘), 仅列表不渲染
+  const petSid = petTaskSidSaved();
   const sessions = state.sessions.filter(
-    s => !q
-      || (s.title || "").toLowerCase().includes(q)
-      || (s.workdir || "").toLowerCase().includes(q));   // 项目路径/目录名也可搜
+    s => s.id !== petSid
+      && (!q
+        || (s.title || "").toLowerCase().includes(q)
+        || (s.workdir || "").toLowerCase().includes(q)));   // 项目路径/目录名也可搜
   const addLabel = text => {
     const l = document.createElement("div");
     l.className = "list-label";
@@ -2192,6 +2201,9 @@ function handleServerMessage(msg, sid) {
   // 装饰性钩子必须隔离——它内部抛错不能拖垮消息主处理链(曾因 pet.js
   // 引用未定义变量, turn_done 全部炸在中断, 界面永远转圈且无法中断)。
   try { window.xcodePet?.onEvent?.(msg, sid); } catch (e) { console.warn("[pet]", e); }
+  // 桌宠任务桥: 桌宠专属会话的正文流攒进缓冲, 轮次收口时把回复回传给
+  // 悬浮窗气泡(任务由悬浮输入框派来, 走完整 agent 轮次——见文件尾 pet 桥)
+  if (petTaskSid && sid === petTaskSid) petTaskObserve(msg);
   // 完成通知（提示音 + 桌面弹窗）: turn_done/error 是轮次终点, 前台/后台
   // 两条路径都从这里过, 单点挂钩全覆盖。内部自己判断"该不该响/该不该弹"。
   if (msg.type === "turn_done" || msg.type === "error") {
@@ -2235,7 +2247,6 @@ function handleServerMessage(msg, sid) {
     else if (msg.type === "tool_result") onToolResult(msg, sid);
     else if (msg.type === "await_output") {
       run.awaiting = run.busy;
-      if (run.awaiting) run.awaitT0 = Date.now();
     }
     else if (msg.type === "context_compacted") addCompactNotice(colOf(sid), true);
     else if (msg.type === "mode_changed") onModeChanged(msg, sid);
@@ -3023,7 +3034,6 @@ function onPermissionRequest(msg, sid) {
   // 等待授权也是"等模型"的一种: 点亮空窗态, 否则画面全静止,
   // 用户会以为这轮已经跑完
   run.awaiting = run.busy;
-  if (run.awaiting) run.awaitT0 = Date.now();
   if (sid2 === state.sessionId) syncThinkingIndicator();
 
   const meta = TOOL_META[msg.tool_name] || { label: msg.tool_name, icon: ICON_TOOL };
@@ -3305,7 +3315,6 @@ function onAwaitOutput(msg, sid) {
   const run = runOf(sid);
   if (run && run.busy) {
     run.awaiting = true;
-    run.awaitT0 = Date.now();
     if (sid === state.sessionId) syncThinkingIndicator();
   }
 }
@@ -3872,42 +3881,31 @@ function setBusyUi(busy) {
 }
 
 /* 本会话是否正卡在计划审批（pendingPerms 全部是 present_plan）。
- * sendCurrent 的"计划接力"路径与思考指示器的标签共用这个判断 */
+ * 侧栏会话项的 awaiting-plan 高亮共用这个判断 */
 function isAwaitingPlan(run) {
   if (!run || !run.pendingPerms) return false;
   const pending = Object.values(run.pendingPerms);
   return pending.length > 0 && pending.every(p => p.tool_name === "present_plan");
 }
 
-/* 底部"思考中"转圈 = 当前会话忙且正处于等待模型输出的空窗（await_output
- * 起至首个内容事件）。此前各事件分支里手工开关、切换会话不重算:
- * 切到空闲会话转圈残留、后台轮次跑完转圈不灭——统一在这里按当前会话重算。 */
+/* "思考中"转圈 = 当前会话忙（整个 busy 期间都转）。此前各事件分支里
+ * 手工开关、切换会话不重算: 切到空闲会话转圈残留、后台轮次跑完转圈不灭
+ * ——统一在这里按当前会话重算。节点挂在当前会话消息列最底部, 随内容滚动。 */
 function syncThinkingIndicator() {
+  let el = $("thinking");
+  if (!el) {   // 节点不在静态 HTML 里, 惰性创建后挪到当前会话消息列末尾
+    el = document.createElement("div");
+    el.id = "thinking";
+    el.innerHTML = '<span class="spin"></span><span class="t">工作中…</span>';
+  }
   const run = curRun();
-  const show = !!(run && run.busy && run.awaiting);
-  $("thinking").style.display = show ? "flex" : "none";
-  if (show) {
-    const pending = run.pendingPerms ? Object.values(run.pendingPerms) : [];
-    const t = $("thinking").querySelector(".t");
-    let label;
-    if (isAwaitingPlan(run)) {
-      label = "等待计划审批…";
-    } else if (pending.length) {
-      label = "等待授权…";
-    } else {
-      label = "思考中…";
-    }
-    // 空窗已耗时: 长会话 prefill / 限流退避可达几十秒, 秒数可见才不像卡死
-    const t0 = run.awaitT0 || (run.curThinking && run.curThinking.t0) || null;
-    const secs = t0 ? Math.floor((Date.now() - t0) / 1000) : 0;
-    t.textContent = secs >= 2 ? label + " " + secs + "s" : label;
+  const show = !!(run && run.busy);
+  el.style.display = show ? "flex" : "none";
+  if (state.sessionId) {
+    colOf(state.sessionId).appendChild(el);
+    if (show) scrollToBottom();   // 挂到列尾会撑高内容: 贴底时跟着滚, 别让转圈悬在视口外
   }
 }
-// 空窗计时走秒刷新: 只在转圈可见时重算, 空闲时零开销
-setInterval(() => {
-  const el = $("thinking");
-  if (el && el.style.display !== "none") syncThinkingIndicator();
-}, 1000);
 
 async function sendCurrent() {
   const input = $("input");
@@ -6208,8 +6206,10 @@ document.addEventListener("scroll", tipHide, true);
   await loadSettings();
   await loadSessions();
   refreshSkillCache();   // 斜杠补全数据源: 预取一次（cwd 视图; 切会话后按需重拉）
-  // 默认选最近的会话（列表已倒序，第一个即最新）; 没有会话则进入草稿态
-  const first = state.sessions[0];
+  // 默认选最近的会话（列表已倒序，第一个即最新）; 没有会话则进入草稿态。
+  // 桌宠专属会话要跳过——它不在任务列表里, 却常常是最新(悬浮输入框一直
+  // 在用), 不跳过的话每次重启都自动打开它
+  const first = state.sessions.find(s => s.id !== petTaskSidSaved());
   if (first) await selectSession(first.id);
   else startDraft();
   if (state.configured === false) openOnboarding();   // 首次使用: 先引导配置供应商
@@ -6266,3 +6266,141 @@ document.addEventListener("scroll", tipHide, true);
   });
   window.addEventListener("blur", () => hsStop());
 })();
+
+/* ============================================================
+ * 桌宠任务桥: 悬浮窗输入框 = 全功能任务入口(与主界面输入框同一条链路)
+ * pet 发文本 → 专属会话「桌宠」(没有则建) → 完整 agent 轮次: 全局模型
+ * + 工具。点歌由 music_play 工具执行(onToolResult 已接), 权限请求会顶到
+ * 悬浮窗的"等你批条子"(点宠物批准)。轮次正文(text_delta)攒缓冲,
+ * turn_done/error 时把最后一段回复回传给桌宠气泡。
+ * 通道与桌宠状态转发同一条: xc-pet-cmd 的 storage 事件, to 字段分方向。
+ * ============================================================ */
+let petTaskSid = null;        // 桌宠专属会话 id(记忆在 localStorage, 失效重建)
+let petReplyBuf = "";         // 本轮 assistant 正文累积
+let petBridgeSeq = 0;
+
+function petBridgeSend(cmd) {
+  try {
+    localStorage.setItem("xc-pet-cmd",
+      JSON.stringify({ ...cmd, to: "pet", __n: ++petBridgeSeq }));
+  } catch { }
+}
+
+/* 整轮正文可能多段(工具之间都有说明), 末段通常是收尾答复——取它。
+ * 截 200: 聊天面板可滚动, 比气泡的 80 字宽裕 */
+function petTaskReply() {
+  const parts = petReplyBuf.split(/\n+/).map(s => s.trim()).filter(Boolean);
+  petReplyBuf = "";
+  return (parts[parts.length - 1] || "").slice(0, 200);
+}
+
+function petTaskObserve(msg) {
+  if (msg.type === "text_delta") {
+    petReplyBuf += msg.text || "";
+  } else if (msg.type === "turn_done") {
+    petBridgeSend({ type: "chat", text: msg.interrupted ? "已停" : petTaskReply() });
+  } else if (msg.type === "error") {
+    petReplyBuf = "";
+    petBridgeSend({ type: "chat",
+                    text: ("出错了: " + String(msg.message || "")).slice(0, 200) });
+  }
+}
+
+/* 桌宠专属模型: 设置页「桌宠模型」存 xc-pet.aiProvider/aiModel, 主窗与
+ * 悬浮窗同源共享。返回 "provider|model" 或空串(=跟随全局) */
+function petModelKey() {
+  try {
+    const p = JSON.parse(localStorage.getItem("xc-pet") || "{}");
+    if (p.aiProvider && p.aiModel) return `${p.aiProvider}|${p.aiModel}`;
+  } catch { }
+  return "";
+}
+
+/* 桌宠会话轮换上限: 单会话任务数到顶即换新——点歌/闲聊/任务全进同一个
+ * 会话会无限膨胀, 压缩频繁触发、会话文件越滚越大。跨天也轮换。 */
+const PET_SESSION_ROTATE_TASKS = 50;
+
+async function petTaskRun(text) {
+  // 轮换: 记住的会话跨了天 / 任务数到顶 → 弃旧建新, 旧的删掉
+  // (桌宠会话不在任务列表显示, 只藏不删会纯漏盘)。删是尽力而为:
+  // 失败也就是多留一个隐藏会话, 不挡新任务。
+  const day = new Date().toDateString();
+  let sid = localStorage.getItem("xc-pet-task-sid") || "";
+  let count = parseInt(localStorage.getItem("xc-pet-task-count") || "0", 10) || 0;
+  if (sid && (localStorage.getItem("xc-pet-task-day") !== day
+              || count >= PET_SESSION_ROTATE_TASKS)) {
+    const old = sid;
+    sid = "";
+    count = 0;
+    localStorage.removeItem("xc-pet-task-sid");
+    localStorage.removeItem("xc-pet-task-count");
+    fetch(`/api/sessions/${old}`, { method: "DELETE" })
+      .then(() => loadSessions()).catch(() => { });
+  }
+  // 会话定位: 记住的 id 还活着就复用; 会话列表尚未加载完时不误判
+  // (空列表≠会话没了, 直接连, 服务端不认再重建不迟)
+  const alive = sid && (state.sessions.length === 0
+    || state.sessions.some(s => s.id === sid));
+  if (!alive) {
+    try {
+      const r = await fetch("/api/sessions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ workdir: "" }),
+      });
+      if (!r.ok) throw new Error("HTTP " + r.status);
+      sid = (await r.json()).id;
+    } catch (e) {
+      petBridgeSend({ type: "chat", text: "任务没派出去: " + (e.message || e) });
+      return;
+    }
+    try {
+      await fetch(`/api/sessions/${sid}/rename`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ title: "桌宠" }),
+      });
+    } catch { /* 命名失败不挡任务 */ }
+    localStorage.setItem("xc-pet-task-sid", sid);
+    loadSessions().catch(() => { });   // 侧栏立即可见, 不阻塞发送
+  }
+  localStorage.setItem("xc-pet-task-day", day);
+  localStorage.setItem("xc-pet-task-count", String(count + 1));
+  petTaskSid = sid;
+  petReplyBuf = "";
+  connectWs(sid);   // 后台会话也要有 WS 才能收发(已有则复用)
+  // 「桌宠」会话跟随桌宠模型: 每次派活前都 sync 一条 set_model——
+  // 用户改了设置立即生效, 且后端按会话缓存 client, 等值是轻操作。
+  // 配置过期的(供应商被删/禁用)本地能查就先拦下, 免得弹错误事件
+  const mk = petModelKey();
+  if (mk) {
+    const bar = mk.indexOf("|");
+    const pid = mk.slice(0, bar), mid = mk.slice(bar + 1);
+    const provs = (state.providerCfg && state.providerCfg.providers) || null;
+    const prov = provs && provs.find(p => p.id === pid && p.enabled !== false);
+    if (!provs || (prov && (prov.models || []).some(m => m.id === mid))) {
+      sendWs({ type: "set_model", provider_id: pid, model_id: mid }, sid);
+    }
+  }
+  sendWs({ type: "user", text, qid: genQid() }, sid);
+}
+
+window.addEventListener("storage", (e) => {
+  if (e.key !== "xc-pet-cmd" || !e.newValue) return;
+  let cmd = null;
+  try { cmd = JSON.parse(e.newValue); } catch { return; }
+  if (!cmd || cmd.to !== "main") return;
+  if (cmd.type === "task") {
+    const text = String(cmd.text || "").trim();
+    if (text) petTaskRun(text.slice(0, 2000));
+  } else if (cmd.type === "music_toggle") {
+    // 桌宠点击 = 开/关音乐: 结果回传, 桌宠气泡回显歌名/暂停态
+    const st = window.xcodeMusicToggle ? window.xcodeMusicToggle() : null;
+    petBridgeSend({
+      type: "chat",
+      text: !st ? "还没选歌, 去面板点一首吧"
+        : st.playing ? "♪ " + String(st.title || "").slice(0, 40)
+        : "♪ 暂停了",
+    });
+  }
+});

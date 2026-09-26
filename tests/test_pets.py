@@ -256,3 +256,161 @@ def test_bundled_pets_pass_contract():
         info, sheet = found
         assert info["id"] == folder.name      # id 即文件夹名(扫描层的约定)
         assert sheet.is_file()
+
+
+# ------------------------------------------------------------
+# 人设(pet.json persona)清洗与透传
+# ------------------------------------------------------------
+
+def test_persona_sanitized(tmp_path):
+    """persona 白名单清洗: 只留 name/style/lines, 超长截断, 空段丢弃。"""
+    d = _make_pet(tmp_path, "persona-pet", manifest={
+        "displayName": "人设猫",
+        "spritesheetPath": "spritesheet.png",
+        "persona": {
+            "name": "  昆哥  ",
+            "style": "毒舌老哥 " * 60,           # 超长 → 截到 300
+            "lines": {
+                "done": ["收工", "  ", 42, "溜了"],   # 脏元素被滤掉
+                "junk-group": "not-a-list",           # 非数组整组丢弃
+                "ack": [],                            # 空组丢弃
+            },
+            "evil": {"deep": True},                   # 未知键丢弃
+        },
+    })
+    info, _ = server._scan_pet_folder(d, "install")
+    persona = info["persona"]
+    assert persona["name"] == "昆哥"
+    assert len(persona["style"]) <= 300 and "毒舌老哥" in persona["style"]
+    assert persona["lines"] == {"done": ["收工", "溜了"]}
+    assert "evil" not in persona
+
+
+def test_persona_absent_or_invalid_omitted(tmp_path):
+    """没有 persona / 不是 dict: 信息里不带该键, 老清单零影响。"""
+    d = _make_pet(tmp_path, "plain")
+    info, _ = server._scan_pet_folder(d, "install")
+    assert "persona" not in info
+
+    d2 = _make_pet(tmp_path, "weird", manifest={
+        "spritesheetPath": "spritesheet.png", "persona": "毒舌",
+    })
+    info2, _ = server._scan_pet_folder(d2, "install")
+    assert "persona" not in info2
+
+
+# ------------------------------------------------------------
+# REST /api/pet/chat（桌宠周期点评）
+# ------------------------------------------------------------
+
+def _stub_generate(monkeypatch, reply):
+    """替换全局单例的 generate_text, 记录入参供断言。"""
+    calls = {}
+
+    def fake(system, user, max_tokens=512):
+        calls["system"] = system
+        calls["user"] = user
+        calls["max_tokens"] = max_tokens
+        return reply
+
+    monkeypatch.setattr(server.api_client, "generate_text", fake)
+    return calls
+
+
+def test_pet_chat_quip_ok(client, monkeypatch):
+    calls = _stub_generate(monkeypatch, '{"say": "键盘又热了"}')
+    r = client.post("/api/pet/chat", json={
+        "persona": {"name": "昆哥", "style": "毒舌老哥"},
+        "state": {"event": "Bash 连着用了 6 次", "base": "running",
+                  "run_minutes": 18, "top_tools": "Bash×6 Read×2",
+                  "errors": 1, "hour": 23, "busy_sessions": 2},
+    })
+    assert r.status_code == 200
+    assert r.json() == {"say": "键盘又热了"}
+    assert calls["max_tokens"] == 64
+    joined = "\n".join(calls["system"])
+    assert "昆哥" in joined and "毒舌老哥" in joined          # 人设进 system
+    user = calls["user"]
+    assert "刚刚发生: Bash 连着用了 6 次" in user             # 事件上下文
+    assert "18 分钟" in user and "Bash×6" in user             # 现场统计
+    assert "出错 1 次" in user and "23 点" in user
+    assert "针对刚发生的这件事" in user                       # 事件措辞
+    assert "打工" in user
+
+
+def test_pet_chat_quip_without_event(client, monkeypatch):
+    """无事件 = 兜底随机点评: 通用措辞, 无"刚刚发生"行。"""
+    calls = _stub_generate(monkeypatch, '{"say": "稳得很"}')
+    r = client.post("/api/pet/chat", json={
+        "state": {"base": "idle"},
+    })
+    assert r.json() == {"say": "稳得很"}
+    assert "刚刚发生" not in calls["user"]
+    assert "结合人设和现场" in calls["user"]
+
+
+def test_pet_chat_parse_fallback(client, monkeypatch):
+    """认不出 JSON: 整段当 say; 缺 say 键兜成空。"""
+    _stub_generate(monkeypatch, "就一句大实话")
+    assert client.post("/api/pet/chat", json={}).json() == {
+        "say": "就一句大实话"}
+
+    _stub_generate(monkeypatch, '{"msg": "没有 say 键"}')
+    r = client.post("/api/pet/chat", json={})
+    assert r.json()["say"] == ""                              # 空回退, 不抛错
+
+
+def test_pet_chat_generate_failure_returns_empty(client, monkeypatch):
+    def boom(system, user, max_tokens=512):
+        raise RuntimeError("网络炸了")
+
+    monkeypatch.setattr(server.api_client, "generate_text", boom)
+    r = client.post("/api/pet/chat", json={})
+    assert r.status_code == 200
+    assert r.json() == {"say": ""}
+
+
+def test_pet_chat_unknown_provider_falls_back_to_global(client, monkeypatch):
+    """provider 不存在/被禁用: 回落全局单例, 也不留桌宠专属缓存。"""
+    monkeypatch.setattr(server, "_provider_cfg",
+                        {"active": {}, "providers": []})
+    monkeypatch.setattr(server, "_pet_client", None)
+    calls = _stub_generate(monkeypatch, '{"say": "在"}')
+    r = client.post("/api/pet/chat", json={
+        "provider_id": "ghost", "model_id": "x"})
+    assert r.json() == {"say": "在"}
+    assert calls                                              # 走的就是全局单例
+    assert server._pet_client is None
+
+
+def test_pet_chat_dedicated_client_cached(client, monkeypatch):
+    """指定 provider: 按其配置构建专属 client, 连接要素不变命中缓存,
+    换模型即重建。"""
+    monkeypatch.setattr(server, "_provider_cfg", {
+        "active": {"provider": "global-p"},
+        "providers": [{"id": "cheap", "enabled": True, "api_key": "k-1",
+                       "base_url": "https://api.cheap.example/v1",
+                       "protocol": "openai", "models": [{"id": "mini"}]},
+                      {"id": "global-p", "enabled": True, "api_key": "k-2",
+                       "base_url": "", "protocol": "anthropic",
+                       "models": [{"id": "big"}]}],
+    })
+    monkeypatch.setattr(server, "_pet_client", None)
+    built = []
+
+    def fake_make(protocol, *, api_key, model, base_url, **kw):
+        class _Stub:
+            pass
+        stub = _Stub()
+        built.append((protocol, api_key, model, base_url))
+        return stub
+
+    monkeypatch.setattr(server, "make_api_client", fake_make)
+    cli1 = server._pet_api_client("cheap", "mini")
+    cli2 = server._pet_api_client("cheap", "mini")
+    assert cli1 is cli2 and len(built) == 1                   # 缓存命中
+    assert built[0] == ("openai", "k-1", "mini", "https://api.cheap.example/v1")
+    server._pet_api_client("cheap", "other")                  # 换模型 → 重建
+    assert len(built) == 2 and built[1][2] == "other"
+    # 指向全局 active 的 provider: 直接用全局单例, 不建专属
+    assert server._pet_api_client("global-p", None) is server.api_client

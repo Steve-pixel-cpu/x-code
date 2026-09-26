@@ -204,7 +204,6 @@
   </button>
 
   <div id="composer">
-    <div id="thinking"><span class="spin"></span><span class="t">思考中…</span></div>
     <div id="input-card">
       <div id="ws-dock"></div>
       <div id="queue-cards"></div>
@@ -408,6 +407,26 @@
           <input type="range" id="pet-size" min="50" max="200" step="5" value="100" aria-label="宠物大小">
           <span class="bg-bright-val" id="pet-size-val">100%</span>
         </div>
+        <div class="set-row">
+          <div class="set-info">
+            <div class="set-name">AI 互动</div>
+            <div class="set-desc">打工时由模型周期冒一句趣味点评（用下方桌宠模型，省 token）；悬浮输入框派任务/点歌走完整会话（桌宠模型+工具），不受此开关影响</div>
+          </div>
+          <label class="prov-switch">
+            <input type="checkbox" id="pet-ai-chatter">
+            <i class="track"></i>
+          </label>
+        </div>
+        <div class="set-row">
+          <div class="set-info">
+            <div class="set-name">桌宠模型</div>
+            <div class="set-desc">驱动桌宠周期点评与悬浮输入框任务的模型，可选便宜的小模型；留空跟随全局模型</div>
+          </div>
+          <button type="button" class="dd set-dd" id="sel-pet-model">
+            <span class="dd-label">跟随全局模型</span>
+            <span class="dd-chev"><svg width="9" height="6" viewBox="0 0 9 6" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M1 1l3.5 3.5L8 1"/></svg></span>
+          </button>
+        </div>
         <div class="set-row pet-set-col">
           <div class="set-info">
             <div class="set-name">宠物列表</div>
@@ -573,8 +592,8 @@
   </div>
 </div>
 
-<script src="/static/app.js?v=20260925t" defer></script>
-<script src="/static/music.js?v=20260925e" defer></script>
-<script src="/static/pet.js?v=20260925h" defer></script>
+<script src="/static/app.js?v=20260926f" defer></script>
+<script src="/static/music.js?v=20260926b" defer></script>
+<script src="/static/pet.js?v=20260926a" defer></script>
 </body>
 </html>

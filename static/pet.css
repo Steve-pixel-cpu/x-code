@@ -131,6 +131,43 @@
   to   { opacity: 1; transform: translateY(0); }
 }
 
+/* 悬浮输入框: 常驻占位(精灵不因浮现而跳动), 平时隐形, 悬浮窗口浮现。
+   点歌/和桌宠说话的入口——文本经 pet.js 转发(AI 开=智能点歌+聊天,
+   AI 关=直接当搜索词)。按住拖动时 :active 生效自动让路, 不挡拖姿 */
+#pet-input {
+  margin-top: 3px;
+  width: 216px;
+  max-width: calc(100vw - 24px);
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--text);
+  background: var(--pop-bg);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 5px 12px;
+  outline: none;
+  text-align: center;
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, .3);
+  zoom: var(--pet-scale, 1);
+  opacity: 0;
+  transform: translateY(4px);
+  pointer-events: none;
+  transition: opacity .18s ease, transform .18s ease;
+}
+#pet-input::placeholder { color: var(--text-3); }
+#pet-input:focus {
+  border-color: var(--accent);
+  text-align: left;
+}
+#pet-float:hover #pet-input,
+#pet-input:focus {
+  opacity: .96;
+  transform: none;
+  pointer-events: auto;
+}
+
 /* ---------- 主界面: 设置→桌宠 的宠物列表 ---------- */
 .pet-set-col { flex-wrap: wrap; }
 #pet-dir {

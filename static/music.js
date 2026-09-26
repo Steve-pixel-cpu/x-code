@@ -44,6 +44,7 @@
     try {
       localStorage.setItem(MKEY, JSON.stringify({
         mode: mstate.mode,
+        src: mstate.src,   // 持久化音源: 重启不再重置, 桌宠点歌也按它读
         vol: audio ? Math.round(audio.volume * 100) : (pref.vol ?? 70),
         dock: !$("music-dock").hidden,
         queue: mstate.queue, qname: mstate.qname, index: mstate.index,
@@ -805,6 +806,8 @@
 
   /* 上次亮着播放条 → 这次直接恢复 */
   if (pref.dock) $("music-dock").hidden = false;
+  /* 上次的搜索音源也回来（桌宠点歌桥按它选搜索端点） */
+  if (pref.src === "bili" || pref.src === "netease") mstate.src = pref.src;
   /* 上次的队列/当前歌恢复回来（收藏和歌单在服务端, 不走这里） */
   if (Array.isArray(pref.queue) && pref.queue.length) {
     mstate.queue = pref.queue;
@@ -858,6 +861,7 @@
       b.classList.add("on");
       mstate.src = b.dataset.src;
       $("music-src-btns").dataset.src = mstate.src;   // 驱动滑块位
+      savePref();                                     // 音源持久化(桌宠点歌也读)
       const input = $("music-search-input");
       input.placeholder = mstate.src === "bili"
         ? "搜视频 / UP主，回车搜索"
@@ -939,5 +943,17 @@
     }
     playIndex(at);           // 内部 savePref + 刷条 + 拉直链播放
     return true;
+  };
+
+  /* ---- 桌宠点击开关播放 ----
+   * 暂停/续播当前歌(续播含刷新后首播的挂源路径)。返回切换后的
+   * {title, artist, playing} 供桌宠气泡回显; 队列是空的返回 null——
+   * 此时 togglePlay 已顺带打开选歌面板引导。 */
+  window.xcodeMusicToggle = function () {
+    if (!DESKTOP_PAGE) return null;
+    togglePlay();
+    const s = curSong();
+    if (!s) return null;
+    return { title: s.name, artist: s.artist, playing: !getAudio().paused };
   };
 })();
