@@ -201,7 +201,8 @@ def test_api_roundtrip_rebuilds_client(monkeypatch, tmp_path):
 
     saved = asyncio.run(server.api_save_utility_provider(
         {"provider": "budget", "model": "glm-4.5-air"}))
-    assert saved == {"provider": "budget", "model": "glm-4.5-air", "valid": True}
+    assert saved == {"provider": "budget", "model": "glm-4.5-air", "valid": True,
+                     "effective_model": "glm-4.5-air"}   # 前端状态栏靠它, 不再出 "?" 
     assert server._utility_client is not None
     assert server._utility_client.model == "glm-4.5-air"
 

@@ -2785,7 +2785,9 @@ async def api_save_utility_provider(request: dict):
     setting = save_utility_provider_setting(
         {"provider": pid, "model": request.get("model")})
     _rebuild_utility_client()
-    return {**setting, "valid": load_utility_provider() is not None}
+    return {**setting, "valid": load_utility_provider() is not None,
+            "effective_model": _utility_client.model if _utility_client
+            else (api_client.model or None)}
 
 
 @app.post("/api/providers")
