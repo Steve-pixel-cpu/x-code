@@ -83,3 +83,25 @@ compact_session(msgs, config) -> CompactionResult
 - 最近用户请求收集后要**反转回时间序**（因为是 rev + take 收集的）
 - 文件候选提取: 要有 `/`（排除纯文件名）且有已知扩展名（.rs/.py/.ts 等）
 - `<analysis>` 块**整个删除**，`<summary>` 块只提取内容
+
+## 三层压缩体系与 2026-09 新增件
+
+完整层次：MicroCompact（清旧工具结果, 零调用）→ **Session Memory 中间层**
+（预建滚动摘要, 压缩时零调用）→ Full Compact（LLM 现场摘要, 兜底）。
+
+### Session Memory 中间层（compact.SessionMemory）
+
+- 每轮 `run_turn` 收束后, 守护线程把未消化消息增量合并进滚动摘要
+  （走 `_llm_summarize` side-call——无工具、不进历史, 天然无递归）；
+  攒够 `_MEMORY_DIGEST_MIN_NEW = 16` 条才发调用, 单飞行（`_memory_busy`）
+- 压缩激活时 `_build_compact_summary` 三级查找: 摘要覆盖归档区
+  （`digested >= keep_from`）→ **直接用, 零调用**；覆盖不全且比
+  `_compact_cache` 新 → 当增量起点；否则走原现场摘要
+- 1.0 仅驻内存: 重启/恢复后清空, 回落现场摘要, 不劣于不存在
+
+### 压缩摘要熔断器
+
+LLM 摘要连续失败 `_SUMMARY_BREAKER_LIMIT = 3` 次 → 本会话停用 LLM 摘要,
+直接走规则摘要——否则"压缩激活 + 端点持续故障"会让每轮请求都重试一次
+注定失败的 side-call。手动 `/compact`、热换 `set_api_client` 复位
+（用户明确要求重试/端点已换）。

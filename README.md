@@ -11,14 +11,14 @@
 - **Agent 工具循环**：模型自主决定调用工具 → 执行 → 回传结果，循环往复直到完成；支持 SSE 流式输出、thinking 块、单轮/循环层 token 与迭代预算
 - **MCP 客户端**：配置文件里声明 MCP 服务器（stdio 子进程 / streamable HTTP / SSE），启动时自动连接，外部工具以 `mcp__<服务器>__<工具>` 注入工具循环，与内置工具同管线（权限审批、hooks、输出截断）；Web 端支持 `/api/mcp/reload` 热重载
 - **Skills 技能包**：Claude Code 兼容的 `SKILL.md`（YAML frontmatter + 正文指令，可捆绑脚本/模板），任务匹配时模型先用 `skill_read` 读正文再遵循（渐进式披露，只注入 name+description 清单省 token）；项目级 `.claude/skills/` 与用户级 `~/.x-code/skills/` 两级发现、同名覆盖；Web 设置页从 GitHub 仓库一键安装社区 skills（如 `anthropics/skills`），装完即时生效无需重启；CLI `/skills` 查看
-- **内置工具集**：`bash` / `powershell`（Windows 下走 Git Bash，UTF-8 无乱码）、`read_file` / `write_file`、`grep` / `glob`（纯 Python 实现，免 shell）、后台任务 `task_output` / `task_stop`、任务清单 `todo`、计划卡 `present_plan`、浏览器实测 `browser_navigate` / `browser_snapshot` / `browser_click` / `browser_type` / `browser_console` 等（Playwright 无头 Chromium，可实际操作 Web 系统做功能测试）
+- **内置工具集**：`bash` / `powershell`（Windows 下走 Git Bash，UTF-8 无乱码）、`read_file` / `write_file`、`grep` / `glob`（纯 Python 实现，免 shell）、后台任务 `task_output` / `task_stop`、任务清单 `todo`、计划卡 `present_plan`、浏览器实测 `browser_navigate` / `browser_snapshot` / `browser_click` / `browser_type` / `browser_console` 等（Playwright 无头 Chromium，可实际操作 Web 系统做功能测试）；工具输出二段式截断——bash/搜索类超限全文落盘（`~/.x-code/tool-results/`），会话里回首尾 + 路径，中段信息可经 read_file 找回
 - **三级权限体系**：`plan`（只读）→ `workspace-write`（workspace 根内可写，写路径分级：根外审批/敏感路径任何模式都强制确认）→ `danger-full-access`（全放行）；每个工具登记权限档位，越权时 CLI 弹审批面板、Web 端弹审批卡；只读命令白名单 + 命令前缀白名单（全局/会话级）+ 附加目录记忆治审批疲劳，plan 模式下可一键升级
 - **多 Agent 编排**：Leader 通过 `agent_tool` / `agent_status` / `agent_reap` / `agent_list` 派生 subagent 并行干活，白名单 + 规格过滤防递归失控，孤儿 agent 启动对账
 - **Headless 模式**：`-p "任务"` 一次性执行后退出，脚本/管道/定时任务可直接调用（`git diff | python main.py -p "审查这次改动"`）；stdout 只出最终结果（`--output-format json` 另含用量/子状态），进度走 stderr；退出码表意（0=完成 1=错误 2=中断 3=预算收束 4=用法错误）；`--model` / `--permission-mode` 单次覆盖；无人值守下权限升级自动拒绝
-- **会话持久化**：JSONL 增量落盘、断点恢复（`-c` / `--resume`）、自动命名、auto-compact（上下文超阈值自动压缩，保留近几条消息）
+- **会话持久化**：JSONL 增量落盘、断点恢复（`-c` / `--resume`）、自动命名、auto-compact（上下文超阈值自动压缩，保留近几条消息；Session Memory 中间层后台预建滚动摘要，压缩时零 LLM 调用；摘要连续失败熔断，规则摘要兜底）
 - **用户记忆**：跨会话画像事实记忆，让 Agent 更懂你。对话中模型用 `memory_write` / `memory_update` / `memory_delete` 三工具自动沉淀（免审批、写入反馈可见），每次会话注入系统提示词（prompt cache 友好：静态指引 + 动态边界之下独立 section）；存储为结构化 JSON（`~/.x-code/memory.json`），`MemoryStore` 抽象为 RAG 检索预留接口；零参数遗忘机制——200 条容量触发 LRU 淘汰（hits 为主权重、user 来源豁免、淘汰归档可找回）；CLI `/memory` 管理命令 + Web 设置页"记忆"区块
 - **Hooks**：`PreToolUse` / `PostToolUse` 挂 shell 命令，工具执行前后触发
-- **配置分层**：用户全局 → 项目 → 本地三级 JSON 配置深度合并，环境变量可覆盖；模型、思考档位（low/medium/high/max）、超时、预算均可配
+- **配置分层**：用户全局 → 项目 → 本地三级 JSON 配置深度合并，环境变量可覆盖；模型、思考档位（low/medium/high/max）、超时、预算均可配；`utilityProvider` 可把压缩摘要/自动命名等 side-call 指到便宜小模型
 - **限流重试**：连接抖动指数退避 + 429 专用长退避曲线（累计约 30s），重试进度实时上报界面
 - **摸鱼电台**：Web 端内置网易云音乐公开接口的在线电台（搜索 + 流式播放 + 歌词 + 本地收藏/自定义歌单，收藏与歌单存 `~/.x-code/music-library.json`，播放列表跨重启恢复）
 

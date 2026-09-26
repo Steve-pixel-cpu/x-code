@@ -23,7 +23,13 @@
 
 ---
 
-## 待办 1：Session Memory（三层压缩体系的中间层）
+## 待办 1：Session Memory（三层压缩体系的中间层）✅（已落地 2026-09）
+
+**状态**：已落地。`compact.SessionMemory` + `runtime._run_session_memory_update`
+（run_turn 收束后守护线程增量消化, 攒 16 条新消息才发调用, 单飞行）；
+`_build_compact_summary` 三级查找——覆盖归档区零调用直接用 / 覆盖不全当增量
+起点 / 现场摘要兜底。1.0 仅驻内存, 重启后回落现场摘要（行为不劣于不存在）。
+**尚未做**：五级警告状态机、增量消化时的 tool_use 配对精细裁剪（当前整批喂）。
 
 **价值**：全量压缩（LLM 摘要）要付一次 750k 输入的 side-call；session memory 用"后台代理持续维护的
 滚动摘要"替代，压缩时零 LLM 调用、零延迟。Claude 的三层体系：
@@ -75,7 +81,12 @@ blockingLimit        = effectiveWindow -  3_000   # 强制手动压缩
 
 ---
 
-## 待办 3：工具结果超限落盘（替代中段丢弃）
+## 待办 3：工具结果超限落盘（替代中段丢弃）✅（已落地 2026-09）
+
+**状态**：已落地。`tools.SPILL_LIMITS`（bash/powershell 30k, grep/glob/edit_file
+100k）→ 超限全文写 `~/.x-code/tool-results/{hash}.txt`, 回显首尾 + 路径标记；
+`resumable_spill_path` 让 MicroCompact 占位符带落盘路径（被清结果可找回）；
+mtime 清 7 天过期文件, 落盘失败静默退化为纯截断。read_file 维持纯截断。
 
 **价值**：现在 `truncate_tool_output` 超过 20k 字符把中段掐掉，信息永久丢失。Claude 的方案是二段式：
 超限全文写盘、只返回首尾预览 + 文件路径，模型需要全量时自己再读。
@@ -143,7 +154,7 @@ danger-full-access/allow）下都强制人工裁决，不可被命令白名单�
   注意与 MicroCompact 占位符的交互——占位符替换后模型重读需要真实内容，需保留最近 N 条的原文（02 章）
 - **Stale Write Guard**：Edit 前比对 FileStateCache 的 mtime（Windows 加内容比较 fallback），
   "File has been modified since read. Read it again."（02 章）
-- **工具排序保缓存**：内置工具连续前缀 + MCP 工具后缀，外部工具插中间会让全部下游缓存失效（12 倍成本）（02 章）
+- **工具排序保缓存** ✅（已落地 2026-09）：skill_read 固定插在内置/MCP 边界（`sync_skill_tools`）, MCP 热重载不再把吸到中段的内置工具挤位; 不变式钉在 tests/test_tool_order.py
 - **后台任务 size watchdog**：每 5s stat 输出文件，超限 SIGKILL（Claude 曾被填满 768GB 磁盘）（06 章）
 - **记忆头部预计算**：相对时间戳（"saved 3 days ago"）会打爆 prompt cache，附件头部要预计算成稳定文本（10 章）
 - **环境信息会话级快照**：git status 等 memoize 为会话快照，不随对话更新（10 章）

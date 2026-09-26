@@ -39,3 +39,18 @@ write_tool(input_json) -> str   # 写文件
 - `bash_tool` 要设 `timeout`，防止死循环命令卡住
 - stderr 要和 stdout 一起返回，不能丢掉
 - 文件不存在时要 catch `FileNotFoundError`，返回错误信息而不是抛异常
+
+## 二段式截断（工具结果落盘, 2026-09）
+
+`truncate_tool_output(output, tool_name)` 现在分两级：
+
+1. **落盘型工具**（`SPILL_LIMITS`: bash/powershell 30k, grep/glob/edit_file 100k）:
+   超限全文写 `~/.x-code/tool-results/{sha256前16}.txt`（同内容去重）,
+   会话里只回首尾预览 + ``Full output saved to `{path}` `` 标记。模型需要
+   中段时自己 `read_file`——中段信息不再永久丢失。
+2. **其余工具**（含 read_file——自带分页且落盘会形成"读结果"循环依赖）:
+   维持 20k 纯首尾截断。
+
+配套闭环：MicroCompact 占位符会从被清结果里提取落盘路径
+（`resumable_spill_path`）附在占位符上——被清掉的旧结果可找回, 不再是黑洞。
+落盘按 mtime 清 7 天前的文件（每小时节流一次）；任何落盘失败静默退化为纯截断。

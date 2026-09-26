@@ -87,3 +87,17 @@ result = deep_merge(a, b)
 | `tokenBudget` | `CLAUDE_TOKEN_BUDGET` | auto-compact 阈值：最近一次调用 input_tokens 达到即压缩 |
 | `thinkingLevel` | `CLAUDE_THINKING_LEVEL` | 思考档位 low/medium/high/max，默认 medium；budget 映射见 api_client.py |
 | `turnTokenBudget` | `CLAUDE_TURN_TOKEN_BUDGET` | 单轮累计 output tokens（含思考）上限，默认 65536，超限本轮提前收束 |
+
+| `utilityProvider` | — | side-call 专用供应商：`{"provider": <providers 里的 id>, "model": "<模型名>"}`。压缩摘要/会话记忆摘要/自动命名走它, 主循环不动; 未配置/无效回落主模型 |
+
+### utilityProvider（side-call 小模型, 2026-09）
+
+整理型调用（压缩摘要、Session Memory 消化、会话自动命名）不贵在频率而贵在
+用主模型——配置一个便宜供应商后这些调用全部走小模型, 主循环 token 不受影响。
+
+- 配置在 `settings.json` 顶层: `"utilityProvider": {"provider": "<id>", "model": "..."}`
+- `config.load_utility_provider()` 校验（指向存在且 enabled 且有 key/base_url）,
+  无效一律返回 None → 回落主模型, 行为与未配置一致
+- CLI 在 `_assemble` 构建（`runtime.set_utility_client`）; Web 在
+  `_apply_provider_config` 时随主配置重建（`server._utility_client`）,
+  会话在 `load_runtime_for` 时挂载
