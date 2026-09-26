@@ -4527,6 +4527,7 @@ async function loadSettings() {
     const [r, pr] = await Promise.all([fetch("/api/settings"), fetch("/api/providers")]);
     const s = await r.json();
     state.providerCfg = await pr.json();
+    loadUtilityProvider();   // side-call 小模型设置（下拉项依赖供应商列表）
     syncModelDropdown(s.provider_id, s.model_id);
     modeDd.setValue(s.permission_mode);
     thinkDd.setValue(s.thinking_level);
@@ -4967,6 +4968,79 @@ function currentMaxIter() {
   });
 }
 
+/* ---------- 设置 → 模型: Side-call 小模型（utilityProvider） ----------
+ * 压缩摘要/会话记忆摘要/自动命名等"整理型"调用专用。独立端点读写原始
+ * 设置（不含供应商 key），保存后服务端即时重建 utility client。 */
+async function loadUtilityProvider() {
+  try {
+    state.utilityCfg = await fetch("/api/utility-provider").then(r => r.json());
+    syncUtilityControls();
+  } catch (e) { console.error("加载 side-call 模型配置失败", e); }
+}
+function syncUtilityControls() {
+  const sel = $("ut-provider");
+  if (!sel) return;
+  sel.innerHTML = "";
+  const optNone = document.createElement("option");
+  optNone.value = "";
+  optNone.textContent = "不使用（跟主模型）";
+  sel.append(optNone);
+  for (const p of (state.providerCfg?.providers || [])) {
+    const o = document.createElement("option");
+    o.value = p.id;
+    o.textContent = p.name || p.id;
+    sel.append(o);
+  }
+  sel.value = state.utilityCfg?.provider || "";
+  $("ut-model").value = state.utilityCfg?.model || "";
+  renderUtilityStatus();
+}
+function renderUtilityStatus() {
+  const s = state.utilityCfg;
+  const el = $("ut-status");
+  if (!s || !el) return;
+  el.classList.remove("err");
+  if (!s.provider) el.textContent = "当前：跟主模型";
+  else if (s.valid) el.textContent = `当前：${s.effective_model || "?"}（side-call）`;
+  else { el.textContent = "已配置但不可用（供应商被禁用或缺 key），暂跟主模型"; el.classList.add("err"); }
+}
+let utSaveTimer = null;
+function scheduleUtilitySave() {
+  clearTimeout(utSaveTimer);
+  utSaveTimer = setTimeout(saveUtilityProvider, 800);   // 与供应商表单同一防抖口径
+}
+async function saveUtilityProvider() {
+  clearTimeout(utSaveTimer);
+  utSaveTimer = null;
+  try {
+    state.utilityCfg = await fetch("/api/utility-provider", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        provider: $("ut-provider").value,
+        model: $("ut-model").value.trim(),
+      }),
+    }).then(async r => {
+      if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `HTTP ${r.status}`);
+      return r.json();
+    });
+    renderUtilityStatus();
+  } catch (e) {
+    const el = $("ut-status");
+    if (el) { el.textContent = "保存失败: " + e.message; el.classList.add("err"); }
+  }
+}
+{
+  const sel = $("ut-provider");
+  const model = $("ut-model");
+  sel.addEventListener("change", scheduleUtilitySave);
+  model.addEventListener("input", scheduleUtilitySave);
+  model.addEventListener("keydown", ev => {
+    ev.stopPropagation();   // 别让 Enter/Esc 冒泡成全局快捷键
+    if (ev.key === "Enter") saveUtilityProvider();
+  });
+}
+
 /* ---------- 设置 → 配置文件: 用系统默认编辑器打开 settings.json ---------- */
 $("btn-open-config").onclick = async () => {
   try {
@@ -5031,6 +5105,7 @@ async function persistProviders() {
       lp.protocol = sp.protocol;
     }
     provStatus("已保存");
+    syncUtilityControls();   // 供应商改名/增删后刷新 side-call 下拉选项
     // 刷新 composer 模型下拉。模型改名/删除（防抖自动保存期间是常态）会让
     // 当前显示的键从列表里消失, syncLabel 找不到就把原始 provider|model 键
     // 铺在界面上（用户看到的"乱码"）。按会话显示链回填第一个仍存在的键,
@@ -5970,33 +6045,54 @@ async function loadMemories() {
   list.innerHTML = "";
   if (!memories.length) {
     const empty = document.createElement("div");
-    empty.className = "al-empty";
-    empty.textContent = "还没有记忆。对话中让 Agent 记，或上方手动添加。";
+    empty.className = "mem-empty";
+    const ico = document.createElement("div");
+    ico.className = "mem-empty-ico";
+    ico.textContent = "🧠";
+    const main = document.createElement("div");
+    main.className = "mem-empty-main";
+    main.textContent = "还没有记忆";
+    const sub = document.createElement("div");
+    sub.className = "mem-empty-sub";
+    sub.textContent = "对话中让 Agent 记，或在上方手动添加一条";
+    empty.appendChild(ico);
+    empty.appendChild(main);
+    empty.appendChild(sub);
     list.appendChild(empty);
     return;
   }
   for (const m of memories) {
     const item = document.createElement("div");
-    item.className = "skill-item";
-    const head = document.createElement("div");
-    head.className = "skill-item-head";
-    const cat = document.createElement("span");
-    cat.className = "skill-name";
-    cat.textContent = `[${MEM_CAT_LABEL[m.category] || m.category}]`;
-    const content = document.createElement("span");
-    content.style.flex = "1";
+    item.className = "mem-item";
+    const main = document.createElement("div");
+    main.className = "mem-main";
+    const content = document.createElement("div");
+    content.className = "mem-content";
     content.textContent = m.content;
+    const meta = document.createElement("div");
+    meta.className = "mem-meta";
+    const cat = document.createElement("span");
+    cat.className = `mem-cat mem-cat-${m.category || "fact"}`;
+    cat.textContent = MEM_CAT_LABEL[m.category] || m.category;
     const badge = document.createElement("span");
-    badge.className = `skill-src skill-src-${m.source === "user" ? "project" : "user"}`;
+    badge.className = `mem-src ${m.source === "user" ? "mem-src-user" : "mem-src-agent"}`;
     badge.textContent = m.source === "user" ? "用户" : "Agent";
-    head.appendChild(cat);
-    head.appendChild(content);
-    head.appendChild(badge);
-    item.appendChild(head);
+    meta.appendChild(cat);
+    meta.appendChild(badge);
+    if (m.created_at) {
+      const time = document.createElement("span");
+      time.className = "mem-time";
+      time.textContent = (m.created_at || "").slice(0, 10);
+      meta.appendChild(time);
+    }
+    main.appendChild(content);
+    main.appendChild(meta);
+    item.appendChild(main);
     const del = document.createElement("button");
     del.type = "button";
-    del.className = "icon-act al-del skill-del";
+    del.className = "icon-act mem-del";
     del.textContent = "删除";
+    del.title = "删除这条记忆";
     del.onclick = async () => {
       del.disabled = true;
       try {

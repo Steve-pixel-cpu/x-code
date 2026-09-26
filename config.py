@@ -501,6 +501,46 @@ def load_utility_provider() -> Optional[dict]:
     }
 
 
+def load_utility_provider_setting() -> dict:
+    """读原始设置（设置页 UI 用, 不含解析出的 key/地址——那是
+    load_utility_provider 的事）。返回 {"provider": <id|None>,
+    "model": <名|None>}。"""
+    try:
+        data = json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {"provider": None, "model": None}
+    if not isinstance(data, dict):
+        return {"provider": None, "model": None}
+    want = data.get(UTILITY_PROVIDER_KEY)
+    if not isinstance(want, dict):
+        return {"provider": None, "model": None}
+    return {"provider": want.get("provider") or None,
+            "model": str(want.get("model") or "").strip() or None}
+
+
+def save_utility_provider_setting(want: Optional[dict]) -> dict:
+    """写原始设置: 读-改-写保留文件里其他 key。provider 为空 = 清除
+    （整键删除, 回落主模型）。返回清洗后的生效设置。"""
+    cleaned = {"provider": None, "model": None}
+    if isinstance(want, dict):
+        cleaned = {"provider": str(want.get("provider") or "").strip() or None,
+                   "model": str(want.get("model") or "").strip() or None}
+    try:
+        data = json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            data = {}
+    except (OSError, ValueError):
+        data = {}
+    if cleaned["provider"] is None:
+        data.pop(UTILITY_PROVIDER_KEY, None)
+    else:
+        data[UTILITY_PROVIDER_KEY] = cleaned
+    SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    SETTINGS_FILE.write_text(
+        json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    return cleaned
+
+
 # 命令前缀白名单: 与供应商配置同文件（commandAllowlist 键）, 读-改-写
 # 保留其他 key。规则是 shell 词序前缀（如 "git push"、"uv run pytest"）,
 # 授权层按词对齐匹配——见 permissions.shell_command_matches_allowlist。

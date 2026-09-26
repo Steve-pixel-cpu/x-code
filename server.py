@@ -60,7 +60,8 @@ from api_client import (
 )
 from config import (USER_DIR, SETTINGS_FILE, ConfigLoader, McpServerConfig,
                     RuntimeConfig, load_providers, save_providers,
-                    load_utility_provider,
+                    load_utility_provider, load_utility_provider_setting,
+                    save_utility_provider_setting,
                     load_command_allowlist, save_command_allowlist,
                     load_additional_directories, save_additional_directories,
                     load_command_denylist, save_command_denylist,
@@ -2760,6 +2761,31 @@ async def api_permission_respond(request: dict):
 @app.get("/api/providers")
 async def api_get_providers():
     return _provider_cfg
+
+
+@app.get("/api/utility-provider")
+async def api_get_utility_provider():
+    """设置页的 side-call 小模型配置: 原始设置 + 有效性 + 当前实际生效模型
+    （诊断用, 便于发现"配了但没生效"）。不含解析出的 key/地址。"""
+    setting = load_utility_provider_setting()
+    return {**setting,
+            "valid": load_utility_provider() is not None,
+            "effective_model": _utility_client.model if _utility_client
+            else (api_client.model or None)}
+
+
+@app.post("/api/utility-provider")
+async def api_save_utility_provider(request: dict):
+    """保存 side-call 小模型设置并即时生效（重建 utility client）。
+    provider 留空 = 清除设置, 回落主模型。"""
+    pid = str(request.get("provider") or "").strip()
+    if pid and not any(p.get("id") == pid
+                       for p in _provider_cfg.get("providers", [])):
+        raise HTTPException(status_code=400, detail=f"供应商不存在: {pid}")
+    setting = save_utility_provider_setting(
+        {"provider": pid, "model": request.get("model")})
+    _rebuild_utility_client()
+    return {**setting, "valid": load_utility_provider() is not None}
 
 
 @app.post("/api/providers")

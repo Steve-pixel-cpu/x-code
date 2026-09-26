@@ -148,3 +148,81 @@ def test_assemble_invalid_utility_provider_degrades(monkeypatch, tmp_path, capsy
 
     assert runtime._utility_client is None           # 降级: 跟主模型
     assert "utilityProvider" in capsys.readouterr().out
+
+
+# ------------------------------------------------------------
+# 设置页 UI 的读写对与 API（原始设置, 不含解析出的 key）
+# ------------------------------------------------------------
+
+import asyncio  # noqa: E402
+
+import server  # noqa: E402
+from config import (load_utility_provider_setting,  # noqa: E402
+                    save_utility_provider_setting)
+from fastapi import HTTPException  # noqa: E402
+
+
+def test_setting_roundtrip_and_clear(monkeypatch, tmp_path):
+    monkeypatch.setattr(config, "SETTINGS_FILE", tmp_path / "settings.json")
+    assert load_utility_provider_setting() == {"provider": None, "model": None}
+
+    saved = save_utility_provider_setting({"provider": " budget ", "model": " air "})
+    assert saved == {"provider": "budget", "model": "air"}     # 清洗空白
+    assert load_utility_provider_setting() == saved
+
+    save_utility_provider_setting({"provider": "", "model": "air"})
+    assert load_utility_provider_setting() == {"provider": None, "model": None}
+
+
+def test_save_preserves_other_settings_keys(monkeypatch, tmp_path):
+    path = tmp_path / "settings.json"
+    path.write_text(json.dumps({
+        "providers": _providers(), "activeProvider": {"provider": "budget"},
+        "commandAllowlist": ["git push"],
+    }, ensure_ascii=False), encoding="utf-8")
+    monkeypatch.setattr(config, "SETTINGS_FILE", path)
+
+    save_utility_provider_setting({"provider": "budget", "model": "air"})
+
+    data = json.loads(path.read_text(encoding="utf-8"))
+    assert data["providers"] == _providers()                   # 其他 key 原样
+    assert data["activeProvider"] == {"provider": "budget"}
+    assert data["commandAllowlist"] == ["git push"]
+    assert data["utilityProvider"] == {"provider": "budget", "model": "air"}
+
+
+def test_api_roundtrip_rebuilds_client(monkeypatch, tmp_path):
+    """保存 → 即时生效: _utility_client 按新设置重建; 清除 → 回落 None。"""
+    path = tmp_path / "settings.json"
+    path.write_text(json.dumps({"providers": _providers()}), encoding="utf-8")
+    monkeypatch.setattr(config, "SETTINGS_FILE", path)
+    monkeypatch.setattr(server, "_provider_cfg", {
+        "providers": _providers(), "active": {}})
+
+    saved = asyncio.run(server.api_save_utility_provider(
+        {"provider": "budget", "model": "glm-4.5-air"}))
+    assert saved == {"provider": "budget", "model": "glm-4.5-air", "valid": True}
+    assert server._utility_client is not None
+    assert server._utility_client.model == "glm-4.5-air"
+
+    view = asyncio.run(server.api_get_utility_provider())
+    assert view["provider"] == "budget"
+    assert view["valid"] is True
+    assert view["effective_model"] == "glm-4.5-air"            # 诊断字段可见
+    assert "api_key" not in view                               # 原始设置不含 key
+
+    cleared = asyncio.run(server.api_save_utility_provider(
+        {"provider": "", "model": ""}))
+    assert cleared["provider"] is None and cleared["valid"] is False
+    assert server._utility_client is None                      # 回落主模型
+
+
+def test_api_rejects_unknown_provider(monkeypatch, tmp_path):
+    monkeypatch.setattr(config, "SETTINGS_FILE", tmp_path / "settings.json")
+    monkeypatch.setattr(server, "_provider_cfg", {
+        "providers": _providers(), "active": {}})
+    with pytest.raises(HTTPException) as ei:
+        asyncio.run(server.api_save_utility_provider(
+            {"provider": "ghost", "model": "x"}))
+    assert "ghost" in ei.value.detail
+    assert load_utility_provider_setting()["provider"] is None   # 拒绝时不落盘

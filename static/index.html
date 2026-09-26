@@ -450,6 +450,13 @@
         <div class="prov-actions">
           <span id="prov-save-status" class="prov-save-status" aria-live="polite"></span>
         </div>
+        <div class="al-sub">Side-call 小模型</div>
+        <div class="sp-section-desc">压缩摘要、会话记忆摘要、会话自动命名等"整理型"调用走这里指定的供应商与模型（建议选便宜模型），主对话不受影响；不配置则跟主模型。改动停顿后自动保存，立即生效</div>
+        <div class="al-add-row">
+          <select id="ut-provider" class="hex-input" aria-label="side-call 供应商"></select>
+          <input id="ut-model" class="hex-input" spellcheck="false" placeholder="模型名，留空 = 跟随该供应商当前主模型" maxlength="100">
+        </div>
+        <span id="ut-status" class="prov-save-status" aria-live="polite"></span>
       </div>
       <div class="sp-section-body" data-section="behavior" style="display:none">
         <div class="sp-section">行为</div>

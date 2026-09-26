@@ -95,7 +95,7 @@ result = deep_merge(a, b)
 整理型调用（压缩摘要、Session Memory 消化、会话自动命名）不贵在频率而贵在
 用主模型——配置一个便宜供应商后这些调用全部走小模型, 主循环 token 不受影响。
 
-- 配置在 `settings.json` 顶层: `"utilityProvider": {"provider": "<id>", "model": "..."}`
+- 设置页「设置 → 模型 → Side-call 小模型」（供应商下拉 + 模型名, 即存即生效）; 直改文件则配置在 `settings.json` 顶层: `"utilityProvider": {"provider": "<id>", "model": "..."}`
 - `config.load_utility_provider()` 校验（指向存在且 enabled 且有 key/base_url）,
   无效一律返回 None → 回落主模型, 行为与未配置一致
 - CLI 在 `_assemble` 构建（`runtime.set_utility_client`）; Web 在
