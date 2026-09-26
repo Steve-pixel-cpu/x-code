@@ -29,14 +29,13 @@ const dist = path.resolve(argOf("--dist", path.join(root, "dist")));
 const tag = argOf("--tag");
 const repo = argOf("--repo", "Steve-pixel-cpu/x-code");
 
-const conf = JSON.parse(
-  fs.readFileSync(path.join(root, "src-tauri", "tauri.conf.json"), "utf8")
-);
-const version = conf.version;
+// 版本取自 tag (去 v 前缀), 不读 tauri.conf.json——构建 job 里 set-version
+// 同步出的新版本号只存在于各 job 工作区, 不会回写仓库 (CI 实测教训)
 if (!tag) {
   console.error("[make-latest-multi] 缺少 --tag (更新 URL 需要确切的 tag 名)");
   process.exit(1);
 }
+const version = tag.replace(/^v/, "");
 
 // 平台条目: 更新包 + 其 .sig (签名内容本身, 不是路径 —— updater 硬性要求)
 function entry(updateFile, sigSuffix) {
