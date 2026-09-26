@@ -1,0 +1,6 @@
+tests/test_shapes.py 里有测试失败,原因是 shapes.py 存在 bug。
+
+要求:
+1. 修复 shapes.py 里的 bug,让全部测试通过
+2. 绝对不要修改 test_shapes.py——测试是对的,错的是实现
+3. 用 `uv run --with pytest pytest -q` 运行测试,确认全部通过

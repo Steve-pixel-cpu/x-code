@@ -1,0 +1,6 @@
+durations.py 里的 parse_duration 只有 docstring 规格,还没有实现。
+
+要求:
+1. 严格按照 durations.py 里 docstring 的规格实现 parse_duration
+2. 不要修改 test_durations.py,也不要改 docstring 规格
+3. 用 `uv run --with pytest pytest -q` 运行测试,确认全部通过

@@ -1,0 +1,6 @@
+把 pricing.py 里的 format_price 函数重命名为 fmt_price。
+
+要求:
+1. 所有调用点同步更新(cart.py、report.py 及任何引用它的地方)
+2. 不要改变函数行为
+3. 用 `uv run --with pytest pytest -q` 运行测试,确认全部通过

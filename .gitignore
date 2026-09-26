@@ -52,3 +52,8 @@ src-tauri/pets/
 
 # 更新签名私钥: 绝不入库。丢了老用户就收不到自动更新, 保管好
 .tauri/
+
+# evals 运行产物 (基线 baseline.json 与夹具 tasks/ 随仓库提交)
+evals/.runs/
+evals/results/
+evals/report.md
