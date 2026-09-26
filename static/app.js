@@ -4968,30 +4968,27 @@ function currentMaxIter() {
   });
 }
 
-/* ---------- 设置 → 模型: Side-call 小模型（utilityProvider） ----------
+/* ---------- 设置 → 模型: 辅助模型（utilityProvider） ----------
  * 压缩摘要/会话记忆摘要/自动命名等"整理型"调用专用。独立端点读写原始
- * 设置（不含供应商 key），保存后服务端即时重建 utility client。 */
+ * 设置（不含供应商 key），保存后服务端即时重建 utility client。
+ * 供应商下拉复用 makeDropdown（与记忆分类/权限模式同款弹层）。 */
+const utProviderDd = makeDropdown($("ut-provider"), {
+  items: [{ value: "", label: "不使用（跟主模型）" }],
+  value: "",
+  onChange() { scheduleUtilitySave(); },
+});
 async function loadUtilityProvider() {
   try {
     state.utilityCfg = await fetch("/api/utility-provider").then(r => r.json());
     syncUtilityControls();
-  } catch (e) { console.error("加载 side-call 模型配置失败", e); }
+  } catch (e) { console.error("加载辅助模型配置失败", e); }
 }
 function syncUtilityControls() {
-  const sel = $("ut-provider");
-  if (!sel) return;
-  sel.innerHTML = "";
-  const optNone = document.createElement("option");
-  optNone.value = "";
-  optNone.textContent = "不使用（跟主模型）";
-  sel.append(optNone);
+  const items = [{ value: "", label: "不使用（跟主模型）" }];
   for (const p of (state.providerCfg?.providers || [])) {
-    const o = document.createElement("option");
-    o.value = p.id;
-    o.textContent = p.name || p.id;
-    sel.append(o);
+    items.push({ value: p.id, label: p.name || p.id });
   }
-  sel.value = state.utilityCfg?.provider || "";
+  utProviderDd.setItems(items, state.utilityCfg?.provider || "");
   $("ut-model").value = state.utilityCfg?.model || "";
   renderUtilityStatus();
 }
@@ -5017,7 +5014,7 @@ async function saveUtilityProvider() {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        provider: $("ut-provider").value,
+        provider: utProviderDd.getValue(),
         model: $("ut-model").value.trim(),
       }),
     }).then(async r => {
@@ -5031,9 +5028,7 @@ async function saveUtilityProvider() {
   }
 }
 {
-  const sel = $("ut-provider");
   const model = $("ut-model");
-  sel.addEventListener("change", scheduleUtilitySave);
   model.addEventListener("input", scheduleUtilitySave);
   model.addEventListener("keydown", ev => {
     ev.stopPropagation();   // 别让 Enter/Esc 冒泡成全局快捷键
@@ -6132,6 +6127,7 @@ async function addMemoryFromInput() {
     });
     if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `HTTP ${r.status}`);
     inp.value = "";
+    inp.style.height = "";
     loadMemories();
     toast("已添加记忆");
   } catch (e) {
@@ -6141,8 +6137,16 @@ async function addMemoryFromInput() {
   }
 }
 $("btn-mem-add").onclick = addMemoryFromInput;
-$("mem-input").addEventListener("keydown", (e) => {
-  if (e.key === "Enter") addMemoryFromInput();
+const memInputEl = $("mem-input");
+memInputEl.addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && !e.shiftKey) {
+    e.preventDefault();
+    addMemoryFromInput();
+  }
+});
+memInputEl.addEventListener("input", () => {
+  memInputEl.style.height = "auto";
+  memInputEl.style.height = Math.min(memInputEl.scrollHeight, 160) + "px";
 });
 
 function openSettings() {
