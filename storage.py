@@ -1,4 +1,5 @@
 import json
+import hashlib
 import os
 import threading
 import uuid
@@ -51,6 +52,18 @@ class ModelRecord(BaseModel):
     type: Literal["model"] = "model"
     provider_id: Optional[str] = None
     model_id: Optional[str] = None
+    timestamp: str
+
+
+class SessionMemoryRecord(BaseModel):
+    """Session Memory（三层压缩中间层的滚动摘要）记录: 后台消化每合并
+    一步追加一条, 恢复时取最新。last_sha = 第 digested-1 条消息内容的
+    稳定哈希——恢复时校验消息链对齐（repair/中断修补可能改变消息数,
+    错位的摘要宁可弃用: 覆盖不全回落现场摘要, 不劣于没有持久化）。"""
+    type: Literal["session_memory"] = "session_memory"
+    summary: str
+    digested: int
+    last_sha: str = ""
     timestamp: str
 
 
@@ -157,6 +170,43 @@ class SessionStore:
         )
         self._append_entry(self._session_path(session_id), record)
 
+    @staticmethod
+    def _message_sha(message: Message) -> str:
+        """消息内容的稳定哈希（sort_keys 保证跨进程/跨次 dump 一致）。"""
+        payload = json.dumps(message.model_dump(), ensure_ascii=False,
+                             sort_keys=True)
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+    def save_session_memory(self, session_id: str, summary: str,
+                            digested: int, messages: List[Message]) -> None:
+        """追加一条 Session Memory 记录（后台消化每合并一步调用一次）。
+        last_sha 取第 digested-1 条消息的哈希供恢复时校验对齐; digested
+        越界时不记 sha（恢复时的在界校验必然弃用, 等价于没有持久化）。"""
+        last_sha = (self._message_sha(messages[digested - 1])
+                    if 0 < digested <= len(messages) else "")
+        record = SessionMemoryRecord(
+            summary=summary, digested=digested, last_sha=last_sha,
+            timestamp=datetime.now(timezone.utc).isoformat(),
+        )
+        self._append_entry(self._session_path(session_id), record)
+
+    def load_session_memory(self, session_id: str,
+                            messages: List[Message]) -> Optional[tuple[str, int]]:
+        """返回 (summary, digested) 或 None。恢复校验三连: 有记录且非空、
+        digested 在界、尾部消息哈希一致——消息链被修补/改写过就视为摘要
+        错位, 宁可弃用（回落现场摘要, 行为不劣于没有持久化）。"""
+        latest: Optional[SessionMemoryRecord] = None
+        for entry in self._read_entries(self._session_path(session_id)):
+            if isinstance(entry, SessionMemoryRecord):
+                latest = entry
+        if latest is None or not latest.summary:
+            return None
+        if not 0 < latest.digested <= len(messages):
+            return None
+        if self._message_sha(messages[latest.digested - 1]) != latest.last_sha:
+            return None
+        return latest.summary, latest.digested
+
     def count_messages(self, session_id: str) -> int:
         """会话消息数（活跃链长度）。无记录/空会话返回 0。"""
         entries = [e for e in self._read_entries(self._session_path(session_id))
@@ -255,6 +305,8 @@ class SessionStore:
                     result.append(PermissionModeRecord.model_validate(data))
                 elif data.get("type") == "model":
                     result.append(ModelRecord.model_validate(data))
+                elif data.get("type") == "session_memory":
+                    result.append(SessionMemoryRecord.model_validate(data))
                 else:
                     result.append(StorageEntry.model_validate(data))
             except json.JSONDecodeError as e:

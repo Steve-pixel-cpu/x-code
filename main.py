@@ -1410,6 +1410,15 @@ def _assemble(session_store: SessionStore, session_id: str, *,
         except ValueError as e:
             print(c_yellow(f"  ⚠ utilityProvider 配置无效, side-call 跟主模型: {e}"),
                   file=out)
+    # Session Memory 持久化: 断点恢复滚动摘要 + 消化即追加落盘（storage
+    # 层做消息链对齐校验, 错位弃用回落现场摘要）
+    restored = session_store.load_session_memory(
+        session_id, runtime.session().messages)
+    if restored:
+        runtime.load_session_memory(*restored)
+    runtime.set_on_session_memory(
+        lambda summary, digested: session_store.save_session_memory(
+            session_id, summary, digested, runtime.session().messages))
     return runtime_config, runtime, last_uuid
 
 

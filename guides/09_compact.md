@@ -97,7 +97,10 @@ compact_session(msgs, config) -> CompactionResult
 - 压缩激活时 `_build_compact_summary` 三级查找: 摘要覆盖归档区
   （`digested >= keep_from`）→ **直接用, 零调用**；覆盖不全且比
   `_compact_cache` 新 → 当增量起点；否则走原现场摘要
-- 1.0 仅驻内存: 重启/恢复后清空, 回落现场摘要, 不劣于不存在
+- 持久化 (2026-09): 消化每合并一步追加一条 `SessionMemoryRecord` 进会话
+  JSONL（与 title/model 记录同模式, 取最新）, 装配时经
+  `storage.load_session_memory` 恢复——尾部消息哈希校验对齐, 消息链被
+  修补过则弃用回落现场摘要（宁可不用, 不用错位的摘要）
 
 ### 压缩摘要熔断器
 

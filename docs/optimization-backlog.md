@@ -28,7 +28,7 @@
 **状态**：已落地。`compact.SessionMemory` + `runtime._run_session_memory_update`
 （run_turn 收束后守护线程增量消化, 攒 16 条新消息才发调用, 单飞行）；
 `_build_compact_summary` 三级查找——覆盖归档区零调用直接用 / 覆盖不全当增量
-起点 / 现场摘要兜底。1.0 仅驻内存, 重启后回落现场摘要（行为不劣于不存在）。
+起点 / 现场摘要兜底。持久化已落地 (2026-09): SessionMemoryRecord 追加进会话 JSONL, 恢复时校验消息链对齐（哈希）, 错位弃用。
 **尚未做**：五级警告状态机、增量消化时的 tool_use 配对精细裁剪（当前整批喂）。
 
 **价值**：全量压缩（LLM 摘要）要付一次 750k 输入的 side-call；session memory 用"后台代理持续维护的

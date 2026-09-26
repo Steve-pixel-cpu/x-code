@@ -887,6 +887,16 @@ def load_runtime_for(web_session: WebSession) -> None:
     web_session.runtime.set_sensitive_paths(load_sensitive_paths())
     # side-call（压缩摘要/记忆摘要）走 utilityProvider 小模型（未配置回落主模型）
     web_session.runtime.set_utility_client(_utility_client)
+    # Session Memory 持久化: 恢复 + 消化即追加落盘（与 CLI 同一套 storage 方法;
+    # storage 层做消息链对齐校验, 错位弃用回落现场摘要）
+    restored = store.load_session_memory(
+        web_session.session_id, web_session.runtime.session().messages)
+    if restored:
+        web_session.runtime.load_session_memory(*restored)
+    web_session.runtime.set_on_session_memory(
+        lambda summary, digested: store.save_session_memory(
+            web_session.session_id, summary, digested,
+            web_session.runtime.session().messages))
     # 未经执行就被终局的工具（权限拒绝 / hook 拦截 / prompter 拒绝）:
     # 补发 tool_result 镜像, 前端工具卡才能闭合——否则永远"运行中"。
     # executed 路径不经此处（EmittingToolRegistry 已发）, 不会双发。

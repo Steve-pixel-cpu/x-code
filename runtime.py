@@ -455,6 +455,10 @@ class ConversationRuntime:
         # 优化, 覆盖不全时现场摘要兜底。
         self._session_memory = SessionMemory()
         self._memory_busy = False
+        # 滚动摘要持久化回调: fn(summary, digested), 消化每合并一步调用
+        # （宿主负责落盘, CLI/Web 各自接线 storage.save_session_memory;
+        #  None = 不持久化, 重启后回落现场摘要）
+        self._on_session_memory = None
         # 重复只读调用护栏状态: (tool_name, input) -> (执行次数, 记账时的
         # 变异序号)。写入/bash 等副作用工具推进变异序号, 序号变了视为
         # 首次（文件真的变了, 重读合法）。压缩激活时清零——旧结果可能
@@ -611,6 +615,19 @@ class ConversationRuntime:
         会话记忆摘要这类"整理型"调用走它, 主循环不受影响。
         None = 未配置, side-call 跟主模型（原行为）。"""
         self._utility_client = client
+        return self
+
+    def load_session_memory(self, summary: str, digested: int) -> "ConversationRuntime":
+        """恢复持久化的滚动摘要（assemble 时由宿主喂入, 消息链对齐校验
+        在宿主侧的 storage.load_session_memory）。"""
+        self._session_memory.summary = summary
+        self._session_memory.digested = digested
+        return self
+
+    def set_on_session_memory(self, fn) -> "ConversationRuntime":
+        """绑定滚动摘要持久化回调: fn(summary, digested)。后台消化每合并
+        一步调用一次, 宿主负责落盘（CLI/Web 各自接线 storage 方法）。"""
+        self._on_session_memory = fn
         return self
 
     def _authorize_tool_use(self, tool_block: ToolContentBlock,
@@ -965,6 +982,12 @@ class ConversationRuntime:
                     break
                 self._session_memory.summary = merged
                 self._session_memory.digested = end
+                if self._on_session_memory is not None:
+                    try:
+                        self._on_session_memory(merged, end)
+                    except Exception as e:
+                        # 持久化失败不打断消化: 最坏丢一次落盘, 下轮再写
+                        print(f"[WARN] session memory persist failed: {e}")
         except Exception as e:
             print(f"[WARN] session memory digest failed (retry next turn): {e}")
         finally:
