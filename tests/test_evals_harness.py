@@ -255,3 +255,24 @@ def test_e2e_judge_task_scores_and_persists(tmp_path, monkeypatch):
     assert rec["score_method"] == "checks+judge"
     assert rec["judge"]["pass"] is True
     assert rec["passed"] is True
+
+
+def test_diff_baseline_marks_token_delta_when_status_unchanged():
+    base = {"tasks": [_record("a", True), _record("b", True), _record("c", True)]}
+    base["tasks"][0]["total_tokens"] = 150_000
+    base["tasks"][1]["total_tokens"] = 100_000
+    base["tasks"][2]["total_tokens"] = 100_000
+    cur = {"tasks": [_record("a", True), _record("b", True), _record("c", True)]}
+    cur["tasks"][0]["total_tokens"] = 80_000      # -47%: 改善要显形
+    cur["tasks"][1]["total_tokens"] = 155_000     # +55%: 成本回归要显形
+    cur["tasks"][2]["total_tokens"] = 110_000     # +10%: 容忍带内不标
+    diff = diff_baseline(cur, base)
+    assert diff["a"] == "improved (tokens -47%)"
+    assert diff["b"] == "regressed (tokens +55%)"
+    assert diff["c"] == "unchanged"
+
+
+def test_diff_baseline_zero_tokens_stays_unchanged():
+    base = {"tasks": [_record("a", True)]}        # total_tokens 缺失/为 0
+    cur = {"tasks": [_record("a", True)]}
+    assert diff_baseline(cur, base)["a"] == "unchanged"

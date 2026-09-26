@@ -245,22 +245,43 @@ def usage_total(usage: dict | None) -> int:
     return sum(int(v) for v in usage.values() if isinstance(v, (int, float)))
 
 
+# 通过状态不变时, tokens 变化超出 ±25% 容忍带才显形——单次采样有噪声,
+# 小波动标出来只会教人忽略报告
+_TOKEN_DELTA_MARK = 0.25
+
+
+def _token_diff_label(rec: dict, base_rec: dict) -> str:
+    now_t = rec.get("total_tokens") or 0
+    base_t = base_rec.get("total_tokens") or 0
+    if not base_t or not now_t:
+        return "unchanged"
+    delta = (now_t - base_t) / base_t
+    if delta <= -_TOKEN_DELTA_MARK:
+        return f"improved (tokens {delta:+.0%})"
+    if delta >= _TOKEN_DELTA_MARK:
+        return f"regressed (tokens {delta:+.0%})"
+    return "unchanged"
+
+
 def diff_baseline(current: dict, baseline: dict | None) -> dict[str, str]:
-    """逐任务对比上一次基线: improved / regressed / unchanged / new / gone。"""
+    """逐任务对比上一次基线。状态变化: improved / regressed / new / gone;
+    状态不变时 tokens 变化超出容忍带也显形（如 "improved (tokens -47%)"）
+    ——通过率之外的指标回归同样要可见。"""
     if not baseline:
         return {}
-    base = {t["task"]: t.get("passed") for t in baseline.get("tasks", [])}
-    now = {t["task"]: t.get("passed") for t in current["tasks"]}
+    base = {t["task"]: t for t in baseline.get("tasks", [])}
+    now = {t["task"]: t for t in current["tasks"]}
     out = {}
-    for name, passed in now.items():
+    for name, rec in now.items():
+        passed = rec.get("passed")
         if name not in base:
             out[name] = "new"
-        elif passed and not base[name]:
+        elif passed and not base[name].get("passed"):
             out[name] = "improved"
-        elif not passed and base[name]:
+        elif not passed and base[name].get("passed"):
             out[name] = "regressed"
         else:
-            out[name] = "unchanged"
+            out[name] = _token_diff_label(rec, base[name])
     for name in base:
         if name not in now:
             out[name] = "gone"
