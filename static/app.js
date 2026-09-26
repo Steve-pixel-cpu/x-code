@@ -4228,7 +4228,11 @@ function closeSearch() {
   $("search-input").value = "";
   renderSessionList();
 }
-$("btn-search").onclick = openSearch;
+$("btn-search").onclick = () => {
+  // 再次点击搜索按钮 = 收起（并清空过滤）; Ctrl+K 同理可开可关
+  if ($("search-box").classList.contains("open")) closeSearch();
+  else openSearch();
+};
 
 $("search-input").addEventListener("input", renderSessionList);
 $("search-input").addEventListener("keydown", ev => {
@@ -4242,7 +4246,8 @@ document.addEventListener("keydown", ev => {
     startDraft();
   } else if (mod && ev.key.toLowerCase() === "k") {
     ev.preventDefault();
-    openSearch();
+    if ($("search-box").classList.contains("open")) closeSearch();
+    else openSearch();
   }
 });
 
