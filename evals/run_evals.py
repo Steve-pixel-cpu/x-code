@@ -15,6 +15,7 @@
 
 import argparse
 import json
+import subprocess
 import sys
 import time
 from datetime import datetime, timezone
@@ -32,7 +33,7 @@ REPORT_PATH = harness.EVALS_DIR / "report.md"
 BASELINE_PATH = harness.EVALS_DIR / "baseline.json"
 DEFAULT_PERMISSION_MODE = "danger-full-access"   # 与日常使用同口径; 工作区是
                                                  # 一次性临时目录, 风险可控
-DEFAULT_TIMEOUT = 600
+DEFAULT_TIMEOUT = 900
 
 
 def build_agent_cmd(args, task_prompt: str) -> list[str]:
@@ -70,10 +71,12 @@ def run_task(task, args, run_dir: Path, judge_client) -> dict:
     t0 = time.monotonic()
     try:
         proc = subprocess_run(cmd, workspace, args.timeout)
-    except TimeoutError:
+    except subprocess.TimeoutExpired:
+        # 注意不是内置 TimeoutError——TimeoutExpired 是 SubprocessError 家族,
+        # 接不住它会让单个任务的超时炸掉整轮 (真实事故: 2026-09-26 首跑)
         record["duration_s"] = time.monotonic() - t0
         record["subtype"], record["error"] = "timeout", f"Agent 超时 (>{args.timeout}s)"
-        return finalize(task, workspace, record, args)
+        return finalize(task, workspace, record, args, judge_client)
     record["duration_s"] = time.monotonic() - t0
     record["exit_code"] = proc.returncode
 
@@ -82,7 +85,7 @@ def run_task(task, args, run_dir: Path, judge_client) -> dict:
         record["subtype"] = "no-output"
         record["error"] = "stdout 无结果 JSON; stderr 尾部: " + \
             (proc.stderr or "").strip()[-300:]
-        return finalize(task, workspace, record, args)
+        return finalize(task, workspace, record, args, judge_client)
 
     record["subtype"] = payload.get("subtype")
     record["iterations"] = int(payload.get("num_iterations") or 0)
@@ -90,14 +93,13 @@ def run_task(task, args, run_dir: Path, judge_client) -> dict:
     record["result_snippet"] = (payload.get("result") or "").strip()
     if payload.get("is_error"):
         record["error"] = f"Agent 自报失败 (subtype={record['subtype']})"
-    return finalize(task, workspace, record, args)
+    return finalize(task, workspace, record, args, judge_client)
 
 
 def subprocess_run(cmd, cwd: Path, timeout: int):
     """起被测 Agent。stdin=DEVNULL: -p 会探测 stdin, 管道是空的,
     走"空管道不并入"分支 (tests/test_headless.py 已覆盖)。"""
     import os
-    import subprocess
     proc = subprocess.run(
         cmd, cwd=cwd, stdin=subprocess.DEVNULL,
         capture_output=True, text=True, encoding="utf-8", errors="replace",
@@ -107,7 +109,7 @@ def subprocess_run(cmd, cwd: Path, timeout: int):
     return proc
 
 
-def finalize(task, workspace: Path, record: dict, args) -> dict:
+def finalize(task, workspace: Path, record: dict, args, judge_client=None) -> dict:
     """打分收束: 确定性 checks → LLM judge → 综合结论。"""
     if task.has_checks:
         evaluate = load_checks(task.dir)
@@ -206,16 +208,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"⚠ LLM 判分不可用, judge 类任务将判失败: {e}", file=sys.stderr)
 
     print(f"evals 开始: {len(tasks)} 个任务 (run {run_id})")
-    records = []
-    for i, task in enumerate(tasks, 1):
-        print(f"[{i}/{len(tasks)}] {task.name} …", flush=True)
-        record = run_task(task, args, run_dir, judge_client)
-        records.append(record)
-        mark = "✅" if record["passed"] else "❌"
-        print(f"    {mark} {record['subtype'] or ''} "
-              f"{record['duration_s']:.0f}s, {record['total_tokens']:,} tokens",
-              flush=True)
-
+    records: list[dict] = []
     result = {
         "run_id": run_id,
         "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -223,12 +216,26 @@ def main(argv: list[str] | None = None) -> int:
         "permission_mode": args.permission_mode,
         "tasks": records,
     }
+    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+    results_file = RESULTS_DIR / f"{run_id}.json"
+    # 逐任务落盘: 单任务崩溃/进程被杀不丢已完成任务的数据
+    # (真实教训: 首跑 crash 在第 5 个任务, 前 4 个白跑)
+    results_file.write_text(json.dumps(result, ensure_ascii=False, indent=2),
+                            encoding="utf-8")
+    for i, task in enumerate(tasks, 1):
+        print(f"[{i}/{len(tasks)}] {task.name} …", flush=True)
+        record = run_task(task, args, run_dir, judge_client)
+        records.append(record)
+        results_file.write_text(json.dumps(result, ensure_ascii=False, indent=2),
+                                encoding="utf-8")
+        mark = "✅" if record["passed"] else "❌"
+        print(f"    {mark} {record['subtype'] or ''} "
+              f"{record['duration_s']:.0f}s, {record['total_tokens']:,} tokens",
+              flush=True)
+
     baseline = None if args.no_baseline_diff else load_baseline(BASELINE_PATH)
     diff = diff_baseline(result, baseline)
     result["baseline_id"] = baseline.get("run_id") if baseline else None
-
-    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
-    results_file = RESULTS_DIR / f"{run_id}.json"
     results_file.write_text(json.dumps(result, ensure_ascii=False, indent=2),
                             encoding="utf-8")
     report = render_report(result, diff)

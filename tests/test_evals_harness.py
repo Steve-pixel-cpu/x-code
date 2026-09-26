@@ -227,3 +227,31 @@ def test_e2e_save_baseline_and_diff(tmp_path, monkeypatch):
     _run_e2e(tmp_path, monkeypatch, "写一个 ok.txt", save_baseline=True)
     baseline = json.loads((tmp_path / "baseline.json").read_text(encoding="utf-8"))
     assert baseline["tasks"][0]["passed"] is True
+
+
+def test_e2e_judge_task_scores_and_persists(tmp_path, monkeypatch):
+    """judge 任务走 finalize 的判分分支（此前无覆盖——真实首跑在此 NameError）。"""
+    _make_task(tmp_path, "judge-task", checks=CHECKS_OK_TXT, judge=True)
+    monkeypatch.setattr(run_evals, "RESULTS_DIR", tmp_path / "results")
+    monkeypatch.setattr(run_evals, "REPORT_PATH", tmp_path / "report.md")
+    monkeypatch.setattr(run_evals, "BASELINE_PATH", tmp_path / "baseline.json")
+    monkeypatch.setattr(harness, "EVALS_DIR", tmp_path)
+
+    class StubLLM:
+        def generate_text(self, system, user, max_tokens=512):
+            return '{"pass": true, "reason": "完成"}'
+
+    monkeypatch.setattr(run_evals, "make_judge_client", lambda: StubLLM())
+    rc = run_evals.main([
+        "--tasks-dir", str(tmp_path / "tasks"),
+        "--agent-cmd", f"{Path(sys.executable).as_posix()} {STUB_AGENT.as_posix()}",
+        "--no-baseline-diff",
+    ])
+
+    assert rc == 0
+    result = json.loads(next((tmp_path / "results").glob("*.json")
+                             ).read_text(encoding="utf-8"))
+    rec = result["tasks"][0]
+    assert rec["score_method"] == "checks+judge"
+    assert rec["judge"]["pass"] is True
+    assert rec["passed"] is True

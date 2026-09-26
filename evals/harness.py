@@ -194,7 +194,9 @@ def judge_verdict(instruction: str, task_prompt: str, agent_result: str,
     )
     system = ["你是 AI Agent 评测的判分器。依据判分标准独立判断任务是否完成,"
               "不苛求完美, 但标准里明确要求的要点缺了就不通过。"]
-    response = api_client.generate_text(system, user, max_tokens=512)
+    # 4096: GLM 系强制思考, 思考也吃 max_tokens——512 在长输入下会被
+    # 思考耗尽, 正文为空 (真实事故: 判分器回复空串, 任务误判失败)
+    response = api_client.generate_text(system, user, max_tokens=4096)
     match = re.search(r"\{.*\}", response or "", re.DOTALL)
     if not match:
         raise JudgeError(f"判分器回复里没有 JSON: {response[:200]!r}")
@@ -211,8 +213,13 @@ def judge_verdict(instruction: str, task_prompt: str, agent_result: str,
 def make_judge_client(model: str | None = None):
     """判分用 API client (进程内 side-call, 与被测 subprocess 无关)。
     模型默认与 Agent 主模型同源 (main.DEFAULT_MODEL); 以后接
-    utilityProvider 时只改这里。"""
+    utilityProvider 换便宜模型只改这里。"""
     import os
+    import sys
+    # 以脚本方式运行 run_evals.py 时 sys.path 只有 evals/, 仓库根模块
+    # (api_client/main) 不可见——在这里补上, judge 才能构建 client
+    if str(ROOT) not in sys.path:
+        sys.path.insert(0, str(ROOT))
     from dotenv import load_dotenv
     load_dotenv(ROOT / ".env")
     api_key = os.getenv("API_KEY")
