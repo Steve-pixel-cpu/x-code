@@ -12,6 +12,7 @@ fn main() {
         tauri_build::Attributes::new()
             .app_manifest(tauri_build::AppManifest::new().commands(&[
                 "pick_folder",
+                "read_clipboard_text",
                 "notify_desktop",
                 "check_update",
                 "install_update",

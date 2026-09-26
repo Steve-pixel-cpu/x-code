@@ -8,6 +8,7 @@
   "permissions": [
     "core:default",
     "allow-pick-folder",
+    "allow-read-clipboard-text",
     "allow-notify-desktop",
     "allow-check-update",
     "allow-install-update",

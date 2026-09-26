@@ -513,6 +513,17 @@ fn notify_desktop(app: AppHandle, title: String, body: String) -> Result<(), Str
         .map_err(|e| e.to_string())
 }
 
+/// 读系统剪贴板文本（前端经 window.xcodeReadClipboard() 调用, 右键菜单"粘贴"用）。
+/// 不直接用插件自己的 JS 命令: 远程上下文(127.0.0.1 页面)调插件命令会被 ACL 拒
+/// （同 notify_desktop 的教训）, 包成应用命令走 capabilities 白名单。
+/// 没有这个桥, 前端会回退到 navigator.clipboard.readText()——WebView2 对网页读
+/// 剪贴板必弹"是否允许"权限窗, 这就是用户看到的粘贴弹窗。
+#[tauri::command]
+fn read_clipboard_text(app: AppHandle) -> Result<String, String> {
+    use tauri_plugin_clipboard_manager::ClipboardExt;
+    app.clipboard().read_text().map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 async fn pick_folder(app: AppHandle) -> Result<Option<String>, String> {
     boot_log(PICK_LOG, "called");
@@ -799,6 +810,20 @@ const BRIDGE_JS: &str = r#"
   if (!window.xcodeDesktop) {
     Object.defineProperty(window, 'xcodeDesktop', { value: true });
   }
+  // 剪贴板读取桥（右键菜单"粘贴"用）: 必须走 Rust 侧 clipboard API。
+  // 缺桥时前端回退 navigator.clipboard.readText(), WebView2 对网页读剪贴板
+  // 会弹"是否允许"权限窗——用户看到的粘贴弹窗就是它。
+  if (!window.xcodeReadClipboard) {
+    window.xcodeReadClipboard = async () => {
+      if (!window.__TAURI_INTERNALS__) return null;   // 页面在浏览器里预览: 无壳
+      try {
+        return await window.__TAURI_INTERNALS__.invoke('read_clipboard_text');
+      } catch (e) {
+        console.error('[xcode] read_clipboard_text IPC 失败:', e);
+        throw e;
+      }
+    };
+  }
   // 应用版本号桥: 标题栏徽标用。打包后的 Python 后端不带 pyproject.toml,
   // 服务端读不到版本 → 壳内一律问壳自己。版本号由 Rust 在注入脚本头部
   // 烤成 window.__XCODE_VERSION__（create_main_window 处拼接）, 这里直接读;
@@ -910,6 +935,7 @@ fn main() {
         .manage(())
         .invoke_handler(tauri::generate_handler![
             pick_folder,
+            read_clipboard_text,
             notify_desktop,
             check_update,
             install_update,
