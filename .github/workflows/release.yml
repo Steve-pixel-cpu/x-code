@@ -1,0 +1,96 @@
+# 构建产物 → 自动发 Release
+#
+# 触发:
+#   - push v* 标签 (如 v3.3.9): 构建签名安装包 + 创建 GitHub Release
+#     (安装包 + .sig + latest.json 一并上传, 已装用户可收到自动更新)
+#   - workflow_dispatch (手动): 只构建 + 传 workflow artifact, 不发 Release
+#
+# 产物链 = build-exe.cmd tauri: PyInstaller 冻结后端 → Tauri NSIS 安装包
+# → 更新签名 (.sig, 需 secrets) → make-latest.js 生成 latest.json。
+# 签名 key 不在库中 (.gitignore): 仓库 Secrets 里的
+# TAURI_SIGNING_PRIVATE_KEY / _PASSWORD 缺失时构建照常成功, 只是没有 .sig
+# （已装用户收不到该版本作为自动更新——build-exe.cmd 自己会打警告）。
+
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write          # 创建 Release / 上传产物
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    env:
+      # runner 管道 cp1252: 构建脚本/工具输出含中文, 强制 UTF-8（CI 首跑同款坑）
+      PYTHONUTF8: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+
+      - name: Install uv
+        run: pip install uv
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      # Tauri 冷构建 10-20 分钟: cargo 缓存是发版等待时间的大头
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Sync Python env
+        run: uv sync
+
+      # build-exe.cmd 的 tauri 分支不装 npm 依赖; 全量 npm install 会连
+      # electron(~130MB) 一起拉, 这里只装 tauri-cli 且入全局（npx 走 PATH）
+      - name: Install tauri-cli
+        run: npm install --global @tauri-apps/cli@2
+
+      - name: Compute version from tag
+        if: github.ref_type == 'tag'
+        shell: pwsh
+        run: '"RELEASE_VERSION=$($env:GITHUB_REF_NAME -replace ''^v'','')" | Out-File $env:GITHUB_ENV -Append'
+
+      - name: Build (PyInstaller backend + Tauri NSIS)
+        shell: cmd
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          if defined RELEASE_VERSION (build-exe.cmd tauri %RELEASE_VERSION%) else (build-exe.cmd tauri)
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          if-no-files-found: error
+          path: |
+            dist/*.exe
+            dist/*.sig
+            dist/latest.json
+
+      - name: Create GitHub Release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if (-not (gh release view $env:GITHUB_REF_NAME 2>$null)) {
+            gh release create $env:GITHUB_REF_NAME --title $env:GITHUB_REF_NAME --generate-notes
+          }
+          $files = Get-ChildItem dist -File |
+            Where-Object { $_.Name -match '\.exe$|\.sig$' -or $_.Name -eq 'latest.json' } |
+            ForEach-Object { $_.FullName }
+          gh release upload $env:GITHUB_REF_NAME $files --clobber
