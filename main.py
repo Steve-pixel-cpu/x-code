@@ -43,6 +43,9 @@ from tools import (ToolRegistry, bash_tool, edit_file_tool, glob_tool,
 from agent_tools import AGENT_TOOL_SPECS, get_orchestrator, register_agent_tools
 from browser_tools import BROWSER_TOOL_SPECS, register_browser_tools
 from music import MUSIC_PLAY_SPEC, music_play_tool
+from memory.tools import (MEMORY_TOOL_SPECS, memory_write_tool,
+                          memory_update_tool, memory_delete_tool,
+                          get_memory_store)
 from mcp_client import (MCP_TOOL_PREFIX, get_mcp_manager, mcp_tool_name,
                         _safe_segment)
 from skills import (SkillError, discover_skills, render_skills_section,
@@ -408,8 +411,8 @@ from tools import (todo_spec as _todo_spec,     # noqa: E402  (spec 与实现同
 TOOLS = [bash_spec, powershell_spec, read_file_spec, write_file_spec,
          edit_file_spec, grep_spec, glob_spec, task_output_spec, task_stop_spec,
          present_plan_spec, _todo_spec,
-         web_search_spec, web_fetch_spec, MUSIC_PLAY_SPEC] + BROWSER_TOOL_SPECS \
-        + AGENT_TOOL_SPECS
+         web_search_spec, web_fetch_spec, MUSIC_PLAY_SPEC] + MEMORY_TOOL_SPECS \
+        + BROWSER_TOOL_SPECS + AGENT_TOOL_SPECS
 
 
 # --- 终端视觉规范: 调色板 + 版式 ---
@@ -532,6 +535,7 @@ class SlashCommand(Enum):
     THINKING = "thinking"
     RENAME = "rename"
     SKILLS = "skills"
+    MEMORY = "memory"
     EXIT = "exit"
     UNKNOWN = "unknown"
 
@@ -907,6 +911,68 @@ def repair_interrupted_turn(session: Session) -> None:
             ))
 
 
+def do_memory(arg: str) -> None:
+    """/memory: 列出全部记忆; /memory add <内容>: 手动添加（source=user,
+    永不被自动淘汰）; /memory rm <id前缀>: 前缀匹配删除（歧义列候选）;
+    /memory clear: 清空全部（输入 y 确认）。"""
+    from memory.tools import get_memory_store as _store
+    store = _store()
+    arg = (arg or "").strip()
+    action, _, rest = arg.partition(" ")
+    rest = rest.strip()
+
+    if action in ("", "ls", "list"):
+        mems = store.list_memories()
+        if not mems:
+            print(c_dim("（还没有记忆。对话中让它记, 或 /memory add <内容> 手动添加）"))
+            return
+        for m in mems:
+            print(f"[{m['id'][4:12]}] [{m['category']}] {m['content']} "
+                  f"{c_dim(f'({m['created_at']}, hits={m['hits']})')}")
+        return
+
+    if action == "add":
+        if not rest:
+            print(c_red("✗ 用法: /memory add <内容>"))
+            return
+        m = store.add(content=rest, category="fact", source="user")
+        print(f"✓ 已添加（id={m['id']}）— source=user, 不会被自动淘汰")
+        return
+
+    if action == "rm":
+        if not rest:
+            print(c_red("✗ 用法: /memory rm <id前缀>（先 /memory 查看 id）"))
+            return
+        hits = [m for m in store.list_memories()
+                if m["id"][4:].startswith(rest)]
+        if not hits:
+            print(c_red(f"✗ 没有匹配前缀 {rest!r} 的记忆"))
+            return
+        if len(hits) > 1:
+            print(c_red(f"✗ 前缀 {rest!r} 匹配到 {len(hits)} 条, 更精确一些:"))
+            for m in hits:
+                print(f"  [{m['id'][4:12]}] {m['content']}")
+            return
+        store.remove(hits[0]["id"])
+        print(f"✓ 已删除（id={hits[0]['id']}）: {hits[0]['content']}")
+        return
+
+    if action == "clear":
+        if not store.list_memories():
+            print(c_dim("（记忆已为空）"))
+            return
+        print(c_yellow("确认清空全部记忆？（已淘汰的归档也会一并清掉）[y/N]"))
+        if input().strip().lower() in ("y", "yes"):
+            store.clear()
+            print("✓ 已清空")
+        else:
+            print(c_dim("已取消"))
+        return
+
+    print(c_red(f"✗ 未知子命令: {action}"))
+    print("用法: /memory [add <内容> | rm <id前缀> | clear]")
+
+
 def do_skills(runtime: "ConversationRuntime", name_arg: str) -> None:
     """/skills: 列出已装技能; /skills <name>: 预览该技能的 SKILL.md 开头。
     列表数据从系统提示词无法反解, 这里按同一套发现规则现扫——CLI 会话
@@ -1050,6 +1116,9 @@ def run_repl(runtime: ConversationRuntime,
             elif cmd == SlashCommand.SKILLS:
                 skills_cmd_len = len(SlashCommand.SKILLS.value) + 1
                 do_skills(runtime, text[skills_cmd_len:])
+            elif cmd == SlashCommand.MEMORY:
+                memory_cmd_len = len(SlashCommand.MEMORY.value) + 1
+                do_memory(text[memory_cmd_len:])
 
         else:
             # 每轮对话开始: 细分隔线；块与块之间靠各视觉块自带的空行隔开
@@ -1116,6 +1185,11 @@ TOOL_REQUIREMENTS = {
     # 聊天点歌: 上游搜索纯只读, 播放动作在前端电台（副作用不出本机 UI）,
     # 与 browser_navigate 同一档位——只读模式也能点歌
     "music_play": READ_ONLY_MODE,
+    # 记忆三件套: 只写 ~/.x-code/memory.json 本机数据, 半自动可见（写入
+    # 反馈经工具结果回传）, 与 todo 同档免审批——"顺手记一下"不该打断对话
+    "memory_write": READ_ONLY_MODE,
+    "memory_update": READ_ONLY_MODE,
+    "memory_delete": READ_ONLY_MODE,
 }
 
 
@@ -1141,7 +1215,10 @@ def build_registry(mcp_servers: Optional[list] = None,
         name="glob", handler=glob_tool).register(
         name="web_search", handler=web_search_tool).register(
         name="web_fetch", handler=web_fetch_tool).register(
-        name="music_play", handler=music_play_tool)
+        name="music_play", handler=music_play_tool).register(
+        name="memory_write", handler=memory_write_tool).register(
+        name="memory_update", handler=memory_update_tool).register(
+        name="memory_delete", handler=memory_delete_tool)
     registry = register_agent_tools(registry)
     registry = register_browser_tools(registry)
 
@@ -1240,6 +1317,12 @@ def start(session_store:SessionStore,session_id:str):
             Path.cwd(), datetime.now().strftime("%Y-%m-%d")))
         .build()
     )
+    # 记忆 section 挂动态边界之后（memory.inject 渲染, 无记忆返回 None
+    # 整段省略）; 渲染成功即 touch_hits —— hits 是遗忘淘汰的主权重
+    from memory.inject import render_memories
+    memory_section = render_memories(get_memory_store())
+    if memory_section:
+        system_prompt.append(memory_section)
     # 技能清单挂在追加段（动态边界之后）: 只进 name+description, 静态
     # 前缀不变, prompt caching 不受影响; 无技能时是空串, builder 会跳过
     if skills:

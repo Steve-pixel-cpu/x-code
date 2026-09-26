@@ -150,6 +150,10 @@
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2l2.4 4.9 5.4.8-3.9 3.8.9 5.4L12 14.4 7.2 16.9l.9-5.4L4.2 7.7l5.4-.8z"/></svg>
       Skills
     </button>
+    <button class="menu-item nav-item" data-section="memory">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5a4 4 0 00-4 4c-1.7 0-3 1.6-3 3.5S6.3 16 8 16h8c1.7 0 3-1.6 3-3.5S17.7 9 16 9a4 4 0 00-4-4z"/><path d="M9 19h.01M12 20h.01M15 19h.01"/></svg>
+      记忆
+    </button>
     <button class="menu-item nav-item" data-section="config">
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><path d="M14 2v6h6M9 13h6M9 17h6"/></svg>
       配置
@@ -486,6 +490,21 @@
         </div>
         <div id="skill-install-status" class="prov-save-status" aria-live="polite"></div>
         <div id="skill-list"></div>
+      </div>
+      <div class="sp-section-body" data-section="memory" style="display:none">
+        <div class="sp-section">记忆</div>
+        <div class="sp-section-desc">Agent 在对话中自动沉淀的用户画像与长期事实，跨会话注入系统提示——它因此更懂你。这里添加的条目标记为"用户"来源，不会被自动淘汰；其余条目由 Agent 维护（写入时可在对话流里看到）</div>
+        <div class="al-add-row">
+          <input id="mem-input" class="hex-input" spellcheck="false" placeholder="添加一条记忆，例如: 偏好简洁的回复风格" maxlength="500">
+          <select id="mem-category" class="hex-input mem-cat-select">
+            <option value="preference">偏好</option>
+            <option value="fact" selected>事实</option>
+            <option value="context">背景</option>
+          </select>
+          <button type="button" id="btn-mem-add" class="icon-act">添加</button>
+        </div>
+        <div id="mem-list" class="al-rule-list"></div>
+        <div id="mem-evict-note" class="sp-section-desc" style="display:none"></div>
       </div>
       <div class="sp-section-body" data-section="config" style="display:none">
         <div class="sp-section">配置文件</div>

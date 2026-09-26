@@ -218,6 +218,7 @@ class SystemPromptBuilder:
         self._os_name: Optional[str] = None
         self._os_version: Optional[str] = None
         self._project_context: Optional[ProjectContext] = None
+        self._memory_text: Optional[str] = None
         self._append_sections: List[str] = []
 
     def with_os(self, os_name: str, os_version: str) -> "SystemPromptBuilder":
@@ -227,6 +228,14 @@ class SystemPromptBuilder:
 
     def with_project_context(self, ctx: ProjectContext) -> "SystemPromptBuilder":
         self._project_context = ctx
+        return self
+
+    def with_memory_section(self, text: Optional[str]) -> "SystemPromptBuilder":
+        """记忆 section（memory.inject.render_memories 的产物）。
+
+        None = 无记忆, 整段省略不占位。挂在动态边界之后: 记忆会随
+        memory_write 增长, 不能进静态缓存前缀。"""
+        self._memory_text = text
         return self
 
 
@@ -387,6 +396,22 @@ class SystemPromptBuilder:
             "between polls instead of burning calls watching a worker run."
         )
 
+    @staticmethod
+    def _memory_section() -> str:
+        """记忆工具使用指引（静态段: 内容恒定, 缓存友好）。行为细则
+        （500 字符截断等）在工具 description 里, 这里只讲使用边界。"""
+        items = [
+            "When the user expresses a preference, corrects your behavior, "
+            "or reveals a long-lived fact, record it with memory_write.",
+            "When new input conflicts with or extends an existing memory, "
+            "use memory_update (by id) instead of writing a duplicate.",
+            "Use memory_delete only when the user explicitly says a memory "
+            "is wrong or asks you to forget something.",
+            "Never record: one-off task details, secrets (passwords, keys), "
+            "or code content itself.",
+        ]
+        return "# User memory\n" + "\n".join(f" - {item}" for item in items)
+
     def _environment_section(self) -> str:
         """源码: prompt.rs:163-184"""
         ctx = self._project_context
@@ -429,6 +454,7 @@ class SystemPromptBuilder:
         sections.append(self._actions_section())
         sections.append(self._search_section())
         sections.append(self._subagents_section())
+        sections.append(self._memory_section())
 
         # ══════ 缓存边界 ══════
         # 这个标记告诉 API 客户端把 sections 分成两段: 上面跨会话逐字节
@@ -445,6 +471,8 @@ class SystemPromptBuilder:
 
         if self._config is not None:
             sections.append(self._render_config_section())
+        if self._memory_text:
+            sections.append(self._memory_text)
         sections.extend(self._append_sections)
 
 

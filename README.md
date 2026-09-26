@@ -15,6 +15,7 @@
 - **三级权限体系**：`plan`（只读）→ `workspace-write`（workspace 根内可写，写路径分级：根外审批/敏感路径任何模式都强制确认）→ `danger-full-access`（全放行）；每个工具登记权限档位，越权时 CLI 弹审批面板、Web 端弹审批卡；只读命令白名单 + 命令前缀白名单（全局/会话级）+ 附加目录记忆治审批疲劳，plan 模式下可一键升级
 - **多 Agent 编排**：Leader 通过 `agent_tool` / `agent_status` / `agent_reap` / `agent_list` 派生 subagent 并行干活，白名单 + 规格过滤防递归失控，孤儿 agent 启动对账
 - **会话持久化**：JSONL 增量落盘、断点恢复（`-c` / `--resume`）、自动命名、auto-compact（上下文超阈值自动压缩，保留近几条消息）
+- **用户记忆**：跨会话画像事实记忆，让 Agent 更懂你。对话中模型用 `memory_write` / `memory_update` / `memory_delete` 三工具自动沉淀（免审批、写入反馈可见），每次会话注入系统提示词（prompt cache 友好：静态指引 + 动态边界之下独立 section）；存储为结构化 JSON（`~/.x-code/memory.json`），`MemoryStore` 抽象为 RAG 检索预留接口；零参数遗忘机制——200 条容量触发 LRU 淘汰（hits 为主权重、user 来源豁免、淘汰归档可找回）；CLI `/memory` 管理命令 + Web 设置页"记忆"区块
 - **Hooks**：`PreToolUse` / `PostToolUse` 挂 shell 命令，工具执行前后触发
 - **配置分层**：用户全局 → 项目 → 本地三级 JSON 配置深度合并，环境变量可覆盖；模型、思考档位（low/medium/high/max）、超时、预算均可配
 - **限流重试**：连接抖动指数退避 + 429 专用长退避曲线（累计约 30s），重试进度实时上报界面

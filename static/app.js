@@ -5940,6 +5940,104 @@ $("skill-repo-input").addEventListener("keydown", (e) => {
   if (e.key === "Enter") installSkillFromInput();
 });
 
+/* ============================================================
+ * 设置页: 记忆（GET/POST /api/memory, PATCH/DELETE /api/memory/{id}）
+ * source=user 的条目不会被自动淘汰; agent 条目只在对话流里维护
+ * ============================================================ */
+const MEM_CAT_LABEL = { preference: "偏好", fact: "事实", context: "背景" };
+
+async function loadMemories() {
+  const list = $("mem-list");
+  if (!list) return;
+  let memories = [], evictedCount = 0;
+  try {
+    const r = await fetch("/api/memory");
+    if (r.ok) {
+      const data = await r.json();
+      memories = data.memories || [];
+      evictedCount = data.evicted_count || 0;
+    }
+  } catch (e) { /* 服务不可达: 列表留空 */ }
+  const note = $("mem-evict-note");
+  if (note) {
+    note.style.display = evictedCount ? "" : "none";
+    note.textContent = evictedCount
+      ? `另有 ${evictedCount} 条记忆因容量上限被自动淘汰（归档于 memory.json 的 evicted，可手动找回）` : "";
+  }
+  list.innerHTML = "";
+  if (!memories.length) {
+    const empty = document.createElement("div");
+    empty.className = "al-empty";
+    empty.textContent = "还没有记忆。对话中让 Agent 记，或上方手动添加。";
+    list.appendChild(empty);
+    return;
+  }
+  for (const m of memories) {
+    const item = document.createElement("div");
+    item.className = "skill-item";
+    const head = document.createElement("div");
+    head.className = "skill-item-head";
+    const cat = document.createElement("span");
+    cat.className = "skill-name";
+    cat.textContent = `[${MEM_CAT_LABEL[m.category] || m.category}]`;
+    const content = document.createElement("span");
+    content.style.flex = "1";
+    content.textContent = m.content;
+    const badge = document.createElement("span");
+    badge.className = `skill-src skill-src-${m.source === "user" ? "project" : "user"}`;
+    badge.textContent = m.source === "user" ? "用户" : "Agent";
+    head.appendChild(cat);
+    head.appendChild(content);
+    head.appendChild(badge);
+    item.appendChild(head);
+    const del = document.createElement("button");
+    del.type = "button";
+    del.className = "icon-act al-del skill-del";
+    del.textContent = "删除";
+    del.onclick = async () => {
+      del.disabled = true;
+      try {
+        const r = await fetch(`/api/memory/${encodeURIComponent(m.id)}`,
+                             { method: "DELETE" });
+        if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `HTTP ${r.status}`);
+        toast("已删除该条记忆");
+        loadMemories();
+      } catch (e) {
+        del.disabled = false;
+        toast("删除失败: " + e.message);
+      }
+    };
+    item.appendChild(del);
+    list.appendChild(item);
+  }
+}
+
+async function addMemoryFromInput() {
+  const inp = $("mem-input"), cat = $("mem-category"), btn = $("btn-mem-add");
+  const content = (inp.value || "").trim();
+  if (!content) { toast("先写点要记的内容"); return; }
+  btn.disabled = true;
+  try {
+    const r = await fetch("/api/memory", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ content, category: cat.value }),
+    });
+    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `HTTP ${r.status}`);
+    inp.value = "";
+    loadMemories();
+    toast("已添加记忆");
+  } catch (e) {
+    toast("添加失败: " + e.message);
+  } finally {
+    btn.disabled = false;
+  }
+}
+$("btn-mem-add").onclick = addMemoryFromInput;
+$("mem-input").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") addMemoryFromInput();
+});
+
 function openSettings() {
   themeDd.setValue(themePref());   // 每次打开回显当前值
   $("fs-ui-input").value = String(fsUiPref());
@@ -5955,6 +6053,7 @@ function openSettings() {
   renderSensitivePathsSettings();                 // 用户敏感路径
   loadSkills();                                   // 拉取已装技能并渲染
   skillStatus("");                                // 清掉上次的安装状态
+  loadMemories();                                 // 拉取记忆并渲染
   $("sidebar").classList.add("settings-view");
   $("pane").dataset.view = "settings";
 }

@@ -2578,6 +2578,8 @@ body.col-resizing, body.col-resizing * { cursor: col-resize !important; }
   display: flex; gap: 8px; margin: 10px 0 12px;
 }
 .al-add-row .hex-input { flex: 1; }
+/* 记忆分类下拉: 定宽不参与 flex 拉伸 */
+.mem-cat-select { flex: 0 0 auto; width: 84px; }
 .al-rule-list {
   display: flex; flex-direction: column; gap: 6px;
 }

@@ -2087,6 +2087,52 @@ async def api_delete_skill(name: str):
     return {"ok": True}
 
 
+# --- 记忆管理: 设置页"记忆"分区 + CLI /memory 共用同一 store 单例 ---
+
+@app.get("/api/memory")
+async def api_get_memory():
+    """全部记忆（updated_at 降序）+ 淘汰归档概要。"""
+    from memory.tools import get_memory_store
+    store = get_memory_store()
+    mems = store.list_memories()
+    return {"memories": mems,
+            "evicted_count": len(store._load().get("evicted", []))}
+
+
+@app.post("/api/memory")
+async def api_add_memory(request: dict):
+    """手动添加（source=user, 永不被自动淘汰）。"""
+    from memory.tools import get_memory_store
+    content = " ".join(str(request.get("content") or "").split())
+    if not content:
+        raise HTTPException(status_code=400, detail="content 不能为空")
+    category = str(request.get("category") or "fact")
+    if category not in ("preference", "fact", "context"):
+        category = "fact"
+    m = get_memory_store().add(content=content, category=category, source="user")
+    return {"memory": m}
+
+
+@app.patch("/api/memory/{memory_id}")
+async def api_update_memory(memory_id: str, request: dict):
+    from memory.tools import get_memory_store
+    content = " ".join(str(request.get("content") or "").split())
+    if not content:
+        raise HTTPException(status_code=400, detail="content 不能为空")
+    m = get_memory_store().update(memory_id, content)
+    if m is None:
+        raise HTTPException(status_code=404, detail=f"记忆不存在: {memory_id}")
+    return {"memory": m}
+
+
+@app.delete("/api/memory/{memory_id}")
+async def api_delete_memory(memory_id: str):
+    from memory.tools import get_memory_store
+    if not get_memory_store().remove(memory_id):
+        raise HTTPException(status_code=404, detail=f"记忆不存在: {memory_id}")
+    return {"ok": True}
+
+
 # --- MCP 管理: 状态查看 + 热重载 + 服务器 CRUD（设置页"MCP 服务器"分区） ---
 
 @app.get("/api/mcp/status")

@@ -10,6 +10,8 @@ from pydantic import BaseModel, Field
 APP_NAME = "x-code"
 USER_DIR = Path.home() / ("." + APP_NAME)
 SETTINGS_FILE = USER_DIR / "settings.json"
+# 记忆库（memory/store.py 读写; 与 settings.json 同目录同约定: 读-改-写, 不加锁）
+MEMORY_FILE = USER_DIR / "memory.json"
 
 
 class ConfigSource(Enum):
