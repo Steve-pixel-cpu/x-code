@@ -1,15 +1,19 @@
-# 构建产物 → 自动发 Release
+# 构建产物 → 自动发 Release (三平台)
 #
 # 触发:
-#   - push v* 标签 (如 v3.3.9): 构建签名安装包 + 创建 GitHub Release
-#     (安装包 + .sig + latest.json 一并上传, 已装用户可收到自动更新)
+#   - push v* 标签 (如 v3.3.9): 三平台并行构建 → 创建 GitHub Release
+#     (Windows: NSIS 安装包; macOS: .dmg + 自动更新包 .app.tar.gz, 均带
+#      更新签名; latest.json 含全部平台条目)
 #   - workflow_dispatch (手动): 只构建 + 传 workflow artifact, 不发 Release
 #
-# 产物链 = build-exe.cmd tauri: PyInstaller 冻结后端 → Tauri NSIS 安装包
-# → 更新签名 (.sig, 需 secrets) → make-latest.js 生成 latest.json。
-# 签名 key 不在库中 (.gitignore): 仓库 Secrets 里的
-# TAURI_SIGNING_PRIVATE_KEY / _PASSWORD 缺失时构建照常成功, 只是没有 .sig
-# （已装用户收不到该版本作为自动更新——build-exe.cmd 自己会打警告）。
+# 平台矩阵:
+#   build-windows      windows-latest  NSIS 安装包 (build-exe.cmd tauri)
+#   build-mac aarch64  macos-latest    Apple Silicon .dmg/.app.tar.gz
+#   build-mac x64      macos-13        Intel .dmg/.app.tar.gz
+# (PyInstaller 无法跨平台构建, mac arch 由 runner 决定)
+#
+# 签名: TAURI_SIGNING_PRIVATE_KEY / _PASSWORD 仓库 Secrets (minisign 密钥
+# 跨平台通用); 缺失时构建照常成功, 只是没有 .sig (无自动更新条目)。
 
 name: Release
 
@@ -22,7 +26,7 @@ permissions:
   contents: write          # 创建 Release / 上传产物
 
 jobs:
-  build:
+  build-windows:
     runs-on: windows-latest
     timeout-minutes: 45
     env:
@@ -45,7 +49,6 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      # Tauri 冷构建 10-20 分钟: cargo 缓存是发版等待时间的大头
       - name: Cache cargo build
         uses: Swatinem/rust-cache@v2
         with:
@@ -75,22 +78,86 @@ jobs:
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: dist
+          name: dist-windows
           if-no-files-found: error
           path: |
             dist/*.exe
-            dist/*.sig
-            dist/latest.json
+            dist/*.exe.sig
+
+  build-mac:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest     # Apple Silicon (arm64)
+          - os: macos-13         # Intel (x64)
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+
+      - name: Install uv
+        run: pip install uv
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Compute version from tag
+        if: github.ref_type == 'tag'
+        shell: bash
+        run: echo "RELEASE_VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+
+      - name: Build (PyInstaller backend + Tauri .app/.dmg)
+        shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: bash scripts/build-mac-tauri.sh "$RELEASE_VERSION"
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.os }}
+          if-no-files-found: error
+          path: |
+            dist/*.dmg
+            dist/*.app.tar.gz
+            dist/*.app.tar.gz.sig
+
+  release:
+    # 汇总: 下载三平台产物 → 合并生成多平台 latest.json → 创建 Release
+    needs: [build-windows, build-mac]
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: dist-*
+          merge-multiple: true
+          path: dist
+
+      - name: Generate multi-platform latest.json
+        run: node scripts/make-latest-multi.js --tag "$GITHUB_REF_NAME" --dist dist
 
       - name: Create GitHub Release
-        if: github.ref_type == 'tag'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          if (-not (gh release view $env:GITHUB_REF_NAME 2>$null)) {
-            gh release create $env:GITHUB_REF_NAME --title $env:GITHUB_REF_NAME --generate-notes
-          }
-          $files = Get-ChildItem dist -File |
-            Where-Object { $_.Name -match '\.exe$|\.sig$' -or $_.Name -eq 'latest.json' } |
-            ForEach-Object { $_.FullName }
-          gh release upload $env:GITHUB_REF_NAME $files --clobber
+          gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes || true
+          gh release upload "$GITHUB_REF_NAME" dist/* --clobber

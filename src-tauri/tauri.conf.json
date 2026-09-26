@@ -15,8 +15,13 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["nsis"],
-    "icon": ["icons/icon.ico"],
+    "targets": [
+      "nsis"
+    ],
+    "icon": [
+      "icons/icon.ico",
+      "icons/icon.icns"
+    ],
     "createUpdaterArtifacts": true,
     "resources": {
       "server/x-code-server.exe": "resources/server/x-code-server.exe",
@@ -26,7 +31,9 @@
     "windows": {
       "nsis": {
         "installMode": "currentUser",
-        "languages": ["SimpChinese"],
+        "languages": [
+          "SimpChinese"
+        ],
         "displayLanguageSelector": false
       }
     }
@@ -43,4 +50,3 @@
     }
   }
 }
-
