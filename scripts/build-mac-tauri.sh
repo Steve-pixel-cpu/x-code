@@ -77,7 +77,18 @@ npx tauri build --bundles dmg,app
 
 echo "Staging artifacts into dist/..."
 mkdir -p dist
-cp src-tauri/target/release/bundle/dmg/*.dmg dist/
-cp src-tauri/target/release/bundle/macos/*.app.tar.gz dist/
-cp src-tauri/target/release/bundle/macos/*.app.tar.gz.sig dist/
+# 带版本/架构重命名: make-latest-multi.js 按此模式归位 darwin 条目
+# (macos-latest=arm64→aarch64; Intel runner=x86_64→x64)
+if [ -z "$VERSION" ]; then
+  VERSION=$(node -p "require('./src-tauri/tauri.conf.json').version")
+fi
+ARCH_RAW=$(uname -m)
+case "$ARCH_RAW" in
+  arm64) ARCH=aarch64 ;;
+  x86_64) ARCH=x64 ;;
+  *) ARCH="$ARCH_RAW" ;;
+esac
+cp src-tauri/target/release/bundle/dmg/*.dmg "dist/x-code_${VERSION}_${ARCH}.dmg"
+cp src-tauri/target/release/bundle/macos/*.app.tar.gz "dist/x-code_${VERSION}_${ARCH}.app.tar.gz"
+cp src-tauri/target/release/bundle/macos/*.app.tar.gz.sig "dist/x-code_${VERSION}_${ARCH}.app.tar.gz.sig"
 ls -1 dist/*.dmg dist/*.app.tar.gz* 2>/dev/null || true
