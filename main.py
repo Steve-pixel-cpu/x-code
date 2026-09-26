@@ -15,13 +15,15 @@ from dotenv import load_dotenv
 from api_client import (
     ApiClient,
     make_api_client,
+    normalize_base_url,
     normalize_protocol,
     DEFAULT_PROTOCOL,
     THINKING_LEVELS,
 )
 from config import (RuntimeConfig, ConfigLoader, USER_DIR, load_command_allowlist,
                     load_additional_directories, save_command_allowlist,
-                    load_command_denylist, load_sensitive_paths)
+                    load_command_denylist, load_sensitive_paths,
+                    load_utility_provider)
 from hooks import HookRunner
 from models import Message, Session, TextContentBlock, ToolContentBlock
 from permissions import (
@@ -1390,6 +1392,24 @@ def _assemble(session_store: SessionStore, session_id: str, *,
         # progress_out=None → 执行器打 stdout（REPL 观感不变）
         tool_executor=CliToolExecutor(registry, out=out),
     )
+    # utilityProvider（settings.json）: side-call（压缩摘要/记忆摘要）走
+    # 便宜小模型, 主循环不动。配置无效降级为警告行, 不挡启动。
+    uprov = load_utility_provider()
+    if uprov:
+        try:
+            u_protocol = normalize_protocol(uprov.get("protocol"))
+            runtime.set_utility_client(make_api_client(
+                u_protocol,
+                api_key=str(uprov.get("api_key")),
+                model=uprov.get("model") or runtime_config.model() or DEFAULT_MODEL,
+                base_url=normalize_base_url(uprov.get("base_url"),
+                                            protocol=u_protocol) or None,
+                thinking_level="low",
+                emit_output=False,
+            ))
+        except ValueError as e:
+            print(c_yellow(f"  ⚠ utilityProvider 配置无效, side-call 跟主模型: {e}"),
+                  file=out)
     return runtime_config, runtime, last_uuid
 
 

@@ -343,3 +343,27 @@ def compact_session(messages: List[Message], config: CompactionConfig) -> Compac
         removed_count=len(removed),
     )
 
+
+
+class SessionMemory:
+    """三层压缩的中间层: 后台增量维护的滚动摘要（Session Memory Compact）。
+
+    与全量压缩（LLM 现场摘要）的关系:
+    - 维护时机: 会话空闲时（每轮 run_turn 结束后）把新增消息增量合并进
+      滚动摘要——成本摊在过程里, 且是小调用（只喂增量, 不重喂全史）;
+    - 消费时机: 压缩激活时, 若摘要已覆盖归档区（digested >= 切割点）,
+      直接当压缩结果用——压缩时零 LLM 调用、零延迟;
+    - 覆盖不全时退化为增量起点: 已消化部分作为 prev_summary 交给现场
+      摘要, 只喂 digested 之后的增量（与 _compact_cache 同思路）。
+
+    1.0 仅驻内存: 进程重启/会话恢复后摘要清空, 自动回落现有 LLM 现场摘
+    要, 行为不劣于中间层不存在。
+    """
+
+    def __init__(self) -> None:
+        self.summary: str = ""    # 滚动摘要（未格式化, 供增量合并与压缩复用）
+        self.digested: int = 0    # 已消化到 session.messages 的第几条（不含）
+
+    def digest_due(self, total: int, min_new: int) -> bool:
+        """新增消息攒够 min_new 条才值得一次后台摘要调用（摊薄成本）。"""
+        return total - self.digested >= min_new

@@ -16,6 +16,7 @@ from compact import (
     CompactionConfig,
     SUMMARIZER_SYSTEM_PROMPT,
     SUMMARY_INSTRUCTION,
+    SessionMemory,
     continuation_message,
     cut_point,
     estimate_session_tokens,
@@ -394,6 +395,9 @@ class ConversationRuntime:
         self._auto_compact_threshold = DEFAULT_AUTO_COMPACT_THRESHOLD
         self._turn_output_budget = DEFAULT_TURN_OUTPUT_BUDGET
         self._api_client = api_client
+        # side-call 专用 client（utilityProvider 小模型, 见 set_utility_client）:
+        # None = 未配置, 摘要类 side-call 跟主模型（原行为）
+        self._utility_client: Optional[ApiClient] = None
         self._tool_executor = tool_executor
         self._permission_policy = permission_policy
         self._system_prompt = system_prompt
@@ -420,6 +424,17 @@ class ConversationRuntime:
         # 超过余量时复用旧摘要、保留区随之变长——旧实现每次请求都从全量
         # 历史重算一遍摘要, 纯浪费。
         self._compact_cache: Optional[tuple[int, str]] = None
+        # 压缩摘要熔断器: LLM 摘要连续失败 N 次后本会话停用（详情见
+        # _build_compact_summary）。防"压缩激活 + 端点持续故障"的组合把
+        # 每轮请求都拖进一次注定失败的 side-call。
+        self._summary_fail_streak = 0
+        self._summary_disabled = False
+        # Session Memory 中间层: 后台增量维护的滚动摘要（压缩时零调用,
+        # 详见 compact.SessionMemory）。_memory_busy 防并发消化（单飞行）,
+        # 守护线程随 run_turn 结束拉起, 崩了只警告不追责——它始终只是
+        # 优化, 覆盖不全时现场摘要兜底。
+        self._session_memory = SessionMemory()
+        self._memory_busy = False
         # 重复只读调用护栏状态: (tool_name, input) -> (执行次数, 记账时的
         # 变异序号)。写入/bash 等副作用工具推进变异序号, 序号变了视为
         # 首次（文件真的变了, 重读合法）。压缩激活时清零——旧结果可能
@@ -564,6 +579,16 @@ class ConversationRuntime:
         """热替换 api_client（会话切换到跨 provider 模型时, 服务端构建
         会话专属 client 挂进来）。仅替换引用, 不迁移运行态。"""
         self._api_client = api_client
+        # 端点已换: 旧端点上的摘要熔断不再成立
+        self._summary_fail_streak = 0
+        self._summary_disabled = False
+
+    def set_utility_client(self, client: Optional[ApiClient]) -> "ConversationRuntime":
+        """绑定 side-call 专用 client（utilityProvider 小模型）。压缩摘要、
+        会话记忆摘要这类"整理型"调用走它, 主循环不受影响。
+        None = 未配置, side-call 跟主模型（原行为）。"""
+        self._utility_client = client
+        return self
 
     def _authorize_tool_use(self, tool_block: ToolContentBlock,
                             prompter: Optional[PermissionPrompter]=None
@@ -713,6 +738,9 @@ class ConversationRuntime:
         # 手动压缩: 不再删历史——压缩是"给模型的请求期视图", 置粘性标记后
         # _model_view() 即刻生效, 原始对话原样保留在内存与磁盘(展示用)。
         self._compact_active = True
+        # 手动触发 = 用户明确要求重试: 复位摘要熔断器
+        self._summary_fail_streak = 0
+        self._summary_disabled = False
         keep_from = cut_point(
             self._session.messages,
             config=CompactionConfig(max_estimated_tokens=0),
@@ -760,6 +788,14 @@ class ConversationRuntime:
     # 余量, 激活后的每次迭代都会触发一次全量摘要重算。
     _COMPACT_RESUMMARY_MARGIN = 6
 
+    # 摘要熔断阈值: LLM 压缩摘要连续失败达到该次数, 本会话停用 LLM 摘要
+    # （见 _build_compact_summary; 手动 /compact 或热换 api_client 复位）
+    _SUMMARY_BREAKER_LIMIT = 3
+
+    # Session Memory 消化触发阈值: 新增消息攒够条数才值得一次后台摘要
+    # side-call（摊薄成本; 太频 = 每轮都烧一次调用, 太疏 = 压缩时覆盖不全）
+    _MEMORY_DIGEST_MIN_NEW = 16
+
     def _llm_summarize(self, archived: List[Message],
                        prev_summary: Optional[str]) -> str:
         """LLM 摘要 side-call: 把被归档的历史（或上一摘要+新归档增量）交给
@@ -768,8 +804,9 @@ class ConversationRuntime:
         - include_tools=False: 摘要器不需要工具, 也不该有工具可调;
         - emit_output=False: 摘要过程不在终端回放;
         - thinking 用 low 档: 摘要是整理不是推理, 控制耗时。
-        任何失败（端点错误/打断/空返回/客户端不支持 side-call 参数）都
-        向上抛, 由 _build_compact_summary 回退规则摘要。"""
+        配置了 utilityProvider 时走小模型 client（set_utility_client）,
+        否则跟主模型。任何失败（端点错误/打断/空返回/客户端不支持
+        side-call 参数）都向上抛, 由 _build_compact_summary 回退规则摘要。"""
         # 打断检查点: 用户已叫停时不再发起摘要 side-call——摘要要花一次
         # 完整的模型调用, 停止语义下多等它跑完违背直觉。TurnInterrupted
         # 在这里与流后打断同语义, 由调用方（run_turn 工作线程）统一收束。
@@ -782,7 +819,7 @@ class ConversationRuntime:
                 "conversation:\n\n" + prev_summary))
         conv.extend(archived)
         conv.append(Message.user_text(SUMMARY_INSTRUCTION))
-        events = self._api_client.stream(
+        events = (self._utility_client or self._api_client).stream(
             system_prompt=[SUMMARIZER_SYSTEM_PROMPT],
             messages=conv,
             thinking_level="low",
@@ -798,7 +835,22 @@ class ConversationRuntime:
     def _build_compact_summary(self, msgs: List[Message], keep_from: int) -> str:
         """生成归档区摘要: LLM 摘要为主, 任何失败回退规则摘要。已有旧摘要
         时只把增量部分（msgs[旧切割点:新切割点]）交给模型合并——重算发生在
-        会话已逼近阈值时, 全量重喂 750k 级历史既慢又贵。"""
+        会话已逼近阈值时, 全量重喂 750k 级历史既慢又贵。
+
+        熔断器: LLM 摘要连续失败 _SUMMARY_BREAKER_LIMIT 次（端点持续故障）
+        后, 本会话停用 LLM 摘要、直接走规则摘要——否则压缩激活状态下每轮
+        请求都会重试一次注定失败的 side-call, 白烧调用且拖慢响应。
+        手动 /compact 或热换 api_client 时复位（用户明确要求重试/端点已换）。"""
+        def _rule_fallback() -> str:
+            return format_compact_summary(summarize_messages(msgs[:keep_from]))
+
+        if self._summary_disabled:
+            return _rule_fallback()
+        # Session Memory 中间层（零调用路径）: 后台滚动摘要已覆盖归档区
+        # → 直接当压缩结果, 现场摘要 side-call 都不用发
+        mem = self._session_memory
+        if mem.summary and mem.digested >= keep_from:
+            return mem.summary
         prev_summary: Optional[str] = None
         archived = msgs[:keep_from]
         if self._compact_cache is not None:
@@ -806,13 +858,71 @@ class ConversationRuntime:
             if 0 < cached_cut < keep_from:
                 prev_summary = cached_summary
                 archived = msgs[cached_cut:keep_from]
+        # 滚动摘要覆盖了归档区前段且比压缩缓存更新: 当增量起点用,
+        # 现场摘要只喂 digested 之后的剩余部分
+        if (mem.summary and 0 < mem.digested < keep_from
+                and mem.digested > (self._compact_cache[0]
+                                    if self._compact_cache else 0)):
+            prev_summary = mem.summary
+            archived = msgs[mem.digested:keep_from]
         try:
-            return self._llm_summarize(archived, prev_summary)
+            summary = self._llm_summarize(archived, prev_summary)
         except TurnInterrupted:
             raise   # 用户打断: 不做规则摘要兜底, 直接收束本轮
         except Exception as e:
-            print(f"[WARN] llm summarize failed, fallback to rule-based: {e}")
-            return format_compact_summary(summarize_messages(msgs[:keep_from]))
+            self._summary_fail_streak += 1
+            if self._summary_fail_streak >= self._SUMMARY_BREAKER_LIMIT:
+                self._summary_disabled = True
+                print(f"[WARN] llm summarize 连续失败 "
+                      f"{self._summary_fail_streak} 次, 本会话停用 LLM 压缩摘要, "
+                      f"改用规则摘要（手动 /compact 复位）")
+            else:
+                print(f"[WARN] llm summarize failed, fallback to rule-based: {e}")
+            return _rule_fallback()
+        self._summary_fail_streak = 0
+        return summary
+
+    # --- Session Memory 中间层: 后台增量维护滚动摘要 ---
+    # （三层体系: MicroCompact 清旧结果 → 这里预建摘要 → 现场全量摘要兜底;
+    #   详见 compact.SessionMemory）
+
+    def _kick_session_memory_update(self) -> None:
+        """轮次收束后拉起后台消化。单飞行（正在消化就跳过, 下轮再攒）、
+        攒够 _MEMORY_DIGEST_MIN_NEW 条增量才动。守护线程: 进程退出不等它,
+        摘要丢了也只是回落现场摘要。"""
+        with self._guard_lock:
+            if self._memory_busy:
+                return
+            if not self._session_memory.digest_due(
+                    len(self._session.messages), self._MEMORY_DIGEST_MIN_NEW):
+                return
+            self._memory_busy = True
+        threading.Thread(target=self._run_session_memory_update,
+                         daemon=True, name="session-memory").start()
+
+    def _run_session_memory_update(self) -> None:
+        """后台消化: 把未消化消息增量合并进滚动摘要。走 _llm_summarize
+        side-call（不进会话历史、无工具、不回放——自然不存在"摘要任务
+        触发压缩"的递归）。失败放弃本批, 指针不动, 下轮重试。"""
+        try:
+            msgs = self._session.messages
+            while True:
+                start = self._session_memory.digested
+                end = len(msgs)
+                if end - start < self._MEMORY_DIGEST_MIN_NEW:
+                    break
+                # 快照: 消化期间历史可能继续增长, 多出的部分留给下一轮
+                chunk = list(msgs[start:end])
+                merged = self._llm_summarize(
+                    chunk, self._session_memory.summary or None)
+                if not merged:
+                    break
+                self._session_memory.summary = merged
+                self._session_memory.digested = end
+        except Exception as e:
+            print(f"[WARN] session memory digest failed (retry next turn): {e}")
+        finally:
+            self._memory_busy = False
 
     def _microcompact_view(self, view: List[Message]) -> List[Message]:
         """MicroCompact: 估算 token 超过软阈值时, 把保留窗口之外的可复现
@@ -836,9 +946,17 @@ class ConversationRuntime:
             if i in keep:
                 continue
             m, block = out[i], out[i].content[0]
-            if block.output == MICROCOMPACT_PLACEHOLDER:
+            if block.output.startswith(MICROCOMPACT_PLACEHOLDER):
                 continue
-            new_block = block.model_copy(update={"output": MICROCOMPACT_PLACEHOLDER})
+            # 占位符带落盘路径（若原文有）: 被清掉的旧结果可经 read_file 找回,
+            # 不再是黑洞。延迟导入防环——tools 依赖 runtime 的 ToolError。
+            from tools import resumable_spill_path
+            spill = resumable_spill_path(block.output)
+            placeholder = MICROCOMPACT_PLACEHOLDER
+            if spill:
+                placeholder += (f"\n[Full output saved to `{spill}` — recover "
+                                "with read_file (offset/limit) if needed.]")
+            new_block = block.model_copy(update={"output": placeholder})
             out[i] = m.model_copy(update={"content": [new_block]})
             changed = True
             cleared.append((block.name or "", block.id))
@@ -1161,6 +1279,10 @@ class ConversationRuntime:
 
         if self._maybe_auto_compact():
             auto_compacted = True
+
+        # 空闲点: 本轮已收束, 历史一致——后台把新增消息消化进滚动摘要,
+        # 下次压缩就有机会零调用直接用
+        self._kick_session_memory_update()
 
         return TurnSummary(
             assistant_messages=assistant_messages,

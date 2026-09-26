@@ -464,6 +464,43 @@ def save_providers(cfg: dict) -> None:
         json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+# utilityProvider（settings.json 的 utilityProvider 键）: side-call（自动
+# 命名/压缩摘要/会话记忆摘要）走它指向的供应商, 主循环不动——摘要、起
+# 名这类整理型调用用便宜模型足够, 且与主循环不抢同一个 client。
+UTILITY_PROVIDER_KEY = "utilityProvider"
+
+
+def load_utility_provider() -> Optional[dict]:
+    """读 side-call 专用供应商配置。
+
+    settings.json: {"utilityProvider": {"provider": <providers 里的 id>,
+    "model": "模型名"}}。未配置 / 指向不存在或被禁用的供应商 / 缺 key 或
+    base_url = 返回 None（调用方回落主模型, 与未配置前行为一致）。
+    返回 {"api_key", "base_url", "protocol", "model"}; base_url 原样返回,
+    由调用方按协议 normalize_base_url（同 providers 主配置的口径）。"""
+    try:
+        data = json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    want = data.get(UTILITY_PROVIDER_KEY)
+    if not isinstance(want, dict):
+        return None
+    provider_id = want.get("provider")
+    prov = next((p for p in data.get("providers", [])
+                 if isinstance(p, dict) and p.get("id") == provider_id), None)
+    if not (prov and prov.get("enabled") and prov.get("api_key")
+            and str(prov.get("base_url") or "").strip()):
+        return None
+    return {
+        "api_key": prov.get("api_key"),
+        "base_url": str(prov.get("base_url") or "").strip(),
+        "protocol": prov.get("protocol"),
+        "model": str(want.get("model") or "").strip() or None,
+    }
+
+
 # 命令前缀白名单: 与供应商配置同文件（commandAllowlist 键）, 读-改-写
 # 保留其他 key。规则是 shell 词序前缀（如 "git push"、"uv run pytest"）,
 # 授权层按词对齐匹配——见 permissions.shell_command_matches_allowlist。

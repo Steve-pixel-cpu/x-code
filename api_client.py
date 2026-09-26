@@ -1,5 +1,6 @@
 import contextlib
 import json
+import re
 import subprocess
 import sys
 import threading
@@ -170,6 +171,31 @@ def normalize_protocol(value) -> str:
     if v not in KNOWN_PROTOCOLS:
         raise ValueError(f"unsupported protocol {value!r} (known: {KNOWN_PROTOCOLS})")
     return v
+
+
+_BASE_URL_V1_TAIL = re.compile(r"/v1/?$", re.IGNORECASE)
+
+
+def normalize_base_url(url, protocol: str = "anthropic") -> str:
+    """规范化供应商 base_url（按协议分规则）。CLI 与 Web 的保存/测试/应用
+    三处共用, 行为一致。
+
+    anthropic: SDK 在 base_url 后自动拼 /v1/messages, 用户照 OpenAI 习惯
+    粘贴带 /v1 的地址会请求 /v1/v1/messages → 404。统一剥掉结尾的字面
+    /v1 段与多余斜杠（智谱 /api/anthropic 这类真实路径原样保留）。
+    openai: 实际请求 URL = base_url + "/chat/completions", 版本段须由
+    用户自带（官方约定 base_url 以 /v1 结尾）。因此 /v1 原样保留、裸
+    主机补缺省 /v1, 仅去尾斜杠; 自定义前缀路径（企业网关等）原样保留。
+    """
+    text = str(url or "").strip()
+    while text.endswith("/"):
+        text = text[:-1]
+    if normalize_protocol(protocol) == "openai":
+        if not text:
+            return ""
+        rest = re.sub(r"^[a-zA-Z][a-zA-Z0-9+.-]*://", "", text)
+        return text if "/" in rest else text + "/v1"
+    return _BASE_URL_V1_TAIL.sub("", text)
 
 # 思考指示器的终端样式：暗灰色、单行原地刷新。只用于终端展示，
 # 绝不进入事件流/会话历史。

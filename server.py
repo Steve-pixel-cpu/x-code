@@ -60,6 +60,7 @@ from api_client import (
 )
 from config import (USER_DIR, SETTINGS_FILE, ConfigLoader, McpServerConfig,
                     RuntimeConfig, load_providers, save_providers,
+                    load_utility_provider,
                     load_command_allowlist, save_command_allowlist,
                     load_additional_directories, save_additional_directories,
                     load_command_denylist, save_command_denylist,
@@ -216,6 +217,11 @@ api_client = ClaudeApiClient(
     # _LiveClientProxy 客户端包装, 协议知识不再进 server）
     on_event_provider=lambda: _mirror_on_event(dispatch.current_sink()),
 )
+
+# side-call 专用 client（utilityProvider 小模型）: 自动命名/压缩摘要等
+# "整理型"调用走它, 主循环不动。None = 未配置, 回落主模型。
+# 由 _apply_provider_config 统一构建/重建（见 _rebuild_utility_client）。
+_utility_client: Optional[object] = None
 
 app = FastAPI(title="x-code web")
 
@@ -378,30 +384,10 @@ def _mirror_on_event(sink: Optional[Callable[[dict], None]]) -> Optional[WireObs
 # providers / activeProvider 两个 key）, 这里只保留运行态副本
 # ============================================================================
 
-_BASE_URL_V1_TAIL = re.compile(r"/v1/?$", re.IGNORECASE)
+# base_url 规范化已上移 api_client.normalize_base_url（CLI 装配 utilityProvider
+# 也要用）; 这里留兼容别名, 既有调用点/测试不动。
+from api_client import normalize_base_url as _normalize_base_url  # noqa: E402
 
-
-def _normalize_base_url(url, protocol: str = "anthropic") -> str:
-    """规范化供应商 base_url（按协议分规则）。
-
-    anthropic: x-code 走 anthropic SDK, 它在 base_url 后自动拼 /v1/messages;
-    用户照 OpenAI 习惯粘贴带 /v1 的地址会请求 /v1/v1/messages → 404。这里
-    统一剥掉结尾的字面 /v1 段与多余斜杠（智谱 /api/anthropic 这类真实路径
-    原样保留）。保存/测试/应用三处都过这一道, 行为一致。
-
-    openai: openai SDK 实际请求 URL = base_url + "/chat/completions", 版本
-    段须由用户自带（官方约定 base_url 以 /v1 结尾）。因此 /v1 原样保留、
-    裸主机补缺省 /v1, 仅去尾斜杠; 自定义前缀路径（企业网关等）原样保留。
-    """
-    text = str(url or "").strip()
-    while text.endswith("/"):
-        text = text[:-1]
-    if normalize_protocol(protocol) == "openai":
-        if not text:
-            return ""
-        rest = re.sub(r"^[a-zA-Z][a-zA-Z0-9+.-]*://", "", text)
-        return text if "/" in rest else text + "/v1"
-    return _BASE_URL_V1_TAIL.sub("", text)
 
 
 def _provider_ready(cfg: dict) -> bool:
@@ -456,9 +442,29 @@ def _apply_provider_config(cfg: dict) -> None:
             )
     else:
         api_client.reset_to(api_key="", model="", base_url=None)
+    _rebuild_utility_client()
     # subagent worker 跟随同一份供应商配置: 每次 spawn 时实时读 api_client
     # 的连接信息（apply 在运行期可反复发生, 工厂闭包引用而非快照）
     set_api_config_provider(_subagent_api_config)
+
+
+def _rebuild_utility_client() -> None:
+    """side-call 专用 client: 主供应商配置变化时一并重建。未配置/无效 =
+    None, side-call 回落主模型（与未配置前一致）。既有会话 runtime 持有
+    的旧引用随下次 load_runtime_for 刷新——热更新分钟级生效, 不追即时。"""
+    global _utility_client
+    uprov = load_utility_provider()
+    if not uprov:
+        _utility_client = None
+        return
+    protocol = _protocol_of(uprov)
+    _utility_client = make_api_client(
+        protocol, api_key=uprov.get("api_key") or "",
+        model=uprov.get("model") or api_client.model or "",
+        base_url=_normalize_base_url(uprov.get("base_url"), protocol=protocol) or None,
+        tools=TOOLS, emit_output=False,
+        thinking_level="low",
+    )
 
 
 def _subagent_api_config() -> tuple[str, Optional[str], str, str]:
@@ -878,6 +884,8 @@ def load_runtime_for(web_session: WebSession) -> None:
     # deny 规则与用户敏感路径: 与 CLI 同源 settings.json, 组装即生效
     web_session.runtime.set_command_denylist(load_command_denylist())
     web_session.runtime.set_sensitive_paths(load_sensitive_paths())
+    # side-call（压缩摘要/记忆摘要）走 utilityProvider 小模型（未配置回落主模型）
+    web_session.runtime.set_utility_client(_utility_client)
     # 未经执行就被终局的工具（权限拒绝 / hook 拦截 / prompter 拒绝）:
     # 补发 tool_result 镜像, 前端工具卡才能闭合——否则永远"运行中"。
     # executed 路径不经此处（EmittingToolRegistry 已发）, 不会双发。
@@ -915,7 +923,7 @@ def _ai_title(first_text: str) -> Optional[str]:
         "不超过 16 个字，概括主题，只输出标题本身，"
         "不要引号、句号或任何解释。\n\n用户消息：" + first_text[:500]
     )
-    title_text = api_client.generate_text(
+    title_text = (_utility_client or api_client).generate_text(
         system=[], user=prompt, max_tokens=512)
     title = " ".join(title_text.split()).strip("　\"'“”「」『』。.!！?？，,；;：:")
     return title[:30] or None
