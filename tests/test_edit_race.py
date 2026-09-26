@@ -110,8 +110,15 @@ def test_编辑期间被外部修改_仍拒绝(tmp_path):
 
 
 def test_并行write与edit互斥_不互相吞(tmp_path, slowed_disk_text):
-    """write_file 与 edit_file 并发同一路径: 走同一把路径锁,
-    整写与局部编辑不互相覆盖。"""
+    """write_file 与 edit_file 并发同一路径: 走同一把路径锁串行落地,
+    不出现"双方以旧基线 V0 各写各的"的撕裂终态（这正是锁要防的）。
+
+    两种串行序都合法:
+    - W→E: write 先落, edit 在其结果上补丁 → 两个改动都在;
+    - E→W: edit 先落, write 的内容快照在并发前已定 → 整写按语义覆盖
+      edit（write_file 就是"以我给的内容为准"; 锁管不了快照新旧）。
+    本地调度稳定走 W→E, CI 走出过 E→W——断言接受两种合法终态,
+    撕裂终态（beta_v2 与 111 都不在、或出现第三种内容）仍然被拒。"""
     f = tmp_path / "a.py"
     f.write_text(V0, encoding="utf-8")
     _read(f)
@@ -134,4 +141,7 @@ def test_并行write与edit互斥_不互相吞(tmp_path, slowed_disk_text):
     assert fe.result().startswith("OK: edited")
     final = f.read_text(encoding="utf-8")
     assert "beta_v2" in final, f"write 的改动丢失: {final!r}"
-    assert "return 111" in final, f"edit 的改动丢失: {final!r}"
+    if "return 111" not in final:
+        # E→W 序: 终态必须精确等于 write 的快照（证明 edit 之后没有第三者
+        # 再动过文件）; 出现其他内容 = 真撕裂
+        assert final == V0.replace("beta", "beta_v2"), f"撕裂终态: {final!r}"
