@@ -15,6 +15,10 @@ jobs:
     # 同平台跑; Git Bash 在 windows runner 上预装
     runs-on: windows-latest
     timeout-minutes: 20
+    env:
+      # runner 管道默认 cp1252, 中文输出（evals --list 等）会直接
+      # UnicodeEncodeError——强制 UTF-8 模式（首跑实测踩坑）
+      PYTHONUTF8: "1"
     steps:
       - uses: actions/checkout@v4
 
