@@ -70,6 +70,9 @@ else
   echo "[warn] No signing key in environment - build succeeds but produces no .sig"
   echo "[warn] (this version cannot be an auto-update target)"
 fi
+# 本地安装 tauri-cli (npx 优先解析 node_modules/.bin): 全局装在 mac 的
+# npm 上 bin 解析失败 —— "could not determine executable to run" (CI 实测)
+npm install --no-save @tauri-apps/cli@2
 npx tauri build --bundles dmg,app
 
 echo "Staging artifacts into dist/..."
