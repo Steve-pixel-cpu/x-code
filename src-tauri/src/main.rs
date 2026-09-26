@@ -665,14 +665,13 @@ async fn open_pet_window(
     }
     let s = clamp_pet_scale(scale);
     let url = pet_url(&token);
-    WebviewWindowBuilder::new(
+    let builder = WebviewWindowBuilder::new(
         &app,
         "pet",
         WebviewUrl::External(url.parse().map_err(|e| format!("桌宠地址非法: {e}"))?),
     )
     .title("x-code 桌宠")
     .decorations(false)
-    .transparent(true)
     .always_on_top(true)
     .skip_taskbar(true)
     .resizable(false)
@@ -680,9 +679,14 @@ async fn open_pet_window(
     .inner_size(PET_BASE_W * s, PET_BASE_H * s)   // 基准尺寸 × 宠物大小
     // 右下角附近出生, 用户可拖到任意位置
     .position(1200.0, 600.0)
-    .visible(true)
+    .visible(true);
+    // 透明窗: transparent 方法在 macOS 的 builder 上不存在 (透明走
+    // macOSPrivateApi + 配置式窗口), v1 先接受 mac 桌宠带背景
+    #[cfg(not(target_os = "macos"))]
+    let builder = builder.transparent(true);
     // 悬浮窗自身也需要桥: startDragPet（拖动）/ petClose（双击收起）/
     // setClickThrough（右键穿透）都经 window.xcodeDesktopPet 走 IPC
+    builder
     .initialization_script(BRIDGE_JS)
     .build()
     .map_err(|e| format!("创建桌宠窗口失败: {e}"))?;
@@ -1057,25 +1061,30 @@ fn create_main_window(app: &AppHandle) -> Result<(), String> {
     // plugin:app 命令的 ACL 曾实测不放行, invoke 路线不可靠。
     let version = &app.package_info().version;
     let bridge_js = format!("window.__XCODE_VERSION__ = '{version}';\n{BRIDGE_JS}");
-    WebviewWindowBuilder::new(app, "main", WebviewUrl::App("loading.html".into()))
+    let builder = WebviewWindowBuilder::new(app, "main", WebviewUrl::App("loading.html".into()))
         .title("x-code")
         .decorations(false)   // 自绘标题栏: 高度可控, 主题跟随应用深浅色
-        // 窗口级亚克力: 窗口与 WebView2 背景透明, 桌面经 DWM ACRYLICBLURBEHIND
-        // 模糊透出。材质无条件挂载是安全的——普通深浅主题页面画的是不透明
-        // 背景, 材质被盖住不可见; 只有切到亚克力主题(页面变透明)时才透出,
-        // 主题切换无需重启壳。Win10 已知取舍: 拖动窗口时材质有轻微滞后,
-        // 不能接受可把 Effect::Acrylic 换成 Effect::Blur(无滞后, 少质感)。
+        .inner_size(1440.0, 900.0)
+        .min_inner_size(960.0, 600.0)
+        .visible(false) // 页面就绪后再显示, 避免白屏闪烁
+        .initialization_script(&bridge_js);
+    // 窗口级亚克力 (仅 Windows): 窗口与 WebView2 背景透明, 桌面经 DWM
+    // ACRYLICBLURBEHIND 模糊透出。材质无条件挂载是安全的——普通深浅主题
+    // 页面画的是不透明背景, 材质被盖住不可见; 只有切到亚克力主题(页面变
+    // 透明)时才透出, 主题切换无需重启壳。Win10 已知取舍: 拖动窗口时材质
+    // 有轻微滞后, 不能接受可把 Effect::Acrylic 换成 Effect::Blur(无滞后,
+    // 少质感)。transparent 方法在 macOS builder 上不存在 (transparent +
+    // effects 一起门控); Linux/mac 页面自绘背景, 观感不变。
+    #[cfg(windows)]
+    let builder = builder
         .transparent(true)
         .effects(WindowEffectsConfig {
             effects: vec![Effect::Acrylic],
             state: None,
             radius: None,
             color: None,
-        })
-        .inner_size(1440.0, 900.0)
-        .min_inner_size(960.0, 600.0)
-        .visible(false) // 页面就绪后再显示, 避免白屏闪烁
-        .initialization_script(&bridge_js)
+        });
+    builder
         .on_navigation(move |url| {
             let s = url.as_str();
             // 内部导航放行: 后端地址（任意端口）+ tauri 内嵌资产 + 浏览器内部页。

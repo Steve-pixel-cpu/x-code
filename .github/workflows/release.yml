@@ -2,15 +2,16 @@
 #
 # 触发:
 #   - push v* 标签 (如 v3.3.9): 三平台并行构建 → 创建 GitHub Release
-#     (Windows: NSIS 安装包; macOS: .dmg + 自动更新包 .app.tar.gz, 均带
-#      更新签名; latest.json 含全部平台条目)
+#     (Windows: NSIS 安装包; macOS: .dmg + 自动更新包 .app.tar.gz;
+#      Linux: AppImage; 均带更新签名, latest.json 含全部平台条目)
 #   - workflow_dispatch (手动): 只构建 + 传 workflow artifact, 不发 Release
 #
 # 平台矩阵:
-#   build-windows      windows-latest  NSIS 安装包 (build-exe.cmd tauri)
-#   build-mac aarch64  macos-latest    Apple Silicon .dmg/.app.tar.gz
-#   build-mac x64      macos-13        Intel .dmg/.app.tar.gz
-# (PyInstaller 无法跨平台构建, mac arch 由 runner 决定)
+#   build-windows  windows-latest   NSIS 安装包 (build-exe.cmd tauri)
+#   build-mac      macos-latest     Apple Silicon .dmg/.app.tar.gz
+#   build-linux    ubuntu-latest    AppImage
+# (PyInstaller 无法跨平台构建, arch 由 runner 决定; mac-x64 需 macos-13
+#  Intel runner, 暂未启用——需要时把 build-mac 改回矩阵即可)
 #
 # 签名: TAURI_SIGNING_PRIVATE_KEY / _PASSWORD 仓库 Secrets (minisign 密钥
 # 跨平台通用); 缺失时构建照常成功, 只是没有 .sig (无自动更新条目)。
@@ -85,13 +86,8 @@ jobs:
             dist/*.exe.sig
 
   build-mac:
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: macos-latest     # Apple Silicon (arm64)
-          - os: macos-13         # Intel (x64)
-    runs-on: ${{ matrix.os }}
+    # Apple Silicon (arm64); Intel 需 macos-13 单独一个 job, 暂未启用
+    runs-on: macos-latest
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
@@ -130,16 +126,68 @@ jobs:
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: dist-${{ matrix.os }}
+          name: dist-macos
           if-no-files-found: error
           path: |
             dist/*.dmg
             dist/*.app.tar.gz
             dist/*.app.tar.gz.sig
 
+  build-linux:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux deps (Tauri WebKitGTK)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file \
+            libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev patchelf
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+
+      - name: Install uv
+        run: pip install uv
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Compute version from tag
+        if: github.ref_type == 'tag'
+        shell: bash
+        run: echo "RELEASE_VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+
+      - name: Build (PyInstaller backend + Tauri AppImage)
+        shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: bash scripts/build-linux-tauri.sh "$RELEASE_VERSION"
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-linux
+          if-no-files-found: error
+          path: |
+            dist/*.AppImage
+            dist/*.AppImage.sig
+
   release:
     # 汇总: 下载三平台产物 → 合并生成多平台 latest.json → 创建 Release
-    needs: [build-windows, build-mac]
+    needs: [build-windows, build-mac, build-linux]
     if: github.ref_type == 'tag'
     runs-on: ubuntu-latest
     timeout-minutes: 10
