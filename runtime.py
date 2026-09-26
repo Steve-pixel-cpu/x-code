@@ -96,6 +96,26 @@ REPEAT_DENIED_TEXT = (
     "this call."
 )
 
+# --- 变异感知的 shell 重复提醒（与上面只读护栏互补） ---
+# 只读命令重跑"结果必然一致"→ 可拒绝; 变异命令（跑测试等）重跑本身合法
+# （代码可能变了）, 不能拒。要抓的反模式更窄: 同一条命令原样重发且中间
+# 没有任何写动作——输出大概率一致, 纯烧轮次。应对 = 温和提醒, 永不拒绝
+# （网络类命令的重试/轮询有正当的重跑场景, 误拒代价更大）。
+SHELL_REPEAT_WARN_ON = 2
+SHELL_REPEAT_STRONG_ON = 3
+SHELL_REPEAT_WARN_TEXT = (
+    "[System note] This exact command already ran with no file changes in "
+    "between — its output is almost certainly identical to the one you "
+    "already have. If you are waiting for a different result, change the "
+    "relevant code first, or investigate from a different angle."
+)
+SHELL_REPEAT_STRONG_TEXT = (
+    "[System note] This exact command has now run 3+ times with no file "
+    "changes in between. Repeating it cannot produce new information: stop "
+    "re-running, act on the evidence already in this conversation, or make "
+    "the code/config change you actually intend — then re-run once."
+)
+
 def _read_guard_key(tool_name: str, tool_input: str):
     """护栏记账键。read_file 做路径规范化: normpath 折叠 ./ 与分隔符,
     normcase 按平台处理大小写（Windows 文件系统不敏感→统一小写; POSIX
@@ -443,6 +463,9 @@ class ConversationRuntime:
         # 键为 _read_guard_key 的产出（read_file 是规范化路径+范围, 其余是
         # 精确输入）, 值为 (执行次数, 记账时的变异序号)
         self._read_calls: dict[tuple, tuple[int, int]] = {}
+        # 变异型 shell 命令的"无改动连击": 键同上, 值为 (连击数, 上次执行
+        # 完成时的变异序号)。中间有任意写动作即断连击——重跑合法
+        self._shell_streaks: dict[tuple, tuple[int, int]] = {}
         # 本回合调用时钟: 所有工具调用都 +1（与变异判定解耦——sqlcmd/
         # python 这类"可能改状态"的命令恰是排查螺旋的主力, 若挂在只读
         # 连击上会被反复清零, 检查点在唯一需要它的地方失明, 见
@@ -627,11 +650,15 @@ class ConversationRuntime:
             ), None
         return None, pre_res
 
-    def _register_read_call(self, tool_name: str, tool_input: str) -> Optional[int]:
-        """护栏记账 + 只读连击计数。纯读工具返回本次是第几次执行（1=首次）;
+    def _register_read_call(self, tool_name: str, tool_input: str) -> tuple[Optional[int], int]:
+        """护栏记账 + 只读连击计数 + 变异感知的 shell 重复记账。
+        返回 (read_repeat_n, shell_streak):
+        - read_repeat_n: 纯读工具本次是第几次执行（1=首次）, 其余 None;
+        - shell_streak: 变异型 shell 命令的"无改动连击"次数（1=首次或已被
+          写入介入打断）, 其余 0——连击由 _execute_tool 附加提醒, 不拒绝。
         bash/powershell 只读命令不清零计数（ls/grep/git log 类探查不该
         让护栏失忆——实测 bash 密集的会话里旧规则把护栏清成名存实亡）,
-        其余工具推进变异序号、清零连击, 返回 None。并行执行下持锁串行记账。"""
+        其余工具推进变异序号。并行执行下持锁串行记账。"""
         readonly = tool_name in PURE_READ_TOOLS or (
             tool_name in MUTATING_SHELL_TOOLS
             and shell_command_is_read_only(tool_name, tool_input))
@@ -644,12 +671,24 @@ class ConversationRuntime:
                 count += 1
                 self._read_calls[key] = (count, self._mutation_seq)
                 self._turn_call_clock += 1
-                return count
+                return count, 0
+        if tool_name in MUTATING_SHELL_TOOLS and not readonly:
+            key = _read_guard_key(tool_name, tool_input)
+            with self._guard_lock:
+                self._turn_call_clock += 1
+                prev_streak, prev_exit_seq = self._shell_streaks.get(key, (0, None))
+                # 记的是"上次执行完成时的序号"（含其自身 +1）: 与本次执行前
+                # 的序号相等 ⟺ 两次之间没有任何其他写动作
+                streak = (prev_streak + 1 if prev_exit_seq == self._mutation_seq
+                          else 1)
+                self._mutation_seq += 1     # 本条命令自身推进变异序号
+                self._shell_streaks[key] = (streak, self._mutation_seq)
+            return None, streak
         with self._guard_lock:
             self._turn_call_clock += 1
             if not readonly:
                 self._mutation_seq += 1
-        return None
+        return None, 0
 
     def _maybe_conclusion_checkpoint(self, msgs: List[Message],
                                      question: str) -> None:
@@ -680,7 +719,7 @@ class ConversationRuntime:
         """执行管线: 工具本体 + Pre/Post hook 反馈合并 + 重复只读护栏。
         无其他共享可变状态, 同一条消息里相互独立的 tool_use 可由 run_turn
         并发调度（护栏状态自身持锁）。"""
-        repeat_n = self._register_read_call(tool_block.name, tool_block.input)
+        repeat_n, shell_streak = self._register_read_call(tool_block.name, tool_block.input)
         if repeat_n is not None and repeat_n >= REPEAT_DENY_FROM:
             # 拒绝执行: 结果已在历史里, 拒绝零损失。is_error 让模型把它
             # 当反馈读, 而不是当成又一次"成功但没看懂"的结果。
@@ -717,6 +756,11 @@ class ConversationRuntime:
         if repeat_n is not None and repeat_n >= REPEAT_WARN_ON:
             # 第 2 次: 结果照常给（容忍一次健忘）, 但把"再犯会被拒"说明白
             output = f"{output}\n\n{REPEAT_WARN_TEXT}"
+        if shell_streak >= SHELL_REPEAT_WARN_ON:
+            # 无改动重跑变异命令: 只提醒不拒绝（重跑本身合法, 提醒纠偏）
+            output = (f"{output}\n\n" + (SHELL_REPEAT_STRONG_TEXT
+                                         if shell_streak >= SHELL_REPEAT_STRONG_ON
+                                         else SHELL_REPEAT_WARN_TEXT))
 
         # result_meta 随消息落盘, Web 端历史回放可重建富展示（diff 等）。
         # 内部 Message/持久化层认识它, API 序列化 (_convert_message) 忽略之。
@@ -770,9 +814,11 @@ class ConversationRuntime:
             return False
         self._compact_active = True
         # 旧只读结果可能已被归档出模型视图: 重读重新合法, 护栏清零重记;
-        # 压缩后模型需要重新取证, 调用时钟与检查点一并清零留出宽限期
+        # shell 无改动连击同理（旧输出可能已不可见）; 压缩后模型需要重新
+        # 取证, 调用时钟与检查点一并清零留出宽限期
         with self._guard_lock:
             self._read_calls.clear()
+            self._shell_streaks.clear()
             self._turn_call_clock = 0
             self._checkpoint_mark = 0
         if self._on_compacted is not None:
@@ -996,6 +1042,8 @@ class ConversationRuntime:
                 name, inp = entry
                 key = _read_guard_key(name, inp)
                 self._read_calls.pop(key, None)
+                # 结果已被清出视图: 无改动重跑重见输出是合法诉求, 连击归零
+                self._shell_streaks.pop(key, None)
                 if name == "read_file" and len(key) > 2:
                     dead = [k for k in self._read_calls
                             if k[0] == "read_file" and k[1] == key[1]]

@@ -292,6 +292,12 @@ class SystemPromptBuilder:
             # 接着干而不是从头再查。
             "Work from evidence already in the conversation: never re-read "
             "files or re-run commands whose results you can already see.",
+            # 合批纪律: 轮次是递增计价的——每多一轮, 全部历史重新计价一遍。
+            # 改一行测一遍、独立读取拆成多轮, 都是纯浪费
+            "Batch your work: complete all planned edits before running the "
+            "checks once, send independent reads/searches together in one "
+            "block instead of one per turn, and never re-run a command "
+            "whose inputs have not changed.",
             # 写文件纪律: 整写毁文件的实测教训——改一处却被 write_file 整覆盖
             "Editing discipline: for targeted changes use edit_file "
             "(old_string → new_string replacement) — it touches nothing "
